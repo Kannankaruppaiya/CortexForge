@@ -135,10 +135,11 @@ class FastDeterministicEmbeddingProvider(EmbeddingProvider):
 class OpenAIEmbeddingProvider(EmbeddingProvider):
     """OpenAI API embedding provider using async HTTP client."""
 
-    def __init__(self, api_key: str | None = None, model: str = "text-embedding-3-small") -> None:
+    def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
-        self._model = model
-        self._dim = 1536 if "large" not in model else 3072
+        # CORTEX_EMBEDDING_MODEL is documented, so it must select the model.
+        self._model = model or os.environ.get("CORTEX_EMBEDDING_MODEL") or "text-embedding-3-small"
+        self._dim = 3072 if "large" in self._model else 1536
 
     @property
     def model_name(self) -> str:

@@ -554,15 +554,89 @@ def mcp() -> None:
     mcp_main()
 
 
+@cli.command(help="Check this project's documentation against what it actually contains.")
+@click.argument("root", default=".", required=False)
+@click.option(
+    "--strict",
+    is_flag=True,
+    default=False,
+    help="Exit non-zero when any drift is found, for use in CI.",
+)
+def integrity(root: str, strict: bool) -> None:
+    """Report contradictions between a project's claims and its artifacts.
+
+    CortexForge treats repository text as untrusted input. Its own README is
+    repository text, so the same check applies to itself (specification
+    section 46).
+    """
+    from cortexforge.apps.api.main import app
+    from cortexforge.integrity import ProjectIntegrityChecker
+
+    report = ProjectIntegrityChecker(root).check(api_paths=set(app.openapi()["paths"]))
+
+    if report.is_consistent:
+        console.print(
+            Panel(
+                f"No documentation drift detected across "
+                f"{len(report.checks_run)} check(s).",
+                title="Project Integrity",
+                border_style="green",
+            )
+        )
+        return
+
+    table = Table(title="Documentation Drift", border_style="yellow")
+    table.add_column("Severity", style="bold")
+    table.add_column("Check", style="cyan")
+    table.add_column("Claimed", style="yellow")
+    table.add_column("Actual", style="magenta")
+    table.add_column("Finding", style="white")
+
+    for finding in report.findings:
+        table.add_row(
+            finding.severity,
+            finding.check,
+            finding.claimed or "-",
+            finding.actual or "-",
+            finding.summary,
+        )
+    console.print(table)
+
+    if strict:
+        sys.exit(1)
+
+
 @cli.command(help="Start the FastAPI REST gateway server.")
-@click.option("--host", default="127.0.0.1", help="Host interface to bind")
-@click.option("--port", default=8000, type=int, help="Port to listen on")
+@click.option(
+    "--host",
+    default=None,
+    help="Host interface to bind. Defaults to CORTEX_HOST, then 127.0.0.1.",
+)
+@click.option(
+    "--port",
+    default=None,
+    type=int,
+    help="Port to listen on. Defaults to CORTEX_PORT, then 8000.",
+)
 @click.option("--reload", is_flag=True, default=False, help="Enable auto-reload")
-def serve(host: str, port: int, reload: bool) -> None:
-    """Launch REST API server."""
+def serve(host: str | None, port: int | None, reload: bool) -> None:
+    """Launch the REST API server.
+
+    An explicit flag beats the environment, which beats the default. The
+    environment variables are documented in `.env.example`, and a documented
+    variable that nothing reads is a lie about how the software is configured.
+    """
     import uvicorn
-    console.print(f"[bold green]Starting CortexForge REST API on http://{host}:{port}[/]")
-    uvicorn.run("cortexforge.apps.api.main:app", host=host, port=port, reload=reload)
+
+    bind_host = host or os.environ.get("CORTEX_HOST") or "127.0.0.1"
+    bind_port = port or int(os.environ.get("CORTEX_PORT") or 8000)
+
+    console.print(
+        f"[bold green]Starting CortexForge REST API on http://{bind_host}:{bind_port}[/]"
+    )
+    uvicorn.run(
+        "cortexforge.apps.api.main:app", host=bind_host, port=bind_port, reload=reload
+    )
 
 
 if __name__ == "__main__":

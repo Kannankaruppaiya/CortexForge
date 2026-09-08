@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -38,12 +39,36 @@ class MetricsSnapshot:
     cache_hit_rate_pct: float = 0.0
 
 
+# Telemetry modes. `CORTEX_TELEMETRY` is documented in .env.example, so it is
+# read here and its effect is reported honestly: `otlp` export is not implemented,
+# and a request for it produces a warning rather than being silently ignored. A
+# configuration flag that appears to work while doing nothing is worse than one
+# that says it is unavailable.
+TELEMETRY_DISABLED = "disabled"
+TELEMETRY_OTLP = "otlp"
+SUPPORTED_TELEMETRY_MODES = frozenset({TELEMETRY_DISABLED})
+
+
+def configured_telemetry_mode() -> str:
+    """The telemetry mode this environment requests."""
+    return os.environ.get("CORTEX_TELEMETRY", TELEMETRY_DISABLED).strip().lower()
+
+
 class MetricsCollector:
     """Thread-safe in-process metrics aggregator with sanitization guarantees."""
 
     _instance: "MetricsCollector | None" = None
 
     def __init__(self) -> None:
+        self.telemetry_mode = configured_telemetry_mode()
+        if self.telemetry_mode not in SUPPORTED_TELEMETRY_MODES:
+            logger.warning(
+                "CORTEX_TELEMETRY is set to %r, but only %s is implemented. Metrics "
+                "are collected in-process and exposed at /api/v1/metrics; nothing is "
+                "exported.",
+                self.telemetry_mode,
+                ", ".join(sorted(SUPPORTED_TELEMETRY_MODES)),
+            )
         self._start_time = time.time()
         self._requests_count = 0
         self._request_latencies: list[float] = []

@@ -131,9 +131,13 @@ CONTENT: The authentication layer enforces stateless JWT verification with redis
 class OpenAIProvider(LLMProvider):
     """OpenAI API provider."""
 
-    def __init__(self, api_key: str | None = None, default_model: str = "gpt-4o-mini") -> None:
+    def __init__(self, api_key: str | None = None, default_model: str | None = None) -> None:
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
-        self._default_model = default_model
+        # CORTEX_LLM_MODEL is documented in .env.example, so it must actually
+        # select the model rather than being decoration.
+        self._default_model = (
+            default_model or os.environ.get("CORTEX_LLM_MODEL") or "gpt-4o-mini"
+        )
 
     @property
     def provider_name(self) -> str:

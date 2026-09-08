@@ -244,15 +244,32 @@ cortex eval mutations
 ## 🧪 Testing
 
 ```bash
-# Run all 51 unit and integration tests
-uv run pytest tests/ -v
+# Unit, integration, contract, property and evaluation suites
+pytest -v
 
-# Run type check and linting
+# Only the property-based invariants (idempotency, isolation, authority ordering)
+pytest tests/property -v
+
+# Only the adversarial and temporal benchmarks
+pytest tests/evaluation -v
+
+# The schema must be buildable from migrations alone, as it is on a fresh deploy
+pytest tests/contract -v
+
+# Lint
 ruff check src tests
 ```
+
+The suite is deliberately not described by a fixed count here: a number in prose
+goes stale the moment a test is added, and `cortex integrity` will report it when
+it does.
 
 ---
 
 ## 📜 License
 
-MIT License. Designed and built with production rigor for the open-source developer tooling ecosystem.
+Apache-2.0, as declared in `pyproject.toml`.
+
+> **Note:** the repository does not yet contain a `LICENSE` file. `cortex integrity`
+> reports this, because a declared license that is not distributed with the code
+> is a claim the repository cannot back up.
