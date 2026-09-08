@@ -174,13 +174,24 @@ async def run_project_benchmark(
             results_dict[mode] = {
                 "mode": res.mode,
                 "files_explored": res.files_explored,
+                "files_inspected": res.files_inspected,
                 "input_tokens": res.input_tokens,
                 "output_tokens": res.output_tokens,
+                "total_tokens": res.total_tokens,
                 "tool_calls": res.tool_calls,
                 "duration_ms": round(res.duration_ms, 2),
+                "latency_ms": round(res.latency_ms, 2),
+                "estimated_cost_usd": res.estimated_cost_usd,
                 "repeated_failures": res.repeated_failures,
                 "success": res.success,
+                "task_success": res.task_success,
+                "retrieval_precision": res.retrieval_precision,
+                "retrieval_recall": res.retrieval_recall,
+                "stale_retrieval_rate": res.stale_retrieval_rate,
+                "context_usefulness": res.context_usefulness,
+                "provenance_correctness": res.provenance_correctness,
             }
+
         out.append({
             "task_id": sc.task_id,
             "task_name": sc.task_name,

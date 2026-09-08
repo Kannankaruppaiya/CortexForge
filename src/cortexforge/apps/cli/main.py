@@ -139,9 +139,43 @@ def scan(path: str, incremental: bool, name: str | None) -> None:
     asyncio.run(_do_scan())
 
 
+@cli.command(help="Perform full clean rebuild and recovery of project cognitive model.")
+@click.argument("project_ref", default=".", required=False)
+def rebuild(project_ref: str) -> None:
+    """Recover from inconsistent/corrupted index with clean full rebuild."""
+    from cortexforge.jobs.manager import JobRecord
+    from cortexforge.jobs.tasks import rebuild_project_task
+
+    async def _do_rebuild() -> None:
+        await init_db()
+        async with session_scope() as session:
+            project = await _get_project_or_exit(session, project_ref)
+            console.print(f"[bold yellow]Initiating clean rebuild for project:[/] {project.name}")
+
+            job = JobRecord(id="rebuild_manual", job_type="REBUILD", project_id=project.id)
+            with console.status("[bold blue]Purging stale index and rebuilding AST model...[/]"):
+                res = await rebuild_project_task(job)
+
+            table = Table(title=f"Rebuild Summary: {project.name}", border_style="green")
+            table.add_column("Metric", style="bold white")
+            table.add_column("Value", style="green")
+
+            table.add_row("Files Re-indexed", str(res["files_scanned"]))
+            table.add_row("Entities Extracted", str(res["entities_extracted"]))
+            table.add_row("Relationships Mapped", str(res["relationships_extracted"]))
+            table.add_row("Memories Verified", str(res["memories_verified"]))
+            table.add_row("Stale Memories", str(res["memories_stale"]))
+            table.add_row("Architecture Modules", str(res["modules_mapped"]))
+            table.add_row("Status", f"[bold green]{res['status']}[/]")
+            console.print(table)
+
+    asyncio.run(_do_rebuild())
+
+
 @cli.command(help="Display synthesized project structural architecture.")
 @click.argument("project_ref", default=".", required=False)
 @click.option("--depth", default=2, type=int, help="Traversal depth")
+
 def architecture(project_ref: str, depth: int) -> None:
     """Show project architecture tree and components."""
     async def _do_arch() -> None:

@@ -19,6 +19,9 @@ from cortexforge.core.models import (
 )
 from cortexforge.core.schemas import MemoryCreate
 from cortexforge.embeddings.provider import EmbeddingProvider, get_embedding_provider
+from cortexforge.memory.confidence import ConfidenceScorer
+from cortexforge.memory.conflict_resolver import ConflictResolver
+from cortexforge.memory.lifecycle import MemoryLifecycleManager, MemoryState
 from cortexforge.security.redactor import sanitize_text
 
 
@@ -37,8 +40,13 @@ def cosine_similarity(v1: list[float], v2: list[float]) -> float:
 class MemoryService:
     """Core memory engine managing layered project memory and lifecycle."""
 
-    def __init__(self, embedding_provider: EmbeddingProvider | None = None) -> None:
+    def __init__(
+        self,
+        embedding_provider: EmbeddingProvider | None = None,
+        conflict_resolver: ConflictResolver | None = None,
+    ) -> None:
         self.embedding_provider = embedding_provider or get_embedding_provider()
+        self.conflict_resolver = conflict_resolver or ConflictResolver()
 
     async def create_memory(
         self, session: AsyncSession, project_id: str, payload: MemoryCreate
@@ -52,20 +60,39 @@ class MemoryService:
         # Generate embedding for sanitized memory content
         embed_res = await self.embedding_provider.embed_text(f"{sanitized_title}\n{sanitized_content}")
 
-        status = "ACTIVE" if payload.importance >= 0.3 else "UNVERIFIED"
+        # Compute explainable confidence if default or ungrounded
+        confidence = payload.confidence
+        if confidence >= 1.0 and payload.source_type not in ("verified_code", "code"):
+            conf_res = ConfidenceScorer.calculate_confidence(
+                source_type=payload.source_type,
+                evidences=payload.evidence,
+                status="ACTIVE",
+            )
+            confidence = conf_res.score
+
+        # Explicit cognitive layer
+        layer = (payload.layer or "L1").upper()
+        status = MemoryState.ACTIVE.value if payload.importance >= 0.3 else MemoryState.UNVERIFIED.value
+
         memory = Memory(
             project_id=project_id,
+            layer=layer,
             memory_type=payload.memory_type.upper(),
             title=sanitized_title,
             content=sanitized_content,
             summary=sanitized_summary,
             status=status,
-            confidence=1.0,
+            confidence=confidence,
             importance=payload.importance,
+            freshness_score=payload.freshness_score,
             source_type=payload.source_type,
             source_reference=payload.source_reference,
+            source_commit=payload.source_commit,
             created_by=payload.created_by,
             version=1,
+            supersedes_id=payload.supersedes_id,
+            superseded_by_id=payload.superseded_by_id,
+            conflict_group=payload.conflict_group,
             embedding={"vector": embed_res.vector},
             embedding_model=embed_res.model,
             embedding_version=embed_res.version,
@@ -112,13 +139,25 @@ class MemoryService:
                     source_type=ev.source_type,
                     source_id=ev.source_id,
                     file_path=ev.file_path,
+                    symbol_id=ev.symbol_id,
                     commit_sha=ev.commit_sha,
                     line_start=ev.line_start,
                     line_end=ev.line_end,
                     evidence_hash=ev_hash,
+                    snippet_hash=ev.snippet_hash or ev_hash,
+                    ast_fingerprint=ev.ast_fingerprint,
                     confidence=ev.confidence,
                 )
                 session.add(ev_obj)
+            await session.flush()
+
+        # Check and resolve semantic contradictions against existing memories
+        await self.conflict_resolver.check_and_resolve(
+            session=session,
+            project_id=project_id,
+            candidate_memory=memory,
+            candidate_vector=embed_res.vector,
+        )
 
         await session.commit()
         await session.refresh(memory)
@@ -173,20 +212,29 @@ class MemoryService:
         await session.refresh(memory)
         return memory
 
-    async def deprecate_memory(
+    async def transition_memory_status(
         self,
         session: AsyncSession,
         memory_id: str,
+        new_status: str,
+        reason: str,
         superseded_by_id: str | None = None,
-        reason: str = "Explicitly deprecated",
+        conflict_group: str | None = None,
     ) -> Memory | None:
-        """Mark memory as deprecated and link superseding memory if given."""
+        """Safely transition memory status adhering to finite state machine rules."""
         memory = await self.get_memory(session, memory_id)
         if not memory:
             return None
 
-        memory.status = "DEPRECATED"
-        memory.updated_at = datetime.now(UTC)
+        ver = MemoryLifecycleManager.transition(
+            memory,
+            new_state=new_status,
+            reason=reason,
+            superseded_by_id=superseded_by_id,
+            conflict_group=conflict_group,
+        )
+        if ver:
+            session.add(ver)
 
         if superseded_by_id:
             rel = MemoryRelation(
@@ -197,24 +245,31 @@ class MemoryService:
             )
             session.add(rel)
 
-        ver = MemoryVersion(
-            memory_id=memory.id,
-            version=memory.version + 1,
-            previous_version=memory.version,
-            content=memory.content,
-            change_reason=f"Deprecated: {reason}",
-        )
-        memory.version += 1
-        session.add(ver)
-
         await session.commit()
         await session.refresh(memory)
         return memory
+
+    async def deprecate_memory(
+        self,
+        session: AsyncSession,
+        memory_id: str,
+        superseded_by_id: str | None = None,
+        reason: str = "Explicitly deprecated",
+    ) -> Memory | None:
+        """Mark memory as superseded or archived via lifecycle manager."""
+        return await self.transition_memory_status(
+            session=session,
+            memory_id=memory_id,
+            new_status=MemoryState.SUPERSEDED.value,
+            reason=reason,
+            superseded_by_id=superseded_by_id,
+        )
 
     async def list_memories(
         self,
         session: AsyncSession,
         project_id: str,
+        layer: str | None = None,
         memory_type: str | None = None,
         status: str | None = None,
         min_importance: float = 0.0,
@@ -227,6 +282,8 @@ class MemoryService:
             .options(selectinload(Memory.evidences))
             .where(Memory.project_id == project_id)
         )
+        if layer:
+            stmt = stmt.where(Memory.layer == layer.upper())
         if memory_type:
             stmt = stmt.where(Memory.memory_type == memory_type.upper())
         if status:
@@ -297,3 +354,30 @@ class MemoryService:
     async def get_constraints(self, session: AsyncSession, project_id: str) -> list[Memory]:
         """Fetch operational and architectural constraints."""
         return await self.list_memories(session, project_id, memory_type="CONSTRAINT", status="ACTIVE")
+
+    async def resolve_project_conflicts(
+        self, session: AsyncSession, project_id: str
+    ) -> list[Any]:
+        """Run batch conflict resolution over all active/unverified memories in project."""
+        stmt = (
+            select(Memory)
+            .where(
+                Memory.project_id == project_id,
+                Memory.status.in_([MemoryState.ACTIVE.value, MemoryState.UNVERIFIED.value]),
+            )
+            .order_by(Memory.created_at.asc())
+        )
+        res = await session.execute(stmt)
+        mems = list(res.scalars().all())
+
+        all_detections = []
+        for mem in mems:
+            detections = await self.conflict_resolver.check_and_resolve(
+                session=session,
+                project_id=project_id,
+                candidate_memory=mem,
+            )
+            all_detections.extend(detections)
+
+        await session.commit()
+        return all_detections

@@ -42,9 +42,12 @@ export const MemoryExplorer: React.FC<MemoryExplorerProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedType, setSelectedType] = useState('ALL');
   const [selectedStatus, setSelectedStatus] = useState('ALL');
+  const [selectedLayer, setSelectedLayer] = useState('ALL');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [actionInProgress, setActionInProgress] = useState<string | null>(null);
+
+  const memoryLayers = ['ALL', 'L0', 'L1', 'L2', 'L3', 'L4', 'L5', 'L6'];
 
   const memoryTypes = [
     'ALL',
@@ -58,7 +61,7 @@ export const MemoryExplorer: React.FC<MemoryExplorerProps> = ({
     'EPISODE',
   ];
 
-  const memoryStatuses = ['ALL', 'ACTIVE', 'STALE', 'CONFLICTED', 'DEPRECATED'];
+  const memoryStatuses = ['ALL', 'ACTIVE', 'STALE', 'CONFLICTED', 'SUPERSEDED', 'DEPRECATED'];
 
   const filteredMemories = memories.filter((m) => {
     const matchesSearch =
@@ -69,9 +72,11 @@ export const MemoryExplorer: React.FC<MemoryExplorerProps> = ({
 
     const matchesType = selectedType === 'ALL' || m.memory_type === selectedType;
     const matchesStatus = selectedStatus === 'ALL' || m.status === selectedStatus;
+    const matchesLayer = selectedLayer === 'ALL' || (m.layer || 'L1').toUpperCase() === selectedLayer;
 
-    return matchesSearch && matchesType && matchesStatus;
+    return matchesSearch && matchesType && matchesStatus && matchesLayer;
   });
+
 
   const handleCopyId = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -127,11 +132,32 @@ export const MemoryExplorer: React.FC<MemoryExplorerProps> = ({
           </div>
         </div>
 
-        {/* Filter Pills */}
+        {/* Layer Pills */}
         <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-800/80">
           <span className="text-xs font-medium text-slate-400 flex items-center gap-1.5 mr-2">
-            <Filter className="w-3.5 h-3.5" /> Type:
+            <Filter className="w-3.5 h-3.5" /> Layer:
           </span>
+          {memoryLayers.map((l) => (
+            <button
+              key={l}
+              onClick={() => setSelectedLayer(l)}
+              className={`text-xs px-2.5 py-1 rounded-md transition font-mono ${
+                selectedLayer === l
+                  ? 'bg-blue-600 text-white font-semibold shadow-sm'
+                  : 'bg-slate-800/80 text-slate-400 hover:text-slate-200 hover:bg-slate-700/80 border border-slate-800'
+              }`}
+            >
+              {l}
+            </button>
+          ))}
+        </div>
+
+        {/* Filter Pills */}
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs font-medium text-slate-400 flex items-center gap-1.5 mr-2">
+            Type:
+          </span>
+
           {memoryTypes.map((t) => (
             <button
               key={t}
@@ -207,6 +233,10 @@ export const MemoryExplorer: React.FC<MemoryExplorerProps> = ({
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-[11px] font-mono font-bold px-2 py-0.5 rounded bg-blue-950/60 text-blue-300 border border-blue-800/80">
+                        {mem.layer || 'L1'}
+                      </span>
+
                       <span
                         className={`text-[11px] font-mono px-2 py-0.5 rounded border uppercase tracking-wider font-semibold ${style.bg} ${style.text} ${style.border}`}
                       >
@@ -228,9 +258,20 @@ export const MemoryExplorer: React.FC<MemoryExplorerProps> = ({
                           <ShieldAlert className="w-3 h-3" /> CONFLICTED
                         </span>
                       )}
+                      {mem.status === 'SUPERSEDED' && (
+                        <span className="flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded bg-purple-950/40 text-purple-400 border border-purple-800/60">
+                          <Archive className="w-3 h-3" /> SUPERSEDED
+                        </span>
+                      )}
                       {mem.status === 'DEPRECATED' && (
                         <span className="flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700">
                           <Archive className="w-3 h-3" /> DEPRECATED
+                        </span>
+                      )}
+
+                      {mem.conflict_group && (
+                        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-red-950/50 text-red-300 border border-red-800/50">
+                          Conflict: {mem.conflict_group}
                         </span>
                       )}
 
@@ -238,6 +279,7 @@ export const MemoryExplorer: React.FC<MemoryExplorerProps> = ({
                         v{mem.version}
                       </span>
                     </div>
+
 
                     <h4 className="text-sm font-semibold text-slate-200 truncate">
                       {mem.title}
@@ -298,6 +340,36 @@ export const MemoryExplorer: React.FC<MemoryExplorerProps> = ({
                 {/* Expanded Drawer */}
                 {isExpanded && (
                   <div className="p-4 bg-slate-950/70 border-t border-slate-800 space-y-4">
+                    {/* Lineage & Provenance Metadata */}
+                    {(mem.supersedes_id || mem.superseded_by_id || mem.source_commit || mem.conflict_group) && (
+                      <div className="p-2.5 bg-slate-900/90 rounded-lg border border-slate-800 text-xs font-mono flex flex-wrap gap-4 text-slate-400">
+                        {mem.source_commit && (
+                          <div>
+                            <span className="text-slate-500">Source Commit:</span>{' '}
+                            <span className="text-indigo-300 font-semibold">{mem.source_commit.substring(0, 10)}</span>
+                          </div>
+                        )}
+                        {mem.supersedes_id && (
+                          <div>
+                            <span className="text-slate-500">Supersedes:</span>{' '}
+                            <span className="text-amber-400 font-semibold">{mem.supersedes_id.substring(0, 8)}...</span>
+                          </div>
+                        )}
+                        {mem.superseded_by_id && (
+                          <div>
+                            <span className="text-slate-500">Superseded By:</span>{' '}
+                            <span className="text-purple-400 font-semibold">{mem.superseded_by_id.substring(0, 8)}...</span>
+                          </div>
+                        )}
+                        {mem.conflict_group && (
+                          <div>
+                            <span className="text-slate-500">Conflict Group:</span>{' '}
+                            <span className="text-rose-400 font-semibold">{mem.conflict_group}</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     {/* Content */}
                     <div>
                       <div className="text-xs font-mono uppercase tracking-wider text-slate-500 mb-1.5 font-semibold">
@@ -327,6 +399,11 @@ export const MemoryExplorer: React.FC<MemoryExplorerProps> = ({
                                 <span className="text-slate-200 font-medium truncate">
                                   {ev.file_path}
                                 </span>
+                                {ev.symbol_id && (
+                                  <span className="text-indigo-400 text-[10px] px-1 py-0.5 bg-indigo-950/60 rounded border border-indigo-800/40">
+                                    #{ev.symbol_id}
+                                  </span>
+                                )}
                                 {ev.line_start && (
                                   <span className="text-slate-500">
                                     L{ev.line_start}{ev.line_end ? `-${ev.line_end}` : ''}
@@ -348,12 +425,13 @@ export const MemoryExplorer: React.FC<MemoryExplorerProps> = ({
                         </div>
                       ) : (
                         <div className="text-xs text-slate-500 italic p-2 bg-slate-900/40 rounded border border-slate-800">
-                          No direct code file evidences attached.
+                          No direct code evidences attached.
                         </div>
                       )}
                     </div>
 
                     {/* Metadata Footer */}
+
                     <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-800/80 text-[11px] font-mono text-slate-500">
                       <div>Created by: <span className="text-slate-400">{mem.created_by}</span> ({new Date(mem.created_at).toLocaleString()})</div>
                       <div>

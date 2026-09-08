@@ -26,21 +26,54 @@ async def test_evaluation_runner_suite(sample_repo, test_session: AsyncSession):
 
     for card in scorecards:
         assert card.task_id.startswith("BENCH-")
-        assert "Baseline" in card.results
-        assert "NaiveRAG" in card.results
-        assert "FlatMemory" in card.results
-        assert "CortexForge" in card.results
+        # Verify all 7 modes are computed
+        for mode_key in [
+            "A_NoMemory",
+            "B_NaiveVectorRAG",
+            "C_FlatConversational",
+            "D_CortexRetrievalOnly",
+            "E_CortexWithProvenance",
+            "F_CortexWithChangePropagation",
+            "G_FullCortexForge",
+        ]:
+            assert mode_key in card.results
 
-        base_res = card.results["Baseline"]
-        cortex_res = card.results["CortexForge"]
+        base_res = card.results["A_NoMemory"]
+        cortex_res = card.results["G_FullCortexForge"]
 
-        # CortexForge must explore fewer files than Baseline (H1)
-        assert cortex_res.files_explored < base_res.files_explored
+        # Full CortexForge must explore fewer files than Baseline
+        assert cortex_res.files_inspected < base_res.files_inspected
         assert card.exploration_reduction_pct > 50.0
 
-        # CortexForge must consume fewer input tokens than Baseline (H2)
+        # Full CortexForge must consume fewer input tokens than Baseline
         assert cortex_res.input_tokens < base_res.input_tokens
         assert card.token_reduction_pct > 40.0
 
-        # CortexForge must have 0 repeated failures (H3)
+        # Full CortexForge must have 0 repeated failures
         assert cortex_res.repeated_failures == 0
+
+
+@pytest.mark.asyncio
+async def test_evaluation_ablation_study(sample_repo, test_session: AsyncSession):
+    """Verify that ablation mode correctly adjusts component telemetry."""
+    from cortexforge.evaluation.runner import AblationType
+
+    project = Project(
+        name="AblationRepo",
+        local_path=sample_repo,
+        status="ACTIVE",
+    )
+    test_session.add(project)
+    await test_session.commit()
+    await test_session.refresh(project)
+
+    runner = EvaluationRunner()
+    scorecards = await runner.run_benchmark(
+        test_session, project.id, ablation=AblationType.WITHOUT_FAILURES
+    )
+
+    card = scorecards[0]
+    # Without failure memory, repeated failure rate increases
+    cortex_res = card.results["G_FullCortexForge"]
+    assert cortex_res.repeated_failures == 1
+

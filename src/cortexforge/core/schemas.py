@@ -1,9 +1,47 @@
 """Pydantic v2 Schemas for CortexForge API & Domain Contracts."""
 
 from datetime import datetime
+from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+
+
+class CognitiveLayer(str, Enum):
+    L0 = "L0"  # Project Identity
+    L1 = "L1"  # Structural Architecture
+    L2 = "L2"  # Conventions & Patterns
+    L3 = "L3"  # Decisions & Rationale
+    L4 = "L4"  # Failures & Post-Mortems
+    L5 = "L5"  # Durable Lessons
+    L6 = "L6"  # Active Working State
+
+
+class MemoryStatus(str, Enum):
+    CANDIDATE = "CANDIDATE"
+    UNVERIFIED = "UNVERIFIED"
+    ACTIVE = "ACTIVE"
+    STALE = "STALE"
+    CONFLICTED = "CONFLICTED"
+    SUPERSEDED = "SUPERSEDED"
+    INVALIDATED = "INVALIDATED"
+    ARCHIVED = "ARCHIVED"
+
+
+class MemoryType(str, Enum):
+    FACT = "FACT"
+    DECISION = "DECISION"
+    CONSTRAINT = "CONSTRAINT"
+    EPISODE = "EPISODE"
+    FAILURE = "FAILURE"
+    FIX = "FIX"
+    ARCHITECTURE = "ARCHITECTURE"
+    CONVENTION = "CONVENTION"
+    GOAL = "GOAL"
+    LESSON = "LESSON"
+    WARNING = "WARNING"
+    TASK_STATE = "TASK_STATE"
+    SKILL = "SKILL"
 
 
 class ProjectBase(BaseModel):
@@ -121,10 +159,13 @@ class MemoryEvidenceRead(BaseModel):
     source_type: str
     source_id: str | None = None
     file_path: str
+    symbol_id: str | None = None
     commit_sha: str | None = None
     line_start: int | None = None
     line_end: int | None = None
     evidence_hash: str
+    snippet_hash: str | None = None
+    ast_fingerprint: str | None = None
     confidence: float
     created_at: datetime
 
@@ -135,28 +176,39 @@ class MemoryEvidenceCreate(BaseModel):
     source_type: str = "code"
     source_id: str | None = None
     file_path: str
+    symbol_id: str | None = None
     commit_sha: str | None = None
     line_start: int | None = None
     line_end: int | None = None
     evidence_hash: str | None = None
+    snippet_hash: str | None = None
+    ast_fingerprint: str | None = None
     confidence: float = 1.0
 
 
 class MemoryCreate(BaseModel):
-    memory_type: str = Field(..., description="FACT, DECISION, CONSTRAINT, EPISODE, FAILURE, etc.")
+    layer: str = Field("L1", description="Cognitive layer L0, L1, L2, L3, L4, L5, L6")
+    memory_type: str = Field(..., description="FACT, DECISION, CONSTRAINT, EPISODE, FAILURE, FIX, etc.")
     title: str = Field(..., max_length=255)
     content: str
     summary: str
     importance: float = Field(0.5, ge=0.0, le=1.0)
+    confidence: float = Field(1.0, ge=0.0, le=1.0)
+    freshness_score: float = Field(1.0, ge=0.0, le=1.0)
     source_type: str = "code"
     source_reference: str | None = None
+    source_commit: str | None = None
     created_by: str = "agent"
+    supersedes_id: str | None = None
+    superseded_by_id: str | None = None
+    conflict_group: str | None = None
     evidence: list[MemoryEvidenceCreate] | None = None
 
 
 class MemoryRead(BaseModel):
     id: str
     project_id: str
+    layer: str = "L1"
     memory_type: str
     title: str
     content: str
@@ -164,10 +216,15 @@ class MemoryRead(BaseModel):
     status: str
     confidence: float
     importance: float
+    freshness_score: float = 1.0
     source_type: str
     source_reference: str | None = None
+    source_commit: str | None = None
     created_by: str
     version: int
+    supersedes_id: str | None = None
+    superseded_by_id: str | None = None
+    conflict_group: str | None = None
     created_at: datetime
     updated_at: datetime
     last_verified_at: datetime | None = None

@@ -38,3 +38,37 @@ def test_neutralize_prompt_injection():
     assert "Ignore all previous instructions" not in sanitized
     assert "[NEUTRALIZED_SYSTEM_PROMPT_DELIMITER]" in sanitized
     assert "[NEUTRALIZED_INSTRUCTION_OVERRIDE]" in sanitized
+
+
+def test_path_security_traversal_prevention(tmp_path):
+    import pytest
+
+    from cortexforge.security.path_safety import PathSecurity, PathSecurityError
+
+    root = tmp_path / "project_root"
+    root.mkdir()
+    safe_file = root / "src" / "main.py"
+    safe_file.parent.mkdir()
+    safe_file.write_text("print('hello')")
+
+    # Valid subpath
+    resolved = PathSecurity.safe_resolve(root, "src/main.py")
+    assert resolved == str(safe_file.resolve())
+    assert PathSecurity.is_safe_subpath(root, "src/main.py") is True
+
+    # Path traversal attempt with ../
+    with pytest.raises(PathSecurityError):
+        PathSecurity.safe_resolve(root, "../../etc/passwd")
+
+    assert PathSecurity.is_safe_subpath(root, "../../etc/passwd") is False
+
+
+def test_trust_level_hierarchy():
+    from cortexforge.security.trust import TrustLevel, get_trust_authority
+
+    # Verified code > Git > Documentation > Agent observation > Untrusted
+    assert get_trust_authority(TrustLevel.VERIFIED_CODE) > get_trust_authority(TrustLevel.GIT)
+    assert get_trust_authority(TrustLevel.GIT) > get_trust_authority(TrustLevel.DOCUMENTATION)
+    assert get_trust_authority(TrustLevel.DOCUMENTATION) > get_trust_authority(TrustLevel.AGENT_OBSERVATION)
+    assert get_trust_authority(TrustLevel.AGENT_OBSERVATION) > get_trust_authority(TrustLevel.UNTRUSTED_REPOSITORY_TEXT)
+

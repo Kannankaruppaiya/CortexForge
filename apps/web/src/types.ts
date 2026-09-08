@@ -47,26 +47,35 @@ export interface MemoryEvidence {
   id: string;
   source_type: string;
   file_path: string;
+  symbol_id?: string;
   commit_sha?: string;
   line_start?: number;
   line_end?: number;
   confidence: number;
+  ast_fingerprint?: string;
+  snippet_hash?: string;
 }
 
 export interface Memory {
   id: string;
   project_id: string;
+  layer?: 'L0' | 'L1' | 'L2' | 'L3' | 'L4' | 'L5' | 'L6' | string;
   memory_type: string;
   title: string;
   content: string;
   summary: string;
-  status: 'ACTIVE' | 'STALE' | 'CONFLICTED' | 'DEPRECATED' | 'UNVERIFIED' | 'ARCHIVED';
+  status: 'ACTIVE' | 'STALE' | 'CONFLICTED' | 'SUPERSEDED' | 'DEPRECATED' | 'UNVERIFIED' | 'ARCHIVED';
   confidence: number;
   importance: number;
+  freshness_score?: number;
   source_type: string;
   source_reference?: string;
+  source_commit?: string;
   created_by: string;
   version: number;
+  supersedes_id?: string;
+  superseded_by_id?: string;
+  conflict_group?: string;
   created_at: string;
   updated_at: string;
   last_verified_at?: string;
@@ -82,3 +91,4 @@ export interface ChangeImpactReport {
   critical_constraints: string[];
   warnings: string[];
 }
+

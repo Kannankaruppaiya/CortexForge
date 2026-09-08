@@ -84,6 +84,9 @@ cortex doctor
 # Index local repository with incremental Tree-sitter AST scanner
 cortex scan .
 
+# Clean state recovery and full index rebuild (if index corrupted or out of sync)
+cortex rebuild .
+
 # Inspect synthesized architecture map
 cortex architecture
 
@@ -97,6 +100,7 @@ cortex context "Fix refresh token rotation race condition" --profile medium
 
 # Launch Developer Web Dashboard and REST API
 cortex serve --port 8000
+
 ```
 
 Open `http://localhost:8000` in your browser to view the interactive Developer Web Dashboard.
@@ -190,23 +194,29 @@ curl http://localhost:8000/health
 
 ---
 
-## 📊 Empirical Evaluation & Benchmark Results
+## 📊 Empirical Evaluation & Benchmark Suite
 
-CortexForge was evaluated across 20 real-world developer tasks using a 4-way comparative test harness:
+The research evaluation harness executes reproducible, empirical comparison across 7 agent configurations:
 
-| Metric | Baseline (No Memory) | Naive Vector RAG | Flat Conversational Memory | CortexForge Cognitive Model | Improvement |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Exploratory Files Read** | 14.6 files | 8.4 files | 4.9 files | **1.2 files** | **91.8% reduction** |
-| **Context Tokens per Task**| 24,500 tokens | 16,200 tokens | 9,800 tokens | **2,850 tokens** | **88.4% reduction** |
-| **Tool Calls per Task**    | 6.8 calls | 4.2 calls | 2.8 calls | **1.4 calls** | **79.4% reduction** |
-| **Repeat Known Failures**  | 42% of tasks | 31% of tasks | 18% of tasks | **0.0% of tasks** | **100% prevented** |
-| **Task Success Rate**      | 68% | 76% | 84% | **96%** | **+28% higher** |
+- **Mode A (No Memory)**: Zero context; full blind exploratory code reading.
+- **Mode B (Naive Vector RAG)**: Arbitrary 500-token chunk retrieval without AST grounding or verification.
+- **Mode C (Flat Conversational Memory)**: Concatenated recent chat summaries without layers or structure.
+- **Mode D (CortexForge Retrieval Only)**: BM25 + Vector hybrid retrieval without graph propagation.
+- **Mode E (CortexForge + Provenance)**: Hybrid retrieval with evidence hashes, source commits, and symbol IDs.
+- **Mode F (CortexForge + Change Propagation)**: Mode E + Tree-sitter semantic AST diffs and symbol-level invalidation.
+- **Mode G (Full CortexForge)**: Mode F + conflict resolution (polarity arbitration) + safe consolidation + token-budgeted context.
 
-Run the benchmarks locally on your repository:
+### Controlled Ablation Studies
+Run controlled ablation runs to isolate the impact of individual cognitive components:
+`cortex benchmark --ablation [without_graph | without_provenance | without_freshness | without_failures | without_change_propagation | without_consolidation | without_semantic_ast_diff]`
+
+> **⚠️ NOTE: UNVERIFIED CLAIM NOTICE**  
+> Any preliminary target metric that cannot be directly reproduced from a live benchmark run is classified as **UNVERIFIED**. CortexForge never reports hardcoded or synthetic results as established fact. Run `cortex benchmark` locally to output timestamped JSON logs in `benchmarks/results/`.
 
 ```bash
 cortex benchmark .
 ```
+
 
 ---
 

@@ -10,7 +10,14 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from cortexforge.apps.api.main import app
-from cortexforge.apps.mcp.server import project_get_architecture, project_get_component
+from cortexforge.apps.mcp.server import (
+    memory_get_lessons,
+    project_get_architecture,
+    project_get_component,
+    task_complete,
+    task_record_event,
+    task_start,
+)
 from cortexforge.code_intelligence.scanner import RepositoryScanner
 from cortexforge.core.db import get_db_session
 from cortexforge.core.models import Base, Project
@@ -185,3 +192,23 @@ async def test_mcp_tools(sample_repo):
     comp_text = await project_get_component("AuthService", sample_repo)
     assert "AuthService" in comp_text
     assert "auth.py" in comp_text
+
+    # task_start tool
+    start_res = await task_start("Refactor login verification", project_id_or_path=sample_repo)
+    assert "Task started:" in start_res
+    task_id = start_res.split("`")[1]
+
+    # task_record_event tool
+    ev_res = await task_record_event(task_id, event_type="TOOL_CALLED", tool_name="search_symbols")
+    assert "Recorded tool call" in ev_res
+
+    # task_complete tool
+    comp_res = await task_complete(
+        task_id, success=True, lesson_learned="Always salt hashes before hashing in AuthService"
+    )
+    assert "COMPLETED" in comp_res
+
+    # memory_get_lessons tool
+    lessons_res = await memory_get_lessons(sample_repo)
+    assert "Durable Lessons" in lessons_res
+    assert "AuthService" in lessons_res

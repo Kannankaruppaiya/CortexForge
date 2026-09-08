@@ -10,7 +10,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from cortexforge.apps.api.routes import github, graph, memories, projects, retrieval
+from cortexforge.apps.api.routes import (
+    github,
+    graph,
+    jobs,
+    memories,
+    projects,
+    retrieval,
+)
 from cortexforge.core.db import init_db
 from cortexforge.core.schemas import HealthResponse
 
@@ -43,6 +50,7 @@ app.include_router(graph.router, prefix="/api/v1")
 app.include_router(memories.router, prefix="/api/v1")
 app.include_router(retrieval.router, prefix="/api/v1")
 app.include_router(github.router, prefix="/api/v1")
+app.include_router(jobs.router, prefix="/api/v1")
 
 
 @app.get("/health", response_model=HealthResponse, tags=["health"])
@@ -55,6 +63,14 @@ async def health_check() -> HealthResponse:
         version="0.1.0",
         timestamp=datetime.now(UTC),
     )
+
+
+@app.get("/api/v1/metrics", tags=["observability"])
+async def get_metrics():
+    """Retrieve runtime performance telemetry and counters."""
+    from cortexforge.observability.metrics import MetricsCollector
+    return MetricsCollector.get_instance().get_snapshot()
+
 
 
 # Serve Developer Web Dashboard if built in apps/web/dist

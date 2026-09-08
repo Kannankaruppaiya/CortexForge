@@ -5,6 +5,7 @@ import os
 from mcp.server.mcpserver import MCPServer
 from sqlalchemy import func, select
 
+from cortexforge.agent.orchestrator import AgentWorkflowOrchestrator
 from cortexforge.code_intelligence.change_propagator import SemanticChangePropagator
 from cortexforge.code_intelligence.scanner import RepositoryScanner
 from cortexforge.core.db import init_db, session_scope
@@ -34,6 +35,13 @@ consolidation_engine = MemoryConsolidationEngine(memory_service=memory_service)
 retrieval_engine = HybridRetrievalEngine(graph_service=graph_service)
 context_composer = ContextComposer(retrieval_engine=retrieval_engine, graph_service=graph_service)
 change_propagator = SemanticChangePropagator(graph_service=graph_service)
+orchestrator = AgentWorkflowOrchestrator(
+    memory_service=memory_service,
+    composer=context_composer,
+    propagator=change_propagator,
+    verifier=verification_engine,
+    consolidator=consolidation_engine,
+)
 
 
 async def _resolve_project(session, project_id_or_path: str) -> Project | None:
@@ -447,6 +455,29 @@ async def memory_get_constraints(project_id_or_path: str = ".") -> str:
         return "\n".join(lines)
 
 
+@mcp_server.tool(
+    name="memory_get_lessons",
+    description="Returns all active durable lessons, conventions, and engineering rules (L5).",
+)
+async def memory_get_lessons(project_id_or_path: str = ".") -> str:
+    """Fetch durable lessons and engineering principles."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(session, project_id_or_path)
+        if not project:
+            return f"Error: Project could not be resolved for '{project_id_or_path}'."
+
+        lessons = await memory_service.list_memories(session, project.id, layer="L5", status="ACTIVE")
+        if not lessons:
+            return f"No durable lessons recorded for project '{project.name}'."
+
+        lines = [f"# Durable Lessons for {project.name} ({len(lessons)})"]
+        for l in lessons:
+            lines.append(f"- **{l.title}**: {l.summary}")
+            lines.append(f"  *Lesson Details*: {l.content}")
+        return "\n".join(lines)
+
+
 # ==================== 3. GRAPH & CHANGE IMPACT TOOLS ====================
 
 @mcp_server.tool(
@@ -588,6 +619,94 @@ async def task_record_failure(
         evidence_file=component,
         project_id_or_path=project_id_or_path,
     )
+
+
+@mcp_server.tool(
+    name="task_start",
+    description="Initiates an AI agent task session, generates token-budgeted cognitive context, and begins event tracking.",
+)
+async def task_start(
+    task_text: str,
+    agent_id: str = "generic_agent",
+    profile: str = "medium",
+    target_files: list[str] | None = None,
+    project_id_or_path: str = ".",
+) -> str:
+    """Start task and generate project cognitive context packet."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(session, project_id_or_path)
+        if not project:
+            return f"Error: Project could not be resolved for '{project_id_or_path}'."
+
+        task, context = await orchestrator.start_task(
+            session=session,
+            project_id=project.id,
+            task_text=task_text,
+            agent_id=agent_id,
+            profile=profile,
+            target_files=target_files,
+        )
+        return f"Task started: `{task.id}` (Status: {task.status})\n\n{context}"
+
+
+@mcp_server.tool(
+    name="task_record_event",
+    description="Records an agent event (tool call, file change, test result) during task execution.",
+)
+async def task_record_event(
+    task_id: str,
+    event_type: str,
+    tool_name: str | None = None,
+    file_path: str | None = None,
+    status: str | None = None,
+    details: str | None = None,
+) -> str:
+    """Record agent activity event."""
+    await init_db()
+    async with session_scope() as session:
+        ev_upper = event_type.upper()
+        if "TOOL" in ev_upper and tool_name:
+            await orchestrator.record_tool_call(session, task_id=task_id, tool_name=tool_name, tool_result=details)
+            return f"Recorded tool call '{tool_name}' for task '{task_id}'."
+        elif "FILE" in ev_upper and file_path:
+            impact = await orchestrator.record_file_change(session, task_id=task_id, file_path=file_path)
+            return f"Recorded file change '{file_path}'. Flagged {len(impact.memories_flagged_stale)} stale memories."
+        elif "TEST" in ev_upper:
+            await orchestrator.record_test_result(
+                session, task_id=task_id, test_name=tool_name or "test", status=status or "PASSED", error_text=details
+            )
+            return f"Recorded test result for task '{task_id}'."
+        else:
+            await orchestrator.record_tool_call(session, task_id=task_id, tool_name=event_type, tool_result=details)
+            return f"Recorded event '{event_type}' for task '{task_id}'."
+
+
+@mcp_server.tool(
+    name="task_complete",
+    description="Concludes an agent task, reverifies memories against updated files, and records durable lessons.",
+)
+async def task_complete(
+    task_id: str,
+    success: bool = True,
+    lesson_learned: str | None = None,
+    token_input: int = 0,
+    token_output: int = 0,
+) -> str:
+    """Complete agent task and update project cognitive model."""
+    await init_db()
+    async with session_scope() as session:
+        task = await orchestrator.complete_task(
+            session=session,
+            task_id=task_id,
+            success=success,
+            lesson_learned=lesson_learned,
+            token_input=token_input,
+            token_output=token_output,
+        )
+        if not task:
+            return f"Task with ID '{task_id}' not found."
+        return f"Task '{task_id}' marked {task.status} (Success: {task.success}). Memory model verified."
 
 
 @mcp_server.tool(

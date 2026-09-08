@@ -171,6 +171,9 @@ class Memory(Base):
     project_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
     )
+    layer: Mapped[str] = mapped_column(
+        String(10), default="L1", server_default="L1", nullable=False
+    )  # L0, L1, L2, L3, L4, L5, L6 (discrete from memory_type)
     memory_type: Mapped[str] = mapped_column(
         String(50), nullable=False
     )  # FACT, DECISION, CONSTRAINT, EPISODE, FAILURE, FIX, ARCHITECTURE, CONVENTION, GOAL, LESSON, WARNING, TASK_STATE, SKILL
@@ -178,16 +181,25 @@ class Memory(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(
-        String(50), default="ACTIVE", nullable=False
-    )  # ACTIVE, STALE, CONFLICTED, DEPRECATED, UNVERIFIED, ARCHIVED
+        String(50), default="ACTIVE", server_default="ACTIVE", nullable=False
+    )  # CANDIDATE, UNVERIFIED, ACTIVE, STALE, CONFLICTED, SUPERSEDED, INVALIDATED, ARCHIVED
     confidence: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
     importance: Mapped[float] = mapped_column(Float, default=0.5, nullable=False)
+    freshness_score: Mapped[float] = mapped_column(Float, default=1.0, server_default="1.0", nullable=False)
     source_type: Mapped[str] = mapped_column(
         String(50), default="code", nullable=False
     )  # code, git, test, agent_observation, doc, user
     source_reference: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_by: Mapped[str] = mapped_column(String(100), default="system", nullable=False)
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    supersedes_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("memories.id", ondelete="SET NULL"), nullable=True
+    )
+    superseded_by_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("memories.id", ondelete="SET NULL"), nullable=True
+    )
+    conflict_group: Mapped[str | None] = mapped_column(String(64), nullable=True)
     embedding: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     embedding_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     embedding_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
@@ -211,10 +223,18 @@ class Memory(Base):
     versions: Mapped[list["MemoryVersion"]] = relationship(
         "MemoryVersion", back_populates="memory", cascade="all, delete-orphan", lazy="selectin"
     )
+    supersedes: Mapped["Memory | None"] = relationship(
+        "Memory", foreign_keys=[supersedes_id], remote_side=[id], post_update=True
+    )
+    superseded_by: Mapped["Memory | None"] = relationship(
+        "Memory", foreign_keys=[superseded_by_id], remote_side=[id], post_update=True
+    )
 
     __table_args__ = (
+        Index("idx_mem_project_layer", "project_id", "layer"),
         Index("idx_mem_project_type", "project_id", "memory_type"),
         Index("idx_mem_project_status", "project_id", "status"),
+        Index("idx_mem_project_conflict", "project_id", "conflict_group"),
     )
 
 
@@ -230,16 +250,28 @@ class MemoryEvidence(Base):
     source_type: Mapped[str] = mapped_column(String(50), nullable=False)
     source_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     file_path: Mapped[str] = mapped_column(Text, nullable=False)
+    symbol_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("code_entities.id", ondelete="SET NULL"), nullable=True
+    )
     commit_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
     line_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
     line_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
     evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    snippet_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ast_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     confidence: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
 
     memory: Mapped["Memory"] = relationship("Memory", back_populates="evidences")
+    symbol: Mapped["CodeEntity | None"] = relationship("CodeEntity", foreign_keys=[symbol_id])
+
+    __table_args__ = (
+        Index("idx_ev_memory", "memory_id"),
+        Index("idx_ev_symbol", "symbol_id"),
+        Index("idx_ev_file", "file_path"),
+    )
 
 
 class MemoryRelation(Base):
@@ -308,7 +340,7 @@ class AgentTask(Base):
 
     project: Mapped["Project"] = relationship("Project", back_populates="agent_tasks")
     events: Mapped[list["AgentEvent"]] = relationship(
-        "AgentEvent", back_populates="task", cascade="all, delete-orphan"
+        "AgentEvent", back_populates="task", cascade="all, delete-orphan", lazy="selectin"
     )
 
 

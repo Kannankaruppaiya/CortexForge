@@ -23,6 +23,7 @@ import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from cortexforge.agent.orchestrator import AgentWorkflowOrchestrator
 from cortexforge.code_intelligence.change_propagator import SemanticChangePropagator
 from cortexforge.code_intelligence.scanner import RepositoryScanner
 from cortexforge.core.models import Base, Memory, Project
@@ -292,3 +293,74 @@ async def test_end_to_end_cognitive_lifecycle(synthetic_repo, e2e_session: Async
     # Warning should flag the stale Redis decision
     assert "Potentially Stale Memories Detected" in final_context
     assert "Redis" in final_context
+
+    # ----------------------------------------------------
+    # Step 12: Conflict Resolution & Supersession
+    # ----------------------------------------------------
+    # Add a memory that directly contradicts the earlier Redis decision
+    contradiction_memory = await mem_service.create_memory(
+        e2e_session,
+        project.id,
+        MemoryCreate(
+            memory_type="DECISION",
+            title="Redis Session Store Removed",
+            content="Redis session store was completely removed and disabled.",
+            summary="Redis session store disabled",
+            source_type="verified_code",
+            importance=0.90,
+        ),
+    )
+    # create_memory automatically ran conflict resolution against the earlier Redis decision
+    await e2e_session.refresh(decision)
+    await e2e_session.refresh(contradiction_memory)
+    assert contradiction_memory.supersedes_id == decision.id
+    assert decision.status == "SUPERSEDED"
+    assert decision.conflict_group is not None
+
+
+    # ----------------------------------------------------
+    # Step 13: Agent Workflow Orchestration & Failure Ingestion
+    # ----------------------------------------------------
+    orchestrator = AgentWorkflowOrchestrator(
+        memory_service=mem_service,
+        composer=composer,
+    )
+
+    task, ctx = await orchestrator.start_task(
+        e2e_session,
+        project_id=project.id,
+        task_text="Migrate legacy auth tokens to RSA keys",
+    )
+    assert task.id is not None
+    assert task.status == "IN_PROGRESS"
+    assert len(ctx) > 20
+
+    # Record failing test result to capture structured failure episode
+    await orchestrator.record_test_result(
+        e2e_session,
+        task_id=task.id,
+        test_name="test_rsa_token_signature",
+        status="FAILED",
+        error_text="ValueError: Invalid RSA key size 512",
+        stack_trace='File "/app/auth.py", line 42, in test_rsa\n    verify(token)\nValueError: Invalid RSA key size 512',
+    )
+
+    # Record passing fix
+    await orchestrator.record_test_result(
+        e2e_session,
+        task_id=task.id,
+        test_name="test_rsa_token_signature",
+        status="PASSED",
+    )
+
+    completed_task = await orchestrator.complete_task(
+        e2e_session,
+        task_id=task.id,
+        success=True,
+        lesson_learned="RSA token keys must be at least 2048 bits",
+    )
+    assert completed_task.status == "COMPLETED"
+    assert completed_task.success is True
+
+
+
