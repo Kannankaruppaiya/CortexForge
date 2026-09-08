@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -14,6 +15,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -206,8 +208,30 @@ class Memory(Base):
         String(50), default="ACTIVE", server_default="ACTIVE", nullable=False
     )  # CANDIDATE, UNVERIFIED, ACTIVE, STALE, CONFLICTED, SUPERSEDED, INVALIDATED, ARCHIVED
     confidence: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
+    # Persisted explanation of how `confidence` was derived (section 8). Confidence
+    # is always recomputed from these components; it is never incremented in place,
+    # so repeatedly re-checking unchanged evidence cannot inflate it.
+    confidence_components: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
     importance: Mapped[float] = mapped_column(Float, default=0.5, nullable=False)
     freshness_score: Mapped[float] = mapped_column(Float, default=1.0, server_default="1.0", nullable=False)
+    # Where this statement's entitlement to be believed comes from (section 6).
+    authority: Mapped[str] = mapped_column(
+        String(50), default="AGENT_OBSERVED", server_default="AGENT_OBSERVED", nullable=False
+    )
+    # What kind of knowledge this is (section 3). Uncertain information stays
+    # OBSERVATION / INFERENCE / HYPOTHESIS rather than being coerced into FACT.
+    epistemic_state: Mapped[str] = mapped_column(
+        String(50), default="OBSERVATION", server_default="OBSERVATION", nullable=False
+    )
+    # Branch / worktree cognition (section 19). `is_working_tree` marks knowledge
+    # observed from an uncommitted tree, which must not become durable project truth.
+    branch: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    workspace: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    is_working_tree: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", nullable=False
+    )
     source_type: Mapped[str] = mapped_column(
         String(50), default="code", nullable=False
     )  # code, git, test, agent_observation, doc, user
@@ -252,6 +276,9 @@ class Memory(Base):
     versions: Mapped[list["MemoryVersion"]] = relationship(
         "MemoryVersion", back_populates="memory", cascade="all, delete-orphan", lazy="selectin"
     )
+    claims: Mapped[list["Claim"]] = relationship(
+        "Claim", back_populates="memory", cascade="all, delete-orphan", lazy="selectin"
+    )
     supersedes: Mapped["Memory | None"] = relationship(
         "Memory", foreign_keys=[supersedes_id], remote_side=[id], post_update=True
     )
@@ -260,6 +287,10 @@ class Memory(Base):
     )
 
     __table_args__ = (
+        # Range invariants enforced by the database, not only by application code
+        # (section 47) -- a direct SQL write cannot introduce an impossible score.
+        CheckConstraint("confidence >= 0.0 AND confidence <= 1.0", name="ck_memory_confidence_range"),
+        CheckConstraint("importance >= 0.0 AND importance <= 1.0", name="ck_memory_importance_range"),
         Index("idx_mem_project_layer", "project_id", "layer"),
         Index("idx_mem_project_type", "project_id", "memory_type"),
         Index("idx_mem_project_status", "project_id", "status"),
@@ -278,6 +309,22 @@ class MemoryEvidence(Base):
         String(36), ForeignKey("memories.id", ondelete="CASCADE"), nullable=False
     )
     source_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    # Richer evidence taxonomy (section 5): evidence is more than file existence.
+    evidence_type: Mapped[str] = mapped_column(
+        String(50), default="CODE", server_default="CODE", nullable=False
+    )
+    # Negative evidence is retained, not discarded (section 5).
+    relation: Mapped[str] = mapped_column(
+        String(50), default="SUPPORTS", server_default="SUPPORTS", nullable=False
+    )
+    authority: Mapped[str] = mapped_column(
+        String(50), default="CODE_VERIFIED", server_default="CODE_VERIFIED", nullable=False
+    )
+    branch: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    workspace: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    state: Mapped[str] = mapped_column(
+        String(50), default="UNCHECKED", server_default="UNCHECKED", nullable=False
+    )
     source_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     file_path: Mapped[str] = mapped_column(Text, nullable=False)
     symbol_id: Mapped[str | None] = mapped_column(
@@ -445,6 +492,11 @@ class ChangeSet(Base):
     base_commit_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
     target_commit_sha: Mapped[str] = mapped_column(String(64), nullable=False)
     is_working_tree: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    branch: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    workspace: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # sha256 over (project, base, target, working-tree flag, sorted file set).
+    # Analysing the same change twice resolves to one logical ChangeSet (section 37).
+    idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
@@ -458,6 +510,7 @@ class ChangeSet(Base):
     )
 
     __table_args__ = (
+        UniqueConstraint("project_id", "idempotency_key", name="uq_changeset_idempotency"),
         Index("idx_changeset_project_commits", "project_id", "base_commit_sha", "target_commit_sha"),
     )
 
@@ -676,6 +729,20 @@ class ArchitectureRule(Base):
     )
     rule_name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
+    # Rule modality (section 13): MUST_NOT is the enforceable default, but MUST /
+    # SHOULD / ONLY_IF / REQUIRES are representable and carried through evaluation.
+    modality: Mapped[str] = mapped_column(
+        String(20), default="MUST_NOT", server_default="MUST_NOT", nullable=False
+    )
+    # An LLM guess must not silently become a hard architectural rule (section 13).
+    authority: Mapped[str] = mapped_column(
+        String(50), default="USER_CONFIRMED", server_default="USER_CONFIRMED", nullable=False
+    )
+    source: Mapped[str] = mapped_column(
+        String(100), default="user", server_default="user", nullable=False
+    )
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=list, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
     scope: Mapped[str] = mapped_column(String(50), default="PROJECT", nullable=False)
     severity: Mapped[str] = mapped_column(String(50), default="ERROR", nullable=False)
     forbidden_source_pattern: Mapped[str] = mapped_column(Text, nullable=False)
@@ -757,6 +824,23 @@ class CognitiveSnapshot(Base):
     conflicted_memories_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     retrieval_version: Mapped[str] = mapped_column(String(50), default="v2", nullable=False)
     embedding_version: Mapped[str] = mapped_column(String(50), default="1.0.0", nullable=False)
+    # Counts alone are not a cognitive state (section 35). These columns record the
+    # actual believed set, so "what did CortexForge believe at commit X" is answered
+    # from the snapshot rather than re-derived from present-day tables.
+    embedding_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    branch: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    workspace: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # [{memory_id, version, status, confidence, layer, memory_type}, ...]
+    memory_versions: Mapped[dict[str, Any]] = mapped_column(JSON, default=list, nullable=False)
+    # [{claim_id, status, confidence, last_outcome}, ...]
+    claim_states: Mapped[dict[str, Any]] = mapped_column(JSON, default=list, nullable=False)
+    architecture_rule_versions: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
+    verification_state: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    policy_versions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    # sha256 over the believed set; two snapshots of an unchanged state match.
+    state_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
@@ -765,4 +849,523 @@ class CognitiveSnapshot(Base):
 
     __table_args__ = (
         Index("idx_cogsnap_project_commit", "project_id", "commit_sha"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Claim / proposition layer (specification sections 4-7)
+#
+# A memory is prose. A claim is the individually evaluable proposition inside it.
+# Verification, conflict detection, temporal validity and reconciliation all operate
+# on claims, so that a memory containing one true and one falsified statement has a
+# representable state instead of being atomically "active" or "stale".
+# ---------------------------------------------------------------------------
+
+
+class Claim(Base):
+    """An independently evaluable proposition extracted from a memory."""
+
+    __tablename__ = "claims"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    memory_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("memories.id", ondelete="CASCADE"), nullable=True
+    )
+    # Human-readable proposition, normalized to one assertion.
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    # Canonical form used for logical deduplication (section 25): lowercased,
+    # stop-worded, synonym-folded, sorted token signature.
+    canonical_text: Mapped[str] = mapped_column(Text, nullable=False)
+    # sha256(project_id + scope + scope_ref + canonical_text). Two differently
+    # phrased memories asserting the same thing collapse onto one claim_key.
+    claim_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    subject: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    predicate: Mapped[str | None] = mapped_column(Text, nullable=True)
+    epistemic_state: Mapped[str] = mapped_column(
+        String(50), default="OBSERVATION", server_default="OBSERVATION", nullable=False
+    )
+    authority: Mapped[str] = mapped_column(
+        String(50), default="AGENT_OBSERVED", server_default="AGENT_OBSERVED", nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(50), default="PROPOSED", server_default="PROPOSED", nullable=False
+    )
+    scope: Mapped[str] = mapped_column(
+        String(50), default="PROJECT", server_default="PROJECT", nullable=False
+    )
+    scope_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    confidence: Mapped[float] = mapped_column(Float, default=0.5, nullable=False)
+    confidence_components: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+    # Temporal validity (section 18): a claim true at commit A and false at commit B
+    # is historical evolution, not a contradiction.
+    valid_from_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    valid_to_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    branch: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    workspace: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    last_outcome: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    last_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    superseded_by_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("claims.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+    memory: Mapped["Memory | None"] = relationship("Memory", back_populates="claims")
+    evidence_links: Mapped[list["ClaimEvidence"]] = relationship(
+        "ClaimEvidence", back_populates="claim", cascade="all, delete-orphan", lazy="selectin"
+    )
+
+    __table_args__ = (
+        # One live claim per logical proposition per branch/validity window.
+        # Enforced at the database level so deduplication cannot be bypassed by a
+        # caller that forgets to look first (section 47).
+        UniqueConstraint(
+            "project_id", "claim_key", "branch", "valid_to_commit", name="uq_claim_logical_identity"
+        ),
+        CheckConstraint("confidence >= 0.0 AND confidence <= 1.0", name="ck_claim_confidence_range"),
+        Index("idx_claim_project_status", "project_id", "status"),
+        Index("idx_claim_memory", "memory_id"),
+        Index("idx_claim_key", "project_id", "claim_key"),
+    )
+
+
+class ClaimEvidence(Base):
+    """A single piece of evidence bearing on a claim, positive or negative."""
+
+    __tablename__ = "claim_evidences"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    claim_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("claims.id", ondelete="CASCADE"), nullable=False
+    )
+    evidence_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    relation: Mapped[str] = mapped_column(
+        String(50), default="SUPPORTS", server_default="SUPPORTS", nullable=False
+    )
+    authority: Mapped[str] = mapped_column(
+        String(50), default="AGENT_OBSERVED", server_default="AGENT_OBSERVED", nullable=False
+    )
+    source: Mapped[str | None] = mapped_column(Text, nullable=True)
+    commit_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    branch: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    workspace: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    file_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    symbol_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("code_entities.id", ondelete="SET NULL"), nullable=True
+    )
+    qualified_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    line_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    line_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ast_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # sha256 over the identifying tuple; makes re-observation idempotent (section 37).
+    evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    state: Mapped[str] = mapped_column(
+        String(50), default="UNCHECKED", server_default="UNCHECKED", nullable=False
+    )
+    # Independence group: evidence items sharing a group are not counted as
+    # independent corroboration when scoring confidence (section 8).
+    independence_group: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    detail: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    claim: Mapped["Claim"] = relationship("Claim", back_populates="evidence_links")
+    symbol: Mapped["CodeEntity | None"] = relationship("CodeEntity", foreign_keys=[symbol_id])
+
+    __table_args__ = (
+        UniqueConstraint("claim_id", "evidence_hash", name="uq_claim_evidence_fingerprint"),
+        Index("idx_claimev_claim_relation", "claim_id", "relation"),
+        Index("idx_claimev_file", "file_path"),
+        Index("idx_claimev_symbol", "symbol_id"),
+    )
+
+
+class VerificationPolicy(Base):
+    """A named, versioned strategy for deciding whether a claim holds."""
+
+    __tablename__ = "verification_policies"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    project_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=True
+    )
+    name: Mapped[str] = mapped_column(String(150), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # Strategy identifier resolved by the verification engine's registry.
+    strategy: Mapped[str] = mapped_column(String(100), nullable=False)
+    # Which claims this policy applies to; NULL means any.
+    applies_to_evidence_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    applies_to_epistemic_state: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    minimum_authority: Mapped[str] = mapped_column(
+        String(50), default="AGENT_OBSERVED", server_default="AGENT_OBSERVED", nullable=False
+    )
+    parameters: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "name", "version", name="uq_verification_policy_version"),
+    )
+
+
+class VerificationRun(Base):
+    """One execution of verification over a set of claims at a point in history."""
+
+    __tablename__ = "verification_runs"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    # sha256 over (project, commit, branch, workspace, policy set, claim set).
+    # Re-running verification for an unchanged state reuses the run instead of
+    # manufacturing new evidence of freshness (sections 8 and 37).
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    commit_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    branch: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    workspace: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    verifier: Mapped[str] = mapped_column(String(100), default="system", nullable=False)
+    trigger: Mapped[str] = mapped_column(String(50), default="manual", nullable=False)
+    status: Mapped[str] = mapped_column(String(50), default="RUNNING", nullable=False)
+    claims_evaluated: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    verified_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    partially_verified_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    conflicted_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    unknown_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    not_applicable_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    results: Mapped[list["VerificationResult"]] = relationship(
+        "VerificationResult", back_populates="run", cascade="all, delete-orphan", lazy="selectin"
+    )
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "idempotency_key", name="uq_verification_run_idempotency"),
+        Index("idx_verrun_project_commit", "project_id", "commit_sha"),
+    )
+
+
+class VerificationResult(Base):
+    """The outcome of evaluating one claim under one policy, with its reasoning."""
+
+    __tablename__ = "verification_results"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("verification_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    claim_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("claims.id", ondelete="CASCADE"), nullable=False
+    )
+    policy_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("verification_policies.id", ondelete="SET NULL"), nullable=True
+    )
+    policy_name: Mapped[str] = mapped_column(String(150), default="unknown", nullable=False)
+    policy_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    outcome: Mapped[str] = mapped_column(String(50), nullable=False)
+    reason_code: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    evidence_checked: Mapped[dict[str, Any]] = mapped_column(JSON, default=list, nullable=False)
+    commit_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    branch: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    workspace: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    verifier: Mapped[str] = mapped_column(String(100), default="system", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+    run: Mapped["VerificationRun"] = relationship("VerificationRun", back_populates="results")
+
+    __table_args__ = (
+        UniqueConstraint("run_id", "claim_id", "policy_name", name="uq_verification_result_unique"),
+        Index("idx_verres_claim_created", "claim_id", "created_at"),
+        Index("idx_verres_outcome", "outcome"),
+    )
+
+
+class MemoryDecision(Base):
+    """An auditable reconciliation decision (specification section 9).
+
+    Every keep / reanchor / amend / revise / stale / conflict / supersede /
+    invalidate / unknown outcome is persisted with its reason code, the change that
+    triggered it, the evidence consulted, and the memory versions on both sides --
+    so the reasoning can be audited, replayed and benchmarked rather than inferred.
+    """
+
+    __tablename__ = "memory_decisions"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    memory_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("memories.id", ondelete="CASCADE"), nullable=False
+    )
+    claim_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("claims.id", ondelete="SET NULL"), nullable=True
+    )
+    change_set_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("change_sets.id", ondelete="SET NULL"), nullable=True
+    )
+    verification_run_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("verification_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    decision: Mapped[str] = mapped_column(String(50), nullable=False)
+    reason_code: Mapped[str] = mapped_column(String(60), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=list, nullable=False)
+    previous_status: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    new_status: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    previous_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    new_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    commit_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    branch: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    workspace: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    actor: Mapped[str] = mapped_column(String(100), default="reconciliation", nullable=False)
+    # sha256 over (memory, change_set, decision, reason_code, commit). Replaying the
+    # same change produces the same decision row rather than a duplicate.
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "idempotency_key", name="uq_memory_decision_idempotency"),
+        Index("idx_memdec_project_created", "project_id", "created_at"),
+        Index("idx_memdec_memory", "memory_id"),
+        Index("idx_memdec_changeset", "change_set_id"),
+    )
+
+
+class SuccessEpisode(Base):
+    """A recorded approach that worked (specification section 17).
+
+    CortexForge must learn from what succeeded, not only from what failed, so that a
+    future similar task can retrieve a known-good approach.
+    """
+
+    __tablename__ = "success_episodes"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    task_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("agent_tasks.id", ondelete="SET NULL"), nullable=True
+    )
+    failure_episode_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("failure_episodes.id", ondelete="SET NULL"), nullable=True
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    task_context: Mapped[str] = mapped_column(Text, nullable=False)
+    approach: Mapped[str] = mapped_column(Text, nullable=False)
+    why_it_worked: Mapped[str | None] = mapped_column(Text, nullable=True)
+    affected_files: Mapped[dict[str, Any]] = mapped_column(JSON, default=list, nullable=False)
+    affected_symbols: Mapped[dict[str, Any]] = mapped_column(JSON, default=list, nullable=False)
+    test_run_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("test_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    tests_passed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    commit_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    branch: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # sha256 over (project, task, normalized approach) so replaying an event stream
+    # records one logical success, not one per delivery.
+    signature: Mapped[str] = mapped_column(String(64), nullable=False)
+    embedding: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "signature", name="uq_success_episode_signature"),
+        Index("idx_success_project_created", "project_id", "created_at"),
+    )
+
+
+class RetrievalEvent(Base):
+    """What retrieval returned, what the agent used, and how the task turned out.
+
+    Specification section 27: without this record, retrieval policies cannot be
+    evaluated and memory usefulness cannot be learned.
+    """
+
+    __tablename__ = "retrieval_events"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    task_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("agent_tasks.id", ondelete="SET NULL"), nullable=True
+    )
+    query: Mapped[str] = mapped_column(Text, nullable=False)
+    query_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    returned_memory_ids: Mapped[dict[str, Any]] = mapped_column(JSON, default=list, nullable=False)
+    selected_memory_ids: Mapped[dict[str, Any]] = mapped_column(JSON, default=list, nullable=False)
+    used_memory_ids: Mapped[dict[str, Any]] = mapped_column(JSON, default=list, nullable=False)
+    excluded_reasons: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    stale_returned_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    conflicted_returned_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    task_outcome: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    tests_passed: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tests_failed: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    context_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    latency_ms: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    retrieval_version: Mapped[str] = mapped_column(String(50), default="v2", nullable=False)
+    embedding_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    embedding_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    memory_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+    __table_args__ = (
+        Index("idx_retrievalev_project_created", "project_id", "created_at"),
+        Index("idx_retrievalev_task", "task_id"),
+    )
+
+
+class AuditLog(Base):
+    """System-wide audit trail for cognitively significant actions (section 44)."""
+
+    __tablename__ = "audit_logs"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    project_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=True
+    )
+    actor: Mapped[str] = mapped_column(String(150), default="system", nullable=False)
+    action: Mapped[str] = mapped_column(String(100), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    resource_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    before: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    after: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+    __table_args__ = (
+        Index("idx_audit_project_created", "project_id", "created_at"),
+        Index("idx_audit_resource", "resource_type", "resource_id"),
+    )
+
+
+class WebhookDelivery(Base):
+    """Ledger of processed inbound webhook deliveries (sections 33 and 37).
+
+    Keyed on the provider's delivery identifier so a redelivered event is recognised
+    and produces no second cognitive change.
+    """
+
+    __tablename__ = "webhook_deliveries"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    provider: Mapped[str] = mapped_column(String(50), default="github", nullable=False)
+    delivery_id: Mapped[str] = mapped_column(String(150), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    project_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=True
+    )
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("provider", "delivery_id", name="uq_webhook_delivery"),
+    )
+
+
+class SymbolLineage(Base):
+    """Durable identity for a logical symbol across renames and moves (section 11).
+
+    ``logical_id`` is stable: when ``foo()`` in ``a.py`` becomes ``bar()`` in
+    ``b.py``, a new row is written with the same ``logical_id`` rather than the old
+    symbol being deleted and a new one created.
+    """
+
+    __tablename__ = "symbol_lineages"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    logical_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    entity_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("code_entities.id", ondelete="SET NULL"), nullable=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    qualified_name: Mapped[str] = mapped_column(Text, nullable=False)
+    file_path: Mapped[str] = mapped_column(Text, nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    signature: Mapped[str | None] = mapped_column(Text, nullable=True)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    change_kind: Mapped[str] = mapped_column(
+        String(50), default="OBSERVED", server_default="OBSERVED", nullable=False
+    )
+    predecessor_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("symbol_lineages.id", ondelete="SET NULL"), nullable=True
+    )
+    valid_from_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    valid_to_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    branch: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id", "logical_id", "qualified_name", "file_path", "valid_from_commit",
+            name="uq_symbol_lineage_step",
+        ),
+        Index("idx_lineage_project_logical", "project_id", "logical_id"),
+        Index("idx_lineage_project_qualified", "project_id", "qualified_name"),
     )

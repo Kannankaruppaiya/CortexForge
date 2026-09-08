@@ -475,13 +475,42 @@ async def memory_get_lessons(project_id_or_path: str = ".") -> str:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
         lessons = await memory_service.list_memories(session, project.id, layer="L5", status="ACTIVE")
-        if not lessons:
+        # Everything at L5 that is not yet established knowledge: LLM proposals
+        # awaiting review, agent observations with no code grounding, and raw
+        # candidates. They are useful leads, so they are shown -- but separately,
+        # and labelled, so an agent cannot mistake one for a project rule.
+        proposed: list = []
+        for pending_status in ("REVIEW_REQUIRED", "UNVERIFIED", "CANDIDATE"):
+            proposed.extend(
+                await memory_service.list_memories(
+                    session, project.id, layer="L5", status=pending_status
+                )
+            )
+        if not lessons and not proposed:
             return f"No durable lessons recorded for project '{project.name}'."
 
-        lines = [f"# Durable Lessons for {project.name} ({len(lessons)})"]
-        for l in lessons:
-            lines.append(f"- **{l.title}**: {l.summary}")
-            lines.append(f"  *Lesson Details*: {l.content}")
+        lines: list[str] = []
+        if lessons:
+            lines.append(f"# Durable Lessons for {project.name} ({len(lessons)})")
+            for lesson in lessons:
+                lines.append(f"- **{lesson.title}**: {lesson.summary}")
+                lines.append(f"  *Lesson Details*: {lesson.content}")
+
+        # Proposals are listed separately and labelled. An agent may find them
+        # useful as leads, but must not mistake an unreviewed synthesis for an
+        # established project rule (specification sections 23 and 43).
+        if proposed:
+            lines.append("")
+            lines.append(
+                f"# Unverified Lessons ({len(proposed)}) "
+                "-- NOT established project knowledge"
+            )
+            for lesson in proposed:
+                lines.append(
+                    f"- **{lesson.title}** [{lesson.status}, {lesson.authority}, "
+                    f"confidence {lesson.confidence:.2f}]: {lesson.summary}"
+                )
+                lines.append(f"  *Details*: {lesson.content}")
         return "\n".join(lines)
 
 

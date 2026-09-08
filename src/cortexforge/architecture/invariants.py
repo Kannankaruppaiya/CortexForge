@@ -14,7 +14,12 @@ from dataclasses import dataclass, field
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from cortexforge.core.models import ArchitectureRule, CodeEntity, Relationship, RuleViolation
+from cortexforge.core.models import (
+    ArchitectureRule,
+    CodeEntity,
+    Relationship,
+    RuleViolation,
+)
 
 
 @dataclass
@@ -59,14 +64,9 @@ class ArchitectureInvariantEngine:
         if not rules:
             return ArchitectureEvaluationResult(total_rules_evaluated=0)
 
-        # Fetch relationships joined with source and target entities
-        rels_stmt = (
-            select(Relationship, CodeEntity, CodeEntity)
-            .join(CodeEntity, Relationship.source_entity_id == CodeEntity.id)
-            .join(CodeEntity, Relationship.target_entity_id == CodeEntity.id)
-        )
-        # Note: SQLAlchemy alias or separate queries
-        # Let's query relationships and entity map for clean safety
+        # Relationships and entities are fetched separately and joined in memory:
+        # a single self-joined query would need two aliases of code_entities, and
+        # the two-query form keeps the entity map reusable across every rule.
         all_rels_stmt = select(Relationship).where(Relationship.project_id == project_id)
         all_rels = list((await session.execute(all_rels_stmt)).scalars().all())
 

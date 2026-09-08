@@ -193,9 +193,31 @@ class MemoryCreate(BaseModel):
     content: str
     summary: str
     importance: float = Field(0.5, ge=0.0, le=1.0)
-    confidence: float = Field(1.0, ge=0.0, le=1.0)
+    confidence: float = Field(
+        1.0,
+        ge=0.0,
+        le=1.0,
+        deprecated=True,
+        description=(
+            "Ignored on write. Confidence is derived from authority, evidence and "
+            "verification outcome so that a caller cannot assert its own certainty; "
+            "the field is retained only for request-shape compatibility."
+        ),
+    )
     freshness_score: float = Field(1.0, ge=0.0, le=1.0)
     source_type: str = "code"
+    authority: str | None = Field(
+        None,
+        description=(
+            "Explicit authority level (USER_CONFIRMED, REVIEW_CONFIRMED, "
+            "TEST_VERIFIED, CODE_VERIFIED, GIT_DERIVED, AGENT_OBSERVED, "
+            "LLM_GENERATED, REPOSITORY_TEXT, UNTRUSTED). Derived from source_type "
+            "when omitted."
+        ),
+    )
+    scope: str = Field("PROJECT", description="PROJECT, MODULE, FILE, SYMBOL, FEATURE, TASK, BRANCH, ENVIRONMENT")
+    branch: str | None = None
+    workspace: str | None = None
     source_reference: str | None = None
     source_commit: str | None = None
     created_by: str = "agent"

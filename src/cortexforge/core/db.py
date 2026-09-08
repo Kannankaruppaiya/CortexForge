@@ -21,11 +21,25 @@ DATABASE_URL = (
     or DEFAULT_DB_URL
 )
 
-# Normalize postgres:// to postgresql+asyncpg:// if provided
-if DATABASE_URL.startswith("postgresql://"):
-    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
-elif DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
+def normalize_async_url(url: str) -> str:
+    """Rewrite a database URL to the async driver this application requires.
+
+    Operators reasonably write `postgresql://...` or `sqlite:///cortex.db`; both
+    are valid SQLAlchemy URLs that name synchronous drivers, and handing either to
+    `create_async_engine` fails with a message about asyncio extensions that says
+    nothing about the actual mistake. Normalising here means the configuration a
+    person would naturally write simply works.
+    """
+    if url.startswith("postgresql://"):
+        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    if url.startswith("postgres://"):
+        return url.replace("postgres://", "postgresql+asyncpg://", 1)
+    if url.startswith("sqlite://") and "+aiosqlite" not in url:
+        return url.replace("sqlite://", "sqlite+aiosqlite://", 1)
+    return url
+
+
+DATABASE_URL = normalize_async_url(DATABASE_URL)
 
 
 def create_cortex_engine(url: str) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:

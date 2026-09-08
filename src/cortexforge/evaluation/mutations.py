@@ -17,9 +17,8 @@ For each mutation, defines expected cognitive update outcomes:
 (unchanged, reanchored, revised, stale, conflicted, invalidated).
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
-from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 

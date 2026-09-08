@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -12,7 +13,6 @@ from cortexforge.core.models import (
     ArchitectureRule,
     Base,
     CodeEntity,
-    Memory,
     Project,
     Relationship,
 )

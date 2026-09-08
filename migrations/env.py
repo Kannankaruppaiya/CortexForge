@@ -12,15 +12,45 @@ from alembic import context
 config = context.config
 
 # Interpret the config file for Python logging.
-# This line sets up loggers basically.
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+#
+# Two guards, both because migrations are also run in-process (from tests and
+# from the job runner) rather than only from the `alembic` CLI:
+#   * `configure_logger` lets an embedding caller opt out entirely, which is the
+#     convention Alembic's own template follows.
+#   * `disable_existing_loggers=False` stops a migration run from silencing every
+#     logger the host application already configured.
+if config.config_file_name is not None and config.attributes.get("configure_logger", True):
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
-import os
-from cortexforge.core.models import Base
 from cortexforge.core.db import DATABASE_URL
+from cortexforge.core.models import Base
 
 target_metadata = Base.metadata
+
+
+def resolve_url() -> str:
+    """Decide which database this migration run targets.
+
+    A URL supplied by the caller -- via ``alembic -x``, a programmatic
+    ``Config.set_main_option``, or alembic.ini -- wins over the application's
+    configured database. Previously this file overwrote the caller's choice with
+    ``DATABASE_URL`` unconditionally, which meant migrations could only ever be
+    run against whatever the environment happened to point at: tests could not
+    target a scratch database, and an operator could not migrate a specific one.
+    """
+    override = context.get_x_argument(as_dictionary=True).get("db_url")
+    if override:
+        return override
+
+    configured = config.get_main_option("sqlalchemy.url", "")
+    # alembic.ini ships a placeholder; treat it as "unset" rather than as a target.
+    if configured and not configured.startswith("driver://"):
+        return configured
+
+    return DATABASE_URL
+
+
+DATABASE_URL = resolve_url()
 config.set_main_option("sqlalchemy.url", DATABASE_URL)
 
 
@@ -78,10 +108,25 @@ async def run_async_migrations() -> None:
     await connectable.dispose()
 
 
-def run_migrations_online() -> None:
-    """Run migrations in 'online' mode."""
+def run_migrations_sync() -> None:
+    """Run migrations over a synchronous driver."""
+    from sqlalchemy import engine_from_config
 
-    asyncio.run(run_async_migrations())
+    section = config.get_section(config.config_ini_section, {})
+    section["sqlalchemy.url"] = DATABASE_URL
+
+    connectable = engine_from_config(section, prefix="sqlalchemy.", poolclass=pool.NullPool)
+    with connectable.connect() as connection:
+        do_run_migrations(connection)
+    connectable.dispose()
+
+
+def run_migrations_online() -> None:
+    """Run migrations in 'online' mode, against a sync or async driver."""
+    if "+aiosqlite" in DATABASE_URL or "+asyncpg" in DATABASE_URL:
+        asyncio.run(run_async_migrations())
+    else:
+        run_migrations_sync()
 
 
 if context.is_offline_mode():

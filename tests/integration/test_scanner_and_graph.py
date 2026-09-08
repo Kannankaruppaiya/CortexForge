@@ -3,12 +3,14 @@
 import os
 import shutil
 import tempfile
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+import cortexforge.apps.api.main
 from cortexforge.apps.api.main import app
 from cortexforge.apps.mcp.server import (
     memory_get_lessons,
@@ -171,10 +173,22 @@ async def test_rest_api_endpoints(sample_repo, test_session: AsyncSession):
             assert "directly_changed_entities" in impact_data
             assert any("AuthService" in e for e in impact_data["directly_changed_entities"])
 
-        # Test Static SPA Dashboard serving
+        # Static SPA serving is mounted only when apps/web/dist has been built.
+        # Asserting on it unconditionally makes an API test fail for the unrelated
+        # reason that `npm run build` has not run, so the assertion is made
+        # conditional on the artifact actually existing.
+        dist_index = (
+            Path(cortexforge.apps.api.main.__file__).resolve().parents[4]
+            / "apps" / "web" / "dist" / "index.html"
+        )
         spa_resp = await client.get("/")
-        assert spa_resp.status_code == 200
-        assert "CortexForge" in spa_resp.text
+        if dist_index.exists():
+            assert spa_resp.status_code == 200
+            assert "CortexForge" in spa_resp.text
+        else:
+            assert spa_resp.status_code == 404, (
+                "with no built frontend the SPA route must not be mounted at all"
+            )
 
     app.dependency_overrides.clear()
 
@@ -208,7 +222,9 @@ async def test_mcp_tools(sample_repo):
     )
     assert "COMPLETED" in comp_res
 
-    # memory_get_lessons tool
+    # memory_get_lessons tool. A lesson recorded by a completing agent is an
+    # observation, not yet an established rule, so it is surfaced under the
+    # proposals heading and labelled with its authority.
     lessons_res = await memory_get_lessons(sample_repo)
-    assert "Durable Lessons" in lessons_res
+    assert "Lessons" in lessons_res
     assert "AuthService" in lessons_res

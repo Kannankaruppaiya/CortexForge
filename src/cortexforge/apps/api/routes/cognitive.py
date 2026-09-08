@@ -13,7 +13,6 @@ from cortexforge.core.models import (
     ArchitectureRule,
     FailureEpisode,
     Project,
-    RuleViolation,
     TestRun,
 )
 from cortexforge.core.schemas import (

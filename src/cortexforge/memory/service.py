@@ -10,6 +10,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from cortexforge.cognition.authority import (
+    Authority,
+    authority_from_source,
+    authority_rank,
+    is_proposal_only,
+)
+from cortexforge.cognition.epistemics import EpistemicState, EvidenceType
 from cortexforge.core.models import (
     Memory,
     MemoryEvidence,
@@ -19,6 +26,7 @@ from cortexforge.core.models import (
 )
 from cortexforge.core.schemas import MemoryCreate
 from cortexforge.embeddings.provider import EmbeddingProvider, get_embedding_provider
+from cortexforge.memory.claims import ClaimService
 from cortexforge.memory.confidence import ConfidenceScorer
 from cortexforge.memory.conflict_resolver import ConflictResolver
 from cortexforge.memory.lifecycle import MemoryLifecycleManager, MemoryState
@@ -37,6 +45,44 @@ def cosine_similarity(v1: list[float], v2: list[float]) -> float:
     return max(-1.0, min(1.0, dot / (norm1 * norm2)))
 
 
+# Memory types whose assertions are costly to get wrong, and therefore route
+# through review unless the user stated them directly (section 43).
+_REVIEW_REQUIRED_TYPES: frozenset[str] = frozenset(
+    {"CONSTRAINT", "ARCHITECTURE", "SECURITY"}
+)
+
+_EPISTEMIC_FOR_TYPE: dict[str, str] = {
+    "DECISION": EpistemicState.DECISION.value,
+    "CONSTRAINT": EpistemicState.CONSTRAINT.value,
+    "ARCHITECTURE": EpistemicState.CONSTRAINT.value,
+    "CONVENTION": EpistemicState.CONSTRAINT.value,
+    "LESSON": EpistemicState.LESSON.value,
+    "FAILURE": EpistemicState.FAILURE.value,
+    "FIX": EpistemicState.SUCCESS.value,
+    "FACT": EpistemicState.FACT.value,
+}
+
+_EVIDENCE_TYPE_FOR_SOURCE: dict[str, str] = {
+    "code": EvidenceType.CODE.value,
+    "verified_code": EvidenceType.CODE.value,
+    "symbol": EvidenceType.SYMBOL.value,
+    "ast": EvidenceType.AST.value,
+    "git": EvidenceType.GIT.value,
+    "commit": EvidenceType.COMMIT.value,
+    "diff": EvidenceType.DIFF.value,
+    "test": EvidenceType.TEST.value,
+    "test_result": EvidenceType.TEST_RESULT.value,
+    "config": EvidenceType.CONFIG.value,
+    "schema": EvidenceType.SCHEMA.value,
+    "api_contract": EvidenceType.API_CONTRACT.value,
+    "doc": EvidenceType.DOCUMENTATION.value,
+    "documentation": EvidenceType.DOCUMENTATION.value,
+    "review": EvidenceType.REVIEW.value,
+    "user": EvidenceType.USER_CONFIRMATION.value,
+    "agent_observation": EvidenceType.AGENT_OBSERVATION.value,
+}
+
+
 class MemoryService:
     """Core memory engine managing layered project memory and lifecycle."""
 
@@ -44,9 +90,11 @@ class MemoryService:
         self,
         embedding_provider: EmbeddingProvider | None = None,
         conflict_resolver: ConflictResolver | None = None,
+        claim_service: ClaimService | None = None,
     ) -> None:
         self.embedding_provider = embedding_provider or get_embedding_provider()
         self.conflict_resolver = conflict_resolver or ConflictResolver()
+        self.claim_service = claim_service or ClaimService()
 
     async def create_memory(
         self, session: AsyncSession, project_id: str, payload: MemoryCreate
@@ -60,19 +108,42 @@ class MemoryService:
         # Generate embedding for sanitized memory content
         embed_res = await self.embedding_provider.embed_text(f"{sanitized_title}\n{sanitized_content}")
 
-        # Compute explainable confidence if default or ungrounded
-        confidence = payload.confidence
-        if confidence >= 1.0 and payload.source_type not in ("verified_code", "code"):
-            conf_res = ConfidenceScorer.calculate_confidence(
-                source_type=payload.source_type,
-                evidences=payload.evidence,
-                status="ACTIVE",
-            )
-            confidence = conf_res.score
+        # Resolve the source onto the authority hierarchy once, here, so that every
+        # downstream decision (confidence, conflict arbitration, activation) reads
+        # one value rather than re-interpreting a free-form source string.
+        authority = authority_from_source(payload.authority or payload.source_type)
+
+        # Confidence is always derived, never taken on trust from the caller. A
+        # client that asks for confidence 1.0 does not get it: the score comes from
+        # the authority and evidence actually presented (section 8).
+        conf_res = ConfidenceScorer.score(
+            authority=authority,
+            evidence=payload.evidence,
+            status="ACTIVE",
+        )
+        confidence = conf_res.score
 
         # Explicit cognitive layer
         layer = (payload.layer or "L1").upper()
-        status = MemoryState.ACTIVE.value if payload.importance >= 0.3 else MemoryState.UNVERIFIED.value
+
+        # Activation policy (sections 7, 23, 43).
+        #
+        # A statement from a proposal-only authority -- an LLM, repository prose,
+        # anything untrusted -- is never born believed. It enters as a CANDIDATE and
+        # must pass verification or human approval to become ACTIVE. High-impact
+        # memory types additionally route through review regardless of source,
+        # because being wrong about a security constraint is expensive.
+        if is_proposal_only(authority):
+            status = MemoryState.CANDIDATE.value
+        elif payload.memory_type.upper() in _REVIEW_REQUIRED_TYPES and authority_rank(
+            authority
+        ) < authority_rank(Authority.USER_CONFIRMED):
+            status = MemoryState.REVIEW_REQUIRED.value
+        elif payload.evidence:
+            status = MemoryState.ACTIVE.value
+        else:
+            # No grounding evidence: recorded, but not presented as established.
+            status = MemoryState.UNVERIFIED.value
 
         memory = Memory(
             project_id=project_id,
@@ -83,9 +154,20 @@ class MemoryService:
             summary=sanitized_summary,
             status=status,
             confidence=confidence,
+            confidence_components={
+                **conf_res.components,
+                "explanation": conf_res.explanation,
+            },
+            authority=authority.value,
+            epistemic_state=_EPISTEMIC_FOR_TYPE.get(
+                payload.memory_type.upper(), EpistemicState.OBSERVATION.value
+            ),
             importance=payload.importance,
             freshness_score=payload.freshness_score,
             source_type=payload.source_type,
+            scope=(payload.scope or "PROJECT").upper(),
+            branch=payload.branch,
+            workspace=payload.workspace,
             source_reference=payload.source_reference,
             source_commit=payload.source_commit,
             created_by=payload.created_by,
@@ -137,6 +219,10 @@ class MemoryService:
                 ev_obj = MemoryEvidence(
                     memory_id=memory.id,
                     source_type=ev.source_type,
+                    evidence_type=_EVIDENCE_TYPE_FOR_SOURCE.get(
+                        (ev.source_type or "").lower(), EvidenceType.CODE.value
+                    ),
+                    authority=authority_from_source(ev.source_type).value,
                     source_id=ev.source_id,
                     file_path=ev.file_path,
                     symbol_id=ev.symbol_id,
@@ -150,6 +236,14 @@ class MemoryService:
                 )
                 session.add(ev_obj)
             await session.flush()
+
+        # Decompose the memory into individually evaluable claims. This happens at
+        # creation so that a memory is verifiable from the moment it exists, rather
+        # than only once something later thinks to decompose it (section 4).
+        await session.refresh(memory, ["evidences"])
+        await self.claim_service.sync_memory_claims(
+            session, memory, commit_sha=payload.source_commit
+        )
 
         # Check and resolve semantic contradictions against existing memories
         await self.conflict_resolver.check_and_resolve(

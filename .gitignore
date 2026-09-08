@@ -58,3 +58,6 @@ node_modules/
 
 # Benchmarks output
 benchmarks/results/
+
+# Local Python 3.12 test environment
+.venv312/

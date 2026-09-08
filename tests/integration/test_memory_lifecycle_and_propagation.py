@@ -175,28 +175,30 @@ async def test_memory_consolidation(memory_test_repo, mem_session: AsyncSession)
     mem_service = MemoryService()
 
     # Create two related episodic failures
-    await mem_service.create_memory(
-        mem_session,
-        project.id,
-        MemoryCreate(
-            memory_type="FAILURE",
-            title="Database Connection Pool Exhaustion on Worker Startup",
-            content="Background workers opened 50 unclosed asyncpg connections, crashing PostgreSQL.",
-            summary="Worker connection pool exhaustion incident",
-            importance=0.7,
+    episodic_sources = [
+        await mem_service.create_memory(
+            mem_session,
+            project.id,
+            MemoryCreate(
+                memory_type="FAILURE",
+                title="Database Connection Pool Exhaustion on Worker Startup",
+                content="Background workers opened 50 unclosed asyncpg connections, crashing PostgreSQL.",
+                summary="Worker connection pool exhaustion incident",
+                importance=0.7,
+            ),
         ),
-    )
-    await mem_service.create_memory(
-        mem_session,
-        project.id,
-        MemoryCreate(
-            memory_type="FAILURE",
-            title="API Worker Hanging Due to Database Pool Starvation",
-            content="API workers hung when asyncpg connection pool hit maximum overflow limit.",
-            summary="API worker pool starvation incident",
-            importance=0.7,
+        await mem_service.create_memory(
+            mem_session,
+            project.id,
+            MemoryCreate(
+                memory_type="FAILURE",
+                title="API Worker Hanging Due to Database Pool Starvation",
+                content="API workers hung when asyncpg connection pool hit maximum overflow limit.",
+                summary="API worker pool starvation incident",
+                importance=0.7,
+            ),
         ),
-    )
+    ]
 
     # Run consolidation engine
     consolidation = MemoryConsolidationEngine(memory_service=mem_service)
@@ -204,12 +206,36 @@ async def test_memory_consolidation(memory_test_repo, mem_session: AsyncSession)
 
     assert res["clusters_consolidated"] >= 1
     assert res["durable_memories_created"] >= 1
-    assert res["memories_archived"] >= 2
 
-    # Check newly created LESSON exists and is ACTIVE
+    # A proposed lesson is not yet knowledge, so the episodes it was derived from
+    # must still be intact. Consolidation may never destroy what it has not
+    # successfully replaced (specification section 26).
+    assert res["memories_archived"] == 0
+    for episode in episodic_sources:
+        await mem_session.refresh(episode)
+        assert episode.status != "ARCHIVED"
+
     lessons = await mem_service.list_memories(mem_session, project.id, memory_type="LESSON")
     assert len(lessons) >= 1
-    assert lessons[0].status == "ACTIVE"
+    assert lessons[0].status == "REVIEW_REQUIRED"
+    assert lessons[0].authority == "LLM_GENERATED"
+
+    # Re-running consolidation over the same episodes must not create a second
+    # lesson: clusters are identified by a fingerprint over their members.
+    repeat = await consolidation.consolidate_project(mem_session, project.id)
+    assert repeat["durable_memories_created"] == 0
+    lessons_after = await mem_service.list_memories(
+        mem_session, project.id, memory_type="LESSON"
+    )
+    assert len(lessons_after) == len(lessons)
+
+    # Approval is the decision that turns a proposal into knowledge, and only then
+    # are the source episodes archived.
+    approved = await consolidation.approve_lesson(
+        mem_session, lessons[0].id, approver="reviewer@example.com"
+    )
+    assert approved.status == "ACTIVE"
+    assert approved.authority == "REVIEW_CONFIRMED"
 
 
 @pytest.mark.asyncio

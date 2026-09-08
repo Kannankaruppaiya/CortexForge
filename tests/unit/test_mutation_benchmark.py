@@ -1,11 +1,15 @@
 """Unit tests running the mutation benchmark suite."""
 
 import tempfile
+
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from cortexforge.core.models import Base
-from cortexforge.evaluation.mutations import CANONICAL_MUTATIONS, MutationBenchmarkHarness
+from cortexforge.evaluation.mutations import (
+    CANONICAL_MUTATIONS,
+    MutationBenchmarkHarness,
+)
 
 
 @pytest.mark.asyncio

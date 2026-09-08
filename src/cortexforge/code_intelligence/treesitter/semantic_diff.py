@@ -90,10 +90,7 @@ def are_symbols_lineage_match(sym_a: Any, sym_b: Any) -> bool:
 
     sig_a = normalize_signature(getattr(sym_a, "signature", None))
     sig_b = normalize_signature(getattr(sym_b, "signature", None))
-    if sig_a and sig_b and sig_a == sig_b and len(sig_a) > 2:
-        return True
-
-    return False
+    return bool(sig_a and sig_b and sig_a == sig_b and len(sig_a) > 2)
 
 
 class ASTSemanticDiffer:

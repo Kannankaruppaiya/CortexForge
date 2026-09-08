@@ -16,11 +16,7 @@ from cortexforge.core.models import (
     CodeEntity,
     Commit,
     Memory,
-    MemoryEvidence,
     MemoryVersion,
-    SymbolChange,
-    TestCaseResult,
-    TestRun,
 )
 
 

@@ -1,13 +1,13 @@
 """Integration tests for first-class cognitive REST endpoints."""
 
 import os
-from httpx import ASGITransport, AsyncClient
+
 import pytest
+from httpx import ASGITransport, AsyncClient
 
 from cortexforge.apps.api.main import app
 from cortexforge.core.db import init_db, session_scope
 from cortexforge.core.models import (
-    ArchitectureRule,
     CodeEntity,
     FailureEpisode,
     Memory,
@@ -183,13 +183,26 @@ async def test_cognitive_rest_endpoints(tmp_path):
         assert list_snap_res.status_code == 200
         assert len(list_snap_res.json()) >= 1
 
-        # 7. Replay State at Commit
+        # 7. Replay State at Commit -- answered from the snapshot taken then.
         replay_res = await client.post(f"/api/v1/projects/{project_id}/snapshots/c0ffee1/replay")
         assert replay_res.status_code == 200
         replay_data = replay_res.json()
         assert replay_data["commit_sha"] == "c0ffee1"
-        assert replay_data["active_memories_count"] >= 1
-        assert len(replay_data["selected_memories"]) >= 1
+        assert replay_data["replay_available"] is True
+        assert replay_data["state_hash"]
+        # The believed set is recorded memory-by-memory, not summarised as a count.
+        recorded = replay_data["believed_memories"] + replay_data["withheld_memories"]
+        assert any(entry["memory_id"] for entry in recorded)
+
+        # Replaying a commit that was never snapshotted must say so rather than
+        # answering with present-day belief dressed up as history.
+        absent_res = await client.post(
+            f"/api/v1/projects/{project_id}/snapshots/deadbeef/replay"
+        )
+        assert absent_res.status_code == 200
+        absent_data = absent_res.json()
+        assert absent_data["replay_available"] is False
+        assert "not captured" in absent_data["reason"]
 
 
         # 8. List Test Runs
