@@ -31,6 +31,7 @@ class SemanticChangeType(str, Enum):
     SYMBOL_ADDED = "SYMBOL_ADDED"
     SYMBOL_REMOVED = "SYMBOL_REMOVED"
     SYMBOL_RENAMED = "SYMBOL_RENAMED"
+    SYMBOL_MOVED = "SYMBOL_MOVED"
     SIGNATURE_CHANGED = "SIGNATURE_CHANGED"
     BODY_CHANGED = "BODY_CHANGED"
     CLASS_CHANGED = "CLASS_CHANGED"
@@ -65,6 +66,36 @@ class SemanticChange:
     details: dict[str, Any] = field(default_factory=dict)
 
 
+def normalize_signature(sig: str | None) -> str:
+    """Extract normalized parameter and return signature, stripping symbol name."""
+    if not sig:
+        return ""
+    idx = sig.find("(")
+    if idx != -1:
+        return sig[idx:].strip().rstrip(":").strip()
+    return sig.strip()
+
+
+def are_symbols_lineage_match(sym_a: Any, sym_b: Any) -> bool:
+    """Determine whether two symbols represent the same entity across a rename or move."""
+    type_a = getattr(sym_a, "entity_type", None)
+    type_b = getattr(sym_b, "entity_type", None)
+    if type_a != type_b:
+        return False
+
+    hash_a = getattr(sym_a, "content_hash", None)
+    hash_b = getattr(sym_b, "content_hash", None)
+    if hash_a and hash_b and hash_a == hash_b:
+        return True
+
+    sig_a = normalize_signature(getattr(sym_a, "signature", None))
+    sig_b = normalize_signature(getattr(sym_b, "signature", None))
+    if sig_a and sig_b and sig_a == sig_b and len(sig_a) > 2:
+        return True
+
+    return False
+
+
 class ASTSemanticDiffer:
     """Compares AST structures across file revisions to produce structured semantic changes."""
 
@@ -95,6 +126,35 @@ class ASTSemanticDiffer:
                     details={"old_path": old_path, "new_path": file_path},
                 )
             )
+            if before_content and after_content and self.parser.can_parse(file_path):
+                parsed_before = self.parser.parse_source(old_path, before_content)
+                parsed_after = self.parser.parse_source(file_path, after_content)
+                b_syms = {s.name: s for s in parsed_before.symbols if s.entity_type != "file"}
+                for asym in parsed_after.symbols:
+                    if asym.entity_type != "file":
+                        bsym = b_syms.get(asym.name) or next(
+                            (s for s in parsed_before.symbols if s.content_hash == asym.content_hash and s.entity_type != "file"),
+                            None
+                        )
+                        if bsym:
+                            changes.append(
+                                SemanticChange(
+                                    commit_sha=commit_sha,
+                                    file_path=file_path,
+                                    change_type=SemanticChangeType.SYMBOL_MOVED,
+                                    symbol_name=asym.name,
+                                    qualified_name=asym.qualified_name,
+                                    entity_type=asym.entity_type,
+                                    before_fingerprint=bsym.content_hash,
+                                    after_fingerprint=asym.content_hash,
+                                    before_signature=bsym.signature,
+                                    after_signature=asym.signature,
+                                    before_line_range=(bsym.start_line, bsym.end_line),
+                                    after_line_range=(asym.start_line, asym.end_line),
+                                    details={"old_path": old_path, "old_name": bsym.name, "old_qualified_name": bsym.qualified_name},
+                                )
+                            )
+                return changes
 
         # Case 2: File Added
         if before_content is None or len(before_content) == 0:
@@ -208,7 +268,7 @@ class ASTSemanticDiffer:
                     if (
                         bqname not in after_syms
                         and bsym.entity_type == asym.entity_type
-                        and bsym.content_hash == asym.content_hash
+                        and (bsym.content_hash == asym.content_hash or are_symbols_lineage_match(bsym, asym))
                     ):
                         renamed_from = bsym
                         break

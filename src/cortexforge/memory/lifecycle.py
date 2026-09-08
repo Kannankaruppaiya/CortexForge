@@ -56,6 +56,7 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
         MemoryState.STALE.value,       # When grounded symbol/code is modified
         MemoryState.CONFLICTED.value,  # When contradictory evidence/memory is found
         MemoryState.SUPERSEDED.value,  # When higher-authority replacement is established
+        MemoryState.INVALIDATED.value, # When grounded symbol/code is completely deleted
         MemoryState.ARCHIVED.value,    # When explicitly decommissioned
     },
     # Stale memory awaiting reverification or invalidation
@@ -106,6 +107,9 @@ class MemoryLifecycleManager:
         reason: str,
         superseded_by_id: str | None = None,
         conflict_group: str | None = None,
+        actor: str = "system",
+        commit_sha: str | None = None,
+        force_version: bool = False,
     ) -> MemoryVersion | None:
         """Apply state transition to memory, validating constraints and generating version audit.
 
@@ -119,7 +123,8 @@ class MemoryLifecycleManager:
             # Idempotent re-affirmation (e.g. re-verification maintaining ACTIVE)
             if target_state == MemoryState.ACTIVE.value:
                 memory.last_verified_at = datetime.now(UTC)
-            return None
+            if not force_version:
+                return None
 
         if not MemoryLifecycleManager.is_valid_transition(current_state, target_state):
             raise InvalidStateTransitionError(
@@ -147,6 +152,10 @@ class MemoryLifecycleManager:
             memory_id=memory.id,
             version=memory.version,
             previous_version=memory.version - 1,
+            old_state=current_state,
+            new_state=target_state,
+            actor=actor,
+            commit_sha=commit_sha,
             content=memory.content,
             change_reason=f"Status transition [{current_state} -> {target_state}]: {reason}",
         )

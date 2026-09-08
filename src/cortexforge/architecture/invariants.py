@@ -1,0 +1,156 @@
+"""Architecture Invariant Engine enforcing structural rules and anti-patterns.
+
+Adheres strictly to Specification Section 8:
+- controller MUST NOT access database directly
+- UI MUST NOT access repository directly
+- domain MUST NOT import framework infrastructure
+- security-sensitive code requires specific verification
+- Evaluates rules against graph relationships and detects violations with provenance.
+"""
+
+import fnmatch
+from dataclasses import dataclass, field
+
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from cortexforge.core.models import ArchitectureRule, CodeEntity, Relationship, RuleViolation
+
+
+@dataclass
+class ArchitectureEvaluationResult:
+    total_rules_evaluated: int
+    violations_detected: list[dict[str, str]] = field(default_factory=list)
+    has_critical_violations: bool = False
+
+
+class ArchitectureInvariantEngine:
+    """Evaluates architectural boundary rules against code entities and relationships."""
+
+    @staticmethod
+    def _matches_pattern(pattern: str, text: str) -> bool:
+        """Check if pattern matches text using glob or substring match."""
+        pat = pattern.strip().lower()
+        txt = text.strip().lower()
+        if not pat or not txt:
+            return False
+        # Normalize slashes
+        txt = txt.replace("\\", "/")
+        pat = pat.replace("\\", "/")
+        if "*" in pat or "?" in pat:
+            return fnmatch.fnmatch(txt, pat) or fnmatch.fnmatch(txt.split("/")[-1], pat)
+        return pat in txt
+
+    async def evaluate_rules(
+        self,
+        session: AsyncSession,
+        project_id: str,
+        commit_sha: str | None = None,
+        persist_violations: bool = True,
+    ) -> ArchitectureEvaluationResult:
+        """Evaluate all active architecture rules against project graph relationships."""
+        rules_stmt = select(ArchitectureRule).where(
+            ArchitectureRule.project_id == project_id,
+            ArchitectureRule.enforcement_status == "ACTIVE",
+        )
+        rules_res = await session.execute(rules_stmt)
+        rules = list(rules_res.scalars().all())
+
+        if not rules:
+            return ArchitectureEvaluationResult(total_rules_evaluated=0)
+
+        # Fetch relationships joined with source and target entities
+        rels_stmt = (
+            select(Relationship, CodeEntity, CodeEntity)
+            .join(CodeEntity, Relationship.source_entity_id == CodeEntity.id)
+            .join(CodeEntity, Relationship.target_entity_id == CodeEntity.id)
+        )
+        # Note: SQLAlchemy alias or separate queries
+        # Let's query relationships and entity map for clean safety
+        all_rels_stmt = select(Relationship).where(Relationship.project_id == project_id)
+        all_rels = list((await session.execute(all_rels_stmt)).scalars().all())
+
+        all_entities_stmt = select(CodeEntity).where(CodeEntity.project_id == project_id)
+        all_entities = list((await session.execute(all_entities_stmt)).scalars().all())
+        entity_map = {e.id: e for e in all_entities}
+
+        if persist_violations:
+            # Clear old violations for this commit / evaluation
+            await session.execute(
+                delete(RuleViolation).where(
+                    RuleViolation.rule_id.in_([r.id for r in rules])
+                )
+            )
+
+        detected_violations: list[dict[str, str]] = []
+        has_critical = False
+
+        for rule in rules:
+            for rel in all_rels:
+                src = entity_map.get(rel.source_entity_id)
+                tgt = entity_map.get(rel.target_entity_id)
+                if not src or not tgt:
+                    continue
+
+                src_matches = (
+                    self._matches_pattern(rule.forbidden_source_pattern, src.qualified_name)
+                    or self._matches_pattern(rule.forbidden_source_pattern, src.file_path)
+                )
+                tgt_matches = (
+                    self._matches_pattern(rule.forbidden_target_pattern, tgt.qualified_name)
+                    or self._matches_pattern(rule.forbidden_target_pattern, tgt.file_path)
+                )
+
+                if src_matches and tgt_matches:
+                    details = (
+                        f"Architecture violation [{rule.severity}]: '{src.qualified_name}' "
+                        f"({src.file_path}) has forbidden '{rel.relationship_type}' relationship "
+                        f"to '{tgt.qualified_name}' ({tgt.file_path}) violating rule '{rule.rule_name}'."
+                    )
+                    violation = RuleViolation(
+                        rule_id=rule.id,
+                        source_entity_id=src.id,
+                        target_entity_id=tgt.id,
+                        commit_sha=commit_sha,
+                        violation_details=details,
+                    )
+                    if persist_violations:
+                        session.add(violation)
+
+                    detected_violations.append({
+                        "rule_id": rule.id,
+                        "rule_name": rule.rule_name,
+                        "severity": rule.severity,
+                        "source": src.qualified_name,
+                        "target": tgt.qualified_name,
+                        "details": details,
+                    })
+
+                    if rule.severity.upper() in ("ERROR", "CRITICAL"):
+                        has_critical = True
+
+        if persist_violations and detected_violations:
+            await session.commit()
+
+        return ArchitectureEvaluationResult(
+            total_rules_evaluated=len(rules),
+            violations_detected=detected_violations,
+            has_critical_violations=has_critical,
+        )
+
+    async def check_project_invariants(
+        self,
+        session: AsyncSession,
+        project_id: str,
+        commit_sha: str | None = None,
+    ) -> list[RuleViolation]:
+        """Evaluate rules and return list of persisted RuleViolation records."""
+        await self.evaluate_rules(session, project_id, commit_sha=commit_sha, persist_violations=True)
+        stmt = (
+            select(RuleViolation)
+            .join(ArchitectureRule, RuleViolation.rule_id == ArchitectureRule.id)
+            .where(ArchitectureRule.project_id == project_id)
+        )
+        res = await session.execute(stmt)
+        return list(res.scalars().all())
+

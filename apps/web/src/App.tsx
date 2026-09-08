@@ -7,6 +7,9 @@ import { DecisionsAndFailures } from './components/DecisionsAndFailures';
 import { ChangeImpact } from './components/ChangeImpact';
 import { TokenEconomics } from './components/TokenEconomics';
 import { EvaluationHarness } from './components/EvaluationHarness';
+import { ArchitectureInvariants } from './components/ArchitectureInvariants';
+import { CognitiveSnapshots } from './components/CognitiveSnapshots';
+
 import {
   fetchProjects,
   fetchArchitecture,
@@ -209,6 +212,10 @@ export const App: React.FC = () => {
               <ArchitectureGraph arch={architecture} />
             )}
 
+            {activeTab === 'invariants' && (
+              <ArchitectureInvariants projectId={selectedProjectId} />
+            )}
+
             {activeTab === 'memories' && (
               <MemoryExplorer
                 memories={memories}
@@ -235,9 +242,14 @@ export const App: React.FC = () => {
               <ChangeImpact projectId={selectedProjectId || ''} arch={architecture} />
             )}
 
+            {activeTab === 'snapshots' && (
+              <CognitiveSnapshots projectId={selectedProjectId} />
+            )}
+
             {activeTab === 'economics' && <TokenEconomics projectId={selectedProjectId} />}
 
             {activeTab === 'evaluation' && <EvaluationHarness projectId={selectedProjectId} />}
+
           </div>
         </main>
       </div>

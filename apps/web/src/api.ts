@@ -122,3 +122,123 @@ export async function fetchTokenEconomics(projectId: string): Promise<any> {
     return null;
   }
 }
+
+export async function fetchArchitectureRules(projectId: string): Promise<any[]> {
+  try {
+    const res = await fetch(`${API_BASE}/projects/${projectId}/architecture/rules`);
+    if (!res.ok) return [];
+    return await res.json();
+  } catch {
+    return [];
+  }
+}
+
+export async function createArchitectureRule(
+  projectId: string,
+  rule: {
+    rule_name: string;
+    description: string;
+    forbidden_source_pattern: string;
+    forbidden_target_pattern: string;
+    severity?: string;
+  }
+): Promise<any> {
+  try {
+    const res = await fetch(`${API_BASE}/projects/${projectId}/architecture/rules`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(rule),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchArchitectureViolations(projectId: string): Promise<any[]> {
+  try {
+    const res = await fetch(`${API_BASE}/projects/${projectId}/architecture/violations`);
+    if (!res.ok) return [];
+    return await res.json();
+  } catch {
+    return [];
+  }
+}
+
+export async function fetchProvenance(memoryId: string): Promise<any> {
+  try {
+    const res = await fetch(`${API_BASE}/memories/${memoryId}/provenance`);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchSnapshots(projectId: string): Promise<any[]> {
+  try {
+    const res = await fetch(`${API_BASE}/projects/${projectId}/snapshots`);
+    if (!res.ok) return [];
+    return await res.json();
+  } catch {
+    return [];
+  }
+}
+
+export async function takeSnapshot(projectId: string, commitSha: string): Promise<any> {
+  try {
+    const res = await fetch(`${API_BASE}/projects/${projectId}/snapshots?commit_sha=${encodeURIComponent(commitSha)}`, {
+      method: 'POST',
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function replaySnapshot(projectId: string, commitSha: string): Promise<any> {
+  try {
+    const res = await fetch(`${API_BASE}/projects/${projectId}/snapshots/${encodeURIComponent(commitSha)}/replay`, {
+      method: 'POST',
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchTestRuns(projectId: string): Promise<any[]> {
+  try {
+    const res = await fetch(`${API_BASE}/projects/${projectId}/tests`);
+    if (!res.ok) return [];
+    return await res.json();
+  } catch {
+    return [];
+  }
+}
+
+export async function fetchFailureEpisodes(projectId: string): Promise<any[]> {
+  try {
+    const res = await fetch(`${API_BASE}/projects/${projectId}/failures`);
+    if (!res.ok) return [];
+    return await res.json();
+  } catch {
+    return [];
+  }
+}
+
+export async function runMutationBenchmark(projectId: string): Promise<any> {
+  try {
+    const res = await fetch(`${API_BASE}/projects/${projectId}/mutations/benchmark`, {
+      method: 'POST',
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+

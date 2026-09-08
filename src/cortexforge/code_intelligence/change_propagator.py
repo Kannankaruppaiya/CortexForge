@@ -16,13 +16,22 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from cortexforge.architecture.invariants import ArchitectureInvariantEngine
 from cortexforge.code_intelligence.git_provider import GitProvider
 from cortexforge.code_intelligence.treesitter.semantic_diff import (
     ASTSemanticDiffer,
     SemanticChange,
     SemanticChangeType,
+    are_symbols_lineage_match,
 )
-from cortexforge.core.models import CodeEntity, Memory, Project
+from cortexforge.core.models import (
+    ChangeSet,
+    CodeEntity,
+    FileChange,
+    Memory,
+    Project,
+    SymbolChange,
+)
 from cortexforge.graph.service import GraphService
 from cortexforge.memory.lifecycle import MemoryLifecycleManager, MemoryState
 
@@ -36,6 +45,8 @@ class ChangeImpactReport:
     critical_constraints: list[str]
     semantic_changes: list[SemanticChange] = field(default_factory=list)
     memories_retained_active: list[str] = field(default_factory=list)
+    memories_reanchored: list[str] = field(default_factory=list)
+    memories_invalidated: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -125,19 +136,46 @@ class SemanticChangePropagator:
                                 None
                             )
                             if not matching_sym:
-                                all_semantic_changes.append(
-                                    SemanticChange(
-                                        commit_sha=target_base,
-                                        file_path=rel_file,
-                                        change_type=SemanticChangeType.SYMBOL_REMOVED,
-                                        symbol_name=ent.name,
-                                        qualified_name=ent.qualified_name,
-                                        entity_type=ent.entity_type,
-                                        before_fingerprint=ent.content_hash,
-                                        before_signature=ent.signature,
-                                        before_line_range=(ent.start_line, ent.end_line),
-                                    )
+                                # Check if symbol was renamed (same body hash or signature)
+                                renamed_to = next(
+                                    (
+                                        s for s in parsed_after.symbols
+                                        if are_symbols_lineage_match(ent, s)
+                                    ),
+                                    None,
                                 )
+                                if renamed_to:
+                                    all_semantic_changes.append(
+                                        SemanticChange(
+                                            commit_sha=target_base,
+                                            file_path=rel_file,
+                                            change_type=SemanticChangeType.SYMBOL_RENAMED,
+                                            symbol_name=renamed_to.name,
+                                            qualified_name=renamed_to.qualified_name,
+                                            entity_type=renamed_to.entity_type,
+                                            before_fingerprint=ent.content_hash,
+                                            after_fingerprint=renamed_to.content_hash,
+                                            before_signature=ent.signature,
+                                            after_signature=renamed_to.signature,
+                                            before_line_range=(ent.start_line, ent.end_line),
+                                            after_line_range=(renamed_to.start_line, renamed_to.end_line),
+                                            details={"renamed_from": ent.qualified_name, "old_name": ent.name},
+                                        )
+                                    )
+                                else:
+                                    all_semantic_changes.append(
+                                        SemanticChange(
+                                            commit_sha=target_base,
+                                            file_path=rel_file,
+                                            change_type=SemanticChangeType.SYMBOL_REMOVED,
+                                            symbol_name=ent.name,
+                                            qualified_name=ent.qualified_name,
+                                            entity_type=ent.entity_type,
+                                            before_fingerprint=ent.content_hash,
+                                            before_signature=ent.signature,
+                                            before_line_range=(ent.start_line, ent.end_line),
+                                        )
+                                    )
                             elif matching_sym.content_hash != ent.content_hash or matching_sym.signature != ent.signature:
                                 sig_changed = matching_sym.signature != ent.signature
                                 c_type = (
@@ -221,12 +259,16 @@ class SemanticChangePropagator:
 
         stale_memory_titles: list[str] = []
         retained_active_titles: list[str] = []
+        reanchored_memory_titles: list[str] = []
+        invalidated_memory_titles: list[str] = []
         critical_constraints: list[str] = []
         warnings: list[str] = []
 
         for mem in active_memories:
             grounded_in_change = False
             relevant_to_file = False
+            reanchored = False
+            invalidated = False
 
             if mem.evidences:
                 for ev in mem.evidences:
@@ -237,10 +279,86 @@ class SemanticChangePropagator:
 
                     relevant_to_file = True
 
-                    # Check 1: Direct symbol grounding
+                    has_changes_for_file = any(
+                        ch.file_path == ev_norm or ev_norm.endswith(ch.file_path)
+                        for ch in all_semantic_changes
+                    )
+                    if not has_changes_for_file:
+                        # File was flagged as modified without fine-grained AST diffs; treat as grounded change
+                        grounded_in_change = True
+                        break
+
+                    # Check 1: Direct symbol grounding or line-based symbol lookup
+                    matched_ent = None
                     if ev.symbol_id:
                         matched_ent = next((e for e in all_entities if e.id == ev.symbol_id), None)
-                        if matched_ent:
+                    elif ev.line_start is not None:
+                        for e in all_entities:
+                            e_norm = e.file_path.replace("\\", "/")
+                            if (e_norm == ev_norm or ev_norm.endswith(e_norm)) and e.entity_type != "file":
+                                ev_e = ev.line_end or ev.line_start
+                                if not (ev_e < e.start_line or ev.line_start > e.end_line):
+                                    matched_ent = e
+                                    break
+
+                    if matched_ent:
+                        # A. Check if symbol was renamed or moved (lineage preservation)
+                            for ch in all_semantic_changes:
+                                if ch.change_type in (SemanticChangeType.SYMBOL_RENAMED, SemanticChangeType.SYMBOL_MOVED):
+                                    old_qname = ch.details.get("renamed_from") or ch.details.get("old_qualified_name")
+                                    old_name = ch.details.get("old_name")
+                                    if (
+                                        (old_qname and matched_ent.qualified_name == old_qname)
+                                        or (old_name and matched_ent.name == old_name)
+                                        or (matched_ent.name == ch.symbol_name and ch.change_type == SemanticChangeType.SYMBOL_MOVED)
+                                    ):
+                                        # Re-anchor evidence to new location
+                                        ev.file_path = ch.file_path
+                                        if ch.after_line_range:
+                                            ev.line_start = ch.after_line_range[0]
+                                            ev.line_end = ch.after_line_range[1]
+                                        new_ent = next((e for e in all_entities if e.qualified_name == ch.qualified_name), None)
+                                        if new_ent:
+                                            ev.symbol_id = new_ent.id
+                                        ver = MemoryLifecycleManager.transition(
+                                            mem,
+                                            new_state=MemoryState.ACTIVE.value,
+                                            reason=f"Re-anchored symbol lineage: {matched_ent.name} -> {ch.symbol_name} ({ch.file_path})",
+                                            actor="change_engine",
+                                            commit_sha=target_base,
+                                            force_version=True,
+                                        )
+                                        if ver:
+                                            session.add(ver)
+                                        reanchored = True
+                                        reanchored_memory_titles.append(f"[{mem.memory_type}] {mem.title}")
+                                        break
+
+                            if reanchored:
+                                break
+
+                            # B. Check if symbol was removed completely without replacement
+                            is_removed = any(
+                                ch.change_type == SemanticChangeType.SYMBOL_REMOVED
+                                and (ch.qualified_name == matched_ent.qualified_name or ch.symbol_name == matched_ent.name)
+                                for ch in all_semantic_changes
+                            )
+                            if is_removed:
+                                invalidated = True
+                                invalidated_memory_titles.append(f"[{mem.memory_type}] {mem.title}")
+                                if mark_stale:
+                                    ver = MemoryLifecycleManager.transition(
+                                        mem,
+                                        new_state=MemoryState.INVALIDATED.value,
+                                        reason=f"Grounded symbol '{matched_ent.name}' was removed without replacement",
+                                        actor="change_engine",
+                                        commit_sha=target_base,
+                                    )
+                                    if ver:
+                                        session.add(ver)
+                                break
+
+                            # C. Check if symbol was modified (signature or body)
                             if matched_ent.qualified_name in changed_symbol_qnames or matched_ent.name in changed_symbol_names:
                                 grounded_in_change = True
                                 break
@@ -263,6 +381,9 @@ class SemanticChangePropagator:
                     grounded_in_change = True
                     break
 
+            if reanchored or invalidated:
+                continue
+
             if grounded_in_change:
                 stale_memory_titles.append(f"[{mem.memory_type}] {mem.title}")
                 if mem.memory_type == "CONSTRAINT":
@@ -275,13 +396,56 @@ class SemanticChangePropagator:
                         mem,
                         new_state=MemoryState.STALE.value,
                         reason="Grounded code symbol was modified in recent diff",
+                        actor="change_engine",
+                        commit_sha=target_base,
                     )
                     if ver:
                         session.add(ver)
             elif relevant_to_file:
                 retained_active_titles.append(f"[{mem.memory_type}] {mem.title}")
 
-        if mark_stale and stale_memory_titles:
+        # 7. Evaluate Architecture Invariant Rules
+        arch_engine = ArchitectureInvariantEngine()
+        eval_result = await arch_engine.evaluate_rules(
+            session, project_id, commit_sha=target_base, persist_violations=True
+        )
+        for viol in eval_result.violations_detected:
+            critical_constraints.append(f"VIOLATION: {viol['details']}")
+            warnings.append(f"ARCH VIOLATION ({viol['severity']}): {viol['rule_name']} - {viol['source']} -> {viol['target']}")
+
+        # 8. Persist First-Class ChangeSet, FileChange, and SymbolChange entities
+        if project:
+            cs = ChangeSet(
+                project_id=project.id,
+                base_commit_sha=target_base if target_base != "HEAD" else None,
+                target_commit_sha=project.last_indexed_commit or "HEAD",
+                is_working_tree=(target_base == "HEAD"),
+            )
+            session.add(cs)
+            await session.flush()
+
+            for nf in normalized_files:
+                fc = FileChange(
+                    change_set_id=cs.id,
+                    file_path=nf,
+                    change_type="MODIFIED",
+                )
+                session.add(fc)
+
+            for sc in all_semantic_changes:
+                sym_ch = SymbolChange(
+                    change_set_id=cs.id,
+                    file_path=sc.file_path,
+                    symbol_name=sc.symbol_name,
+                    qualified_name=sc.qualified_name,
+                    entity_type=sc.entity_type,
+                    change_type=sc.change_type.value,
+                    old_signature=sc.before_signature,
+                    new_signature=sc.after_signature,
+                )
+                session.add(sym_ch)
+
+        if mark_stale or reanchored_memory_titles or invalidated_memory_titles or eval_result.violations_detected:
             await session.commit()
 
         return ChangeImpactReport(
@@ -292,5 +456,7 @@ class SemanticChangePropagator:
             critical_constraints=critical_constraints,
             semantic_changes=all_semantic_changes,
             memories_retained_active=retained_active_titles,
+            memories_reanchored=reanchored_memory_titles,
+            memories_invalidated=invalidated_memory_titles,
             warnings=warnings,
         )

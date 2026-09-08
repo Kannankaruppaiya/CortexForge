@@ -122,6 +122,11 @@ class OpenAIProvider(LLMProvider):
     ) -> LLMResponse:
         chosen_model = model or self.default_model
         if not self._api_key:
+            env = os.environ.get("CORTEX_ENV", os.environ.get("ENVIRONMENT", "development")).lower()
+            if env == "production":
+                raise RuntimeError(
+                    "Production configuration error: OpenAIProvider configured in production but OPENAI_API_KEY is not set."
+                )
             return await MockLLMProvider().generate(prompt, system_prompt, chosen_model)
 
         messages = []

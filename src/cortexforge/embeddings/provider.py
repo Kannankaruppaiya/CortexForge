@@ -131,7 +131,12 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
 
     async def embed_batch(self, texts: list[str]) -> list[EmbeddingResult]:
         if not self._api_key:
-            # Fallback to local deterministic if no API key provided
+            env = os.environ.get("CORTEX_ENV", os.environ.get("ENVIRONMENT", "development")).lower()
+            if env == "production":
+                raise RuntimeError(
+                    "Production configuration error: OpenAIEmbeddingProvider configured in production but OPENAI_API_KEY is not set."
+                )
+            # Fallback to local deterministic in development/test if no API key provided
             fallback = FastDeterministicEmbeddingProvider(dim=self._dim)
             return await fallback.embed_batch(texts)
 

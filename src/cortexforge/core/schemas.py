@@ -259,3 +259,141 @@ class HealthResponse(BaseModel):
     version: str = "0.1.0"
     timestamp: datetime
 
+
+class CognitiveSnapshotRead(BaseModel):
+    id: str
+    project_id: str
+    commit_sha: str
+    cognitive_generation: int
+    graph_generation: int
+    memory_generation: int
+    index_generation: int
+    retrieval_version: str
+    embedding_version: str
+    snapshot_metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ArchitectureRuleCreate(BaseModel):
+    rule_name: str = Field(..., max_length=255)
+    description: str = Field(..., description="Description or rationale for the rule")
+    scope: str = "PROJECT"
+    severity: str = "ERROR"
+    forbidden_source_pattern: str
+    forbidden_target_pattern: str
+    enforcement_status: str = "ACTIVE"
+
+
+class ArchitectureRuleRead(BaseModel):
+    id: str
+    project_id: str
+    rule_name: str
+    description: str
+    scope: str
+    severity: str
+    forbidden_source_pattern: str
+    forbidden_target_pattern: str
+    enforcement_status: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RuleViolationRead(BaseModel):
+    id: str
+    rule_id: str
+    source_entity_id: str
+    target_entity_id: str
+    commit_sha: str | None = None
+    violation_details: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+
+class ProvenanceTraceRead(BaseModel):
+    memory_id: str
+    title: str
+    layer: str
+    memory_type: str
+    status: str
+    confidence: float
+    why_cortexforge_believes_this: str
+    evidences: list[dict[str, Any]] = Field(default_factory=list)
+    symbols: list[dict[str, Any]] = Field(default_factory=list)
+    files: list[str] = Field(default_factory=list)
+    commits: list[str] = Field(default_factory=list)
+    versions: list[dict[str, Any]] = Field(default_factory=list)
+    tests: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class TestCaseResultRead(BaseModel):
+    id: str
+    test_run_id: str
+    test_name: str
+    suite: str | None = None
+    status: str
+    duration_ms: float = 0.0
+    error_message: str | None = None
+    failure_signature: str | None = None
+    is_flaky: bool = False
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TestRunRead(BaseModel):
+    id: str
+    project_id: str
+    task_id: str | None = None
+    commit_sha: str | None = None
+    framework: str
+    environment: str | None = None
+    status: str
+    total_tests: int
+    passed_count: int
+    failed_count: int
+    duration_ms: float
+    created_at: datetime
+    results: list[TestCaseResultRead] = Field(default_factory=list)
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class FixAttemptRead(BaseModel):
+    id: str
+    failure_episode_id: str
+    commit_sha: str | None = None
+    attempted_fix: str
+    success: bool
+    why_worked_or_failed: str | None = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class FailureEpisodeRead(BaseModel):
+    id: str
+    project_id: str
+    task_id: str | None = None
+    test_case_result_id: str | None = None
+    commit_sha: str | None = None
+    failure_signature: str
+    error_class: str
+    error_message: str
+    normalized_trace: str | None = None
+    attempted_approach: str
+    rejected_reason: str | None = None
+    command_or_tool: str | None = None
+    root_cause: str | None = None
+    affected_files: list[str] = Field(default_factory=list)
+    affected_symbols: list[str] = Field(default_factory=list)
+    created_at: datetime
+    fix_attempts: list[FixAttemptRead] = Field(default_factory=list)
+
+    model_config = ConfigDict(from_attributes=True)
+
+

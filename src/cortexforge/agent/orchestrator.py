@@ -3,6 +3,7 @@
 from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cortexforge.agent.events import (
@@ -14,7 +15,15 @@ from cortexforge.code_intelligence.change_propagator import (
     ChangeImpactReport,
     SemanticChangePropagator,
 )
-from cortexforge.core.models import AgentEvent, AgentTask, Project
+from cortexforge.core.models import (
+    AgentEvent,
+    AgentTask,
+    FailureEpisode,
+    FixAttempt,
+    Project,
+    TestCaseResult,
+    TestRun,
+)
 from cortexforge.core.schemas import MemoryCreate, MemoryEvidenceCreate
 from cortexforge.memory.consolidation import MemoryConsolidationEngine
 from cortexforge.memory.service import MemoryService
@@ -216,6 +225,7 @@ class AgentWorkflowOrchestrator:
         is_failure = status.upper() == "FAILED"
         ev_type = CanonicalEventType.TEST_FAILED if is_failure else CanonicalEventType.TEST_PASSED
 
+        # 1. Log canonical AgentEvent
         adapter = EventAdapterRegistry.get_adapter(agent_source)
         ev = adapter.normalize_event(
             {
@@ -235,7 +245,32 @@ class AgentWorkflowOrchestrator:
             )
         )
 
-        # If test failed, create a structured L4 Failure episode memory
+        # 2. Get or create first-class TestRun for this task
+        tr_stmt = select(TestRun).where(TestRun.task_id == task_id)
+        tr_res = await session.execute(tr_stmt)
+        test_run = tr_res.scalars().first()
+        if not test_run:
+            test_run = TestRun(
+                project_id=task.project_id,
+                task_id=task.id,
+                framework="pytest",
+                status="FAILED" if is_failure else "PASSED",
+                total_tests=0,
+                passed_count=0,
+                failed_count=0,
+            )
+            session.add(test_run)
+            await session.flush()
+
+        test_run.total_tests += 1
+        if is_failure:
+            test_run.failed_count += 1
+            test_run.status = "FAILED"
+        else:
+            test_run.passed_count += 1
+
+        # 3. Create first-class TestCaseResult
+        episode = None
         if is_failure and error_text:
             episode = self.failure_engine.process_test_failure(
                 task_id=task_id,
@@ -244,6 +279,33 @@ class AgentWorkflowOrchestrator:
                 stack_trace=stack_trace,
                 affected_files=affected_files or [],
             )
+
+        tc_result = TestCaseResult(
+            test_run_id=test_run.id,
+            test_name=test_name,
+            status=status.upper(),
+            error_message=error_text[:500] if error_text else None,
+            stack_trace=stack_trace,
+            failure_signature=episode.failure_signature if episode else None,
+            affected_files={"files": affected_files or []},
+        )
+        session.add(tc_result)
+        await session.flush()
+
+        # 4. If test failed, create first-class FailureEpisode and structured L4 Memory
+        if is_failure and episode and error_text:
+            fail_episode = FailureEpisode(
+                project_id=task.project_id,
+                task_id=task.id,
+                test_case_result_id=tc_result.id,
+                failure_signature=episode.failure_signature,
+                error_class=error_text.split(":")[0][:100] if ":" in error_text else "TestFailure",
+                error_message=episode.error_message,
+                normalized_trace=episode.normalized_trace,
+                attempted_approach=task.task_text,
+                affected_files={"files": affected_files or []},
+            )
+            session.add(fail_episode)
 
             await self.memory_service.create_memory(
                 session=session,
@@ -268,6 +330,97 @@ class AgentWorkflowOrchestrator:
             )
 
         await session.commit()
+
+    async def record_fix_attempt(
+        self,
+        session: AsyncSession,
+        failure_episode_id: str,
+        attempted_fix: str,
+        success: bool,
+        why_worked_or_failed: str | None = None,
+        commit_sha: str | None = None,
+    ) -> FixAttempt:
+        """Record an attempted fix for a failure episode and capture whether it resolved the issue."""
+        fix = FixAttempt(
+            failure_episode_id=failure_episode_id,
+            commit_sha=commit_sha,
+            attempted_fix=attempted_fix,
+            success=success,
+            why_worked_or_failed=why_worked_or_failed,
+        )
+        session.add(fix)
+        await session.commit()
+        return fix
+
+    async def record_rejected_approach(
+        self,
+        session: AsyncSession,
+        failure_episode_id: str,
+        rejected_reason: str,
+    ) -> None:
+        """Explicitly preserve a rejected approach and rationale to prevent future agent loops."""
+        fail_ep = await session.get(FailureEpisode, failure_episode_id)
+        if fail_ep:
+            fail_ep.rejected_reason = rejected_reason
+            await session.commit()
+
+    async def find_similar_tasks(
+        self,
+        session: AsyncSession,
+        project_id: str,
+        task_text: str,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Retrieve historically similar engineering tasks, approaches, failures, and fixes."""
+        stmt = select(AgentTask).where(
+            AgentTask.project_id == project_id,
+            AgentTask.status == "COMPLETED",
+        )
+        res = await session.execute(stmt)
+        completed_tasks = list(res.scalars().all())
+
+        if not completed_tasks:
+            return []
+
+        query_words = set(task_text.lower().split())
+        scored_tasks: list[tuple[float, AgentTask]] = []
+
+        for t in completed_tasks:
+            t_words = set(t.task_text.lower().split())
+            overlap = len(query_words & t_words)
+            jaccard = overlap / max(1, len(query_words | t_words))
+            if jaccard > 0.05 or overlap >= 2:
+                scored_tasks.append((jaccard, t))
+
+        scored_tasks.sort(key=lambda x: x[0], reverse=True)
+        top_tasks = scored_tasks[:limit]
+
+        results: list[dict[str, Any]] = []
+        for score, t in top_tasks:
+            # Fetch failure episodes
+            fe_stmt = select(FailureEpisode).where(FailureEpisode.task_id == t.id)
+            fe_res = await session.execute(fe_stmt)
+            episodes = list(fe_res.scalars().all())
+
+            fail_data = []
+            for ep in episodes:
+                fail_data.append({
+                    "error_message": ep.error_message,
+                    "failure_signature": ep.failure_signature,
+                    "attempted_approach": ep.attempted_approach,
+                    "rejected_reason": ep.rejected_reason,
+                })
+
+            results.append({
+                "task_id": t.id,
+                "task_text": t.task_text,
+                "success": t.success,
+                "similarity_score": round(score, 3),
+                "tool_calls": t.tool_calls,
+                "failure_episodes": fail_data,
+            })
+
+        return results
 
     async def complete_task(
         self,

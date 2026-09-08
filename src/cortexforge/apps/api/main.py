@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from cortexforge.apps.api.routes import (
+    cognitive,
     github,
     graph,
     jobs,
@@ -48,6 +49,7 @@ app.add_middleware(
 app.include_router(projects.router, prefix="/api/v1")
 app.include_router(graph.router, prefix="/api/v1")
 app.include_router(memories.router, prefix="/api/v1")
+app.include_router(cognitive.router, prefix="/api/v1")
 app.include_router(retrieval.router, prefix="/api/v1")
 app.include_router(github.router, prefix="/api/v1")
 app.include_router(jobs.router, prefix="/api/v1")

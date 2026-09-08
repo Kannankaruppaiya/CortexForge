@@ -1,11 +1,16 @@
 import React, { useState } from 'react';
-import { runBenchmark } from '../api';
+import { runBenchmark, runMutationBenchmark } from '../api';
+import { MutationBenchmarkResult } from '../types';
 import {
   Award,
   CheckCircle2,
   Play,
   BarChart,
   Shield,
+  Dna,
+  Check,
+  XCircle,
+  Loader2,
 } from 'lucide-react';
 
 interface EvaluationHarnessProps {
@@ -32,6 +37,9 @@ interface ScorecardResult {
 export const EvaluationHarness: React.FC<EvaluationHarnessProps> = ({ projectId }) => {
   const [isRunning, setIsRunning] = useState(false);
   const [liveScorecards, setLiveScorecards] = useState<ScorecardResult[] | null>(null);
+  const [isMutating, setIsMutating] = useState(false);
+  const [mutationResults, setMutationResults] = useState<MutationBenchmarkResult | null>(null);
+
 
   const hypotheses = [
     {
@@ -86,6 +94,16 @@ export const EvaluationHarness: React.FC<EvaluationHarnessProps> = ({ projectId 
     setIsRunning(false);
   };
 
+  const handleRunMutationBenchmark = async () => {
+    if (!projectId) return;
+    setIsMutating(true);
+    const data = await runMutationBenchmark(projectId);
+    if (data) {
+      setMutationResults(data);
+    }
+    setIsMutating(false);
+  };
+
   return (
     <div className="space-y-6">
       {/* Header Banner */}
@@ -93,21 +111,105 @@ export const EvaluationHarness: React.FC<EvaluationHarnessProps> = ({ projectId 
         <div>
           <h3 className="text-sm font-semibold text-slate-100 flex items-center gap-2">
             <Award className="w-4 h-4 text-indigo-400" />
-            Empirical Evaluation & Benchmark Suite
+            Empirical Evaluation & Mutation Benchmark Suite
           </h3>
           <p className="text-xs text-slate-400 mt-1 max-w-2xl">
-            Controlled 4-way comparison across standard developer coding workflows. Proves reduction in exploratory file rereading, context footprint, and recurring architectural mistakes.
+            Empirically verifies cognitive update accuracy (rename re-anchoring, signature staleness, dependency invalidation) and controlled 4-way ablation reductions.
           </p>
         </div>
-        <button
-          onClick={handleRunBenchmark}
-          disabled={isRunning || !projectId}
-          className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold shadow-md shadow-indigo-950/40 transition disabled:opacity-50 font-mono"
-        >
-          <Play className={`w-3.5 h-3.5 ${isRunning ? 'animate-spin' : ''}`} />
-          {isRunning ? 'Running Live Benchmark...' : 'Run 4-Way Benchmark'}
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={handleRunMutationBenchmark}
+            disabled={isMutating || !projectId}
+            className="flex items-center gap-2 px-3.5 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-lg text-xs font-semibold shadow-md shadow-purple-950/40 transition disabled:opacity-50 font-mono"
+          >
+            {isMutating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Dna className="w-3.5 h-3.5" />}
+            {isMutating ? 'Running Mutations...' : 'Run Mutation Suite'}
+          </button>
+          <button
+            onClick={handleRunBenchmark}
+            disabled={isRunning || !projectId}
+            className="flex items-center gap-2 px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold shadow-md shadow-indigo-950/40 transition disabled:opacity-50 font-mono"
+          >
+            <Play className={`w-3.5 h-3.5 ${isRunning ? 'animate-spin' : ''}`} />
+            {isRunning ? 'Running 4-Way...' : 'Run 4-Way Ablation'}
+          </button>
+        </div>
       </div>
+
+      {/* Mutation Benchmark Suite Results */}
+      {mutationResults && (
+        <div className="p-5 bg-slate-900/90 border border-purple-800/60 rounded-xl shadow-xl space-y-4">
+          <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+            <div className="flex items-center gap-2">
+              <Dna className="w-4 h-4 text-purple-400" />
+              <h4 className="text-sm font-bold text-slate-100">
+                Cognitive Mutation Invariant Test Results
+              </h4>
+            </div>
+            <span className={`px-2.5 py-1 rounded text-xs font-mono font-bold border ${
+              mutationResults.all_passed
+                ? 'bg-emerald-950/60 text-emerald-400 border-emerald-800/80'
+                : 'bg-rose-950/60 text-rose-400 border-rose-800/80'
+            }`}>
+              {mutationResults.all_passed ? 'ALL INVARIANTS PASSED' : 'INVARIANT FAILURE DETECTED'}
+            </span>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse text-xs font-mono">
+              <thead>
+                <tr className="border-b border-slate-800 bg-slate-950/60 text-slate-400">
+                  <th className="py-2.5 px-3">Test ID</th>
+                  <th className="py-2.5 px-3">Mutation Type</th>
+                  <th className="py-2.5 px-3">Expected Status</th>
+                  <th className="py-2.5 px-3">Observed Status</th>
+                  <th className="py-2.5 px-3">Reanchor / Invalidate Invariant</th>
+                  <th className="py-2.5 px-3">Result</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/60">
+                {mutationResults.results.map((r) => (
+                  <tr key={r.test_id} className="hover:bg-slate-800/40">
+                    <td className="py-2.5 px-3 font-bold text-purple-300">{r.test_id}</td>
+                    <td className="py-2.5 px-3 text-slate-300">{r.mutation_type}</td>
+                    <td className="py-2.5 px-3">
+                      <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
+                        {r.expected_status}
+                      </span>
+                    </td>
+                    <td className="py-2.5 px-3">
+                      <span className={`px-2 py-0.5 rounded border ${
+                        r.actual_status === r.expected_status
+                          ? 'bg-emerald-950/60 text-emerald-300 border-emerald-800'
+                          : 'bg-rose-950/60 text-rose-300 border-rose-800'
+                      }`}>
+                        {r.actual_status}
+                      </span>
+                    </td>
+                    <td className="py-2.5 px-3 text-slate-400 text-[11px]">
+                      {r.reanchored_as_expected && '✓ Reanchored preserving truth '}
+                      {r.invalidated_as_expected && '✓ Cleanly invalidated'}
+                    </td>
+                    <td className="py-2.5 px-3 font-bold">
+                      {r.passed ? (
+                        <span className="text-emerald-400 flex items-center gap-1">
+                          <Check className="w-3.5 h-3.5" /> PASSED
+                        </span>
+                      ) : (
+                        <span className="text-rose-400 flex items-center gap-1">
+                          <XCircle className="w-3.5 h-3.5" /> FAILED
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
 
       {/* Live Benchmark Results */}
       {liveScorecards ? (

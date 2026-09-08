@@ -9,15 +9,19 @@ import {
   TrendingUp,
   ActivitySquare,
   ShieldCheck,
+  History,
 } from 'lucide-react';
+
 
 export type TabType =
   | 'overview'
   | 'architecture'
+  | 'invariants'
   | 'memories'
   | 'decisions'
   | 'failures'
   | 'impact'
+  | 'snapshots'
   | 'economics'
   | 'evaluation';
 
@@ -29,13 +33,16 @@ interface NavigationProps {
 const navItems = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
   { id: 'architecture', label: 'Architecture Graph', icon: Network },
+  { id: 'invariants', label: 'Architecture Rules & Invariants', icon: Scale },
   { id: 'memories', label: 'Memory Explorer', icon: BrainCircuit },
   { id: 'decisions', label: 'Decisions (L3)', icon: Scale },
   { id: 'failures', label: 'Failures & Anti-Patterns (L4)', icon: AlertTriangle },
   { id: 'impact', label: 'Change Impact', icon: Zap },
+  { id: 'snapshots', label: 'Cognitive Snapshots & Replay', icon: History },
   { id: 'economics', label: 'Token Economics', icon: TrendingUp },
-  { id: 'evaluation', label: 'Evaluation Harness', icon: ActivitySquare },
+  { id: 'evaluation', label: 'Evaluation & Mutation Harness', icon: ActivitySquare },
 ];
+
 
 export const Navigation: React.FC<NavigationProps> = ({ activeTab, setActiveTab }) => {
   return (

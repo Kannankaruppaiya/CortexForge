@@ -6,6 +6,7 @@ from mcp.server.mcpserver import MCPServer
 from sqlalchemy import func, select
 
 from cortexforge.agent.orchestrator import AgentWorkflowOrchestrator
+from cortexforge.architecture.invariants import ArchitectureInvariantEngine
 from cortexforge.code_intelligence.change_propagator import SemanticChangePropagator
 from cortexforge.code_intelligence.scanner import RepositoryScanner
 from cortexforge.core.db import init_db, session_scope
@@ -13,7 +14,9 @@ from cortexforge.core.models import CodeEntity, Memory, Project
 from cortexforge.core.schemas import MemoryCreate, MemoryEvidenceCreate
 from cortexforge.graph.service import GraphService
 from cortexforge.memory.consolidation import MemoryConsolidationEngine
+from cortexforge.memory.provenance import ProvenanceEngine
 from cortexforge.memory.service import MemoryService
+from cortexforge.memory.snapshots import CognitiveSnapshotEngine
 from cortexforge.memory.verification import MemoryVerificationEngine
 from cortexforge.retrieval.composer import ContextComposer
 from cortexforge.retrieval.engine import HybridRetrievalEngine
@@ -35,6 +38,9 @@ consolidation_engine = MemoryConsolidationEngine(memory_service=memory_service)
 retrieval_engine = HybridRetrievalEngine(graph_service=graph_service)
 context_composer = ContextComposer(retrieval_engine=retrieval_engine, graph_service=graph_service)
 change_propagator = SemanticChangePropagator(graph_service=graph_service)
+invariant_engine = ArchitectureInvariantEngine()
+provenance_engine = ProvenanceEngine()
+snapshot_engine = CognitiveSnapshotEngine()
 orchestrator = AgentWorkflowOrchestrator(
     memory_service=memory_service,
     composer=context_composer,
@@ -42,6 +48,7 @@ orchestrator = AgentWorkflowOrchestrator(
     verifier=verification_engine,
     consolidator=consolidation_engine,
 )
+
 
 
 async def _resolve_project(session, project_id_or_path: str) -> Project | None:
@@ -761,7 +768,126 @@ async def memory_health(project_id_or_path: str = ".") -> str:
         return "\n".join(lines)
 
 
+@mcp_server.tool(
+    name="architecture_check_rules",
+    description="Evaluates all active architecture boundary invariant rules and reports any forbidden relationships or layer violations.",
+)
+async def architecture_check_rules(project_id_or_path: str = ".") -> str:
+    """Evaluate architectural boundary invariants."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(session, project_id_or_path)
+        if not project:
+            return f"Error: Project could not be resolved for '{project_id_or_path}'."
+
+        violations = await invariant_engine.check_project_invariants(session, project_id=project.id)
+        if not violations:
+            return f"Architecture Invariant Check: All boundary rules passed for '{project.name}'. Zero violations detected."
+
+        lines = [f"# Architecture Invariant Violations for {project.name} ({len(violations)})"]
+        for v in violations:
+            lines.append(
+                f"- **[{v.severity}] {v.rule_id}**: Relationship `{v.relationship_type}` from `{v.source_entity_id}` to `{v.target_entity_id}` is forbidden."
+            )
+        return "\n".join(lines)
+
+
+@mcp_server.tool(
+    name="memory_get_provenance",
+    description="Answers 'Why does CortexForge believe this?' by returning the complete causal provenance chain: Memory -> Evidence -> Symbol -> File -> Commit -> Versions -> Tests.",
+)
+async def memory_get_provenance(memory_id: str) -> str:
+    """Inspect full causal provenance graph for a memory."""
+    await init_db()
+    async with session_scope() as session:
+        trace = await provenance_engine.trace_memory(session, memory_id=memory_id)
+        if not trace:
+            return f"Error: Memory with ID '{memory_id}' not found."
+
+        lines = [
+            f"# Provenance Trace: {trace['title']} (`{trace['memory_id']}`)",
+            f"- **Layer**: {trace['layer']} | **Type**: {trace['memory_type']} | **Status**: {trace['status']} | **Confidence**: {trace['confidence']:.2f}",
+            "",
+            "## Why CortexForge Believes This",
+            trace["why_cortexforge_believes_this"],
+            "",
+            f"## Grounding Evidences ({len(trace['evidences'])})",
+        ]
+        for ev in trace["evidences"]:
+            lines.append(f"- `{ev['file_path']}:{ev.get('line_start') or 1}` [Type: {ev['source_type']}, Confidence: {ev.get('confidence', 1.0):.2f}]")
+
+        if trace["symbols"]:
+            lines.append("")
+            lines.append(f"## Anchored Symbols ({len(trace['symbols'])})")
+            for sym in trace["symbols"]:
+                lines.append(f"- **{sym.get('name')}** (`{sym.get('qualified_name')}`) in `{sym.get('file_path')}`")
+
+        if trace["commits"]:
+            lines.append("")
+            lines.append(f"## Associated Commits: {', '.join(trace['commits'])}")
+
+        if trace["versions"]:
+            lines.append("")
+            lines.append(f"## Revision History ({len(trace['versions'])})")
+            for v in trace["versions"]:
+                lines.append(f"- v{v.get('version')}: {v.get('change_reason')}")
+
+        return "\n".join(lines)
+
+
+@mcp_server.tool(
+    name="project_take_snapshot",
+    description="Captures a deterministic project-wide cognitive snapshot identifying exact commit SHA, generation counters, and retrieval version.",
+)
+async def project_take_snapshot(commit_sha: str, project_id_or_path: str = ".") -> str:
+    """Capture a cognitive snapshot of project state."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(session, project_id_or_path)
+        if not project:
+            return f"Error: Project could not be resolved for '{project_id_or_path}'."
+
+        snap = await snapshot_engine.take_snapshot(session, project_id=project.id, commit_sha=commit_sha)
+        return (
+            f"Cognitive snapshot captured: ID `{snap.id}` for commit `{snap.commit_sha}`\n"
+            f"- Cognitive Gen: {snap.cognitive_generation} | Memory Gen: {snap.memory_generation} | Graph Gen: {snap.graph_generation}"
+        )
+
+
+@mcp_server.tool(
+    name="task_find_similar",
+    description="Retrieves historically similar engineering tasks, approaches attempted, failure post-mortems, and successful fixes.",
+)
+async def task_find_similar(task_text: str, project_id_or_path: str = ".") -> str:
+    """Find similar previous tasks and their outcomes."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(session, project_id_or_path)
+        if not project:
+            return f"Error: Project could not be resolved for '{project_id_or_path}'."
+
+        similar_tasks = await orchestrator.find_similar_tasks(session, project.id, task_text=task_text)
+        if not similar_tasks:
+            return f"No similar historical engineering tasks found for query '{task_text}'."
+
+        lines = [f"# Similar Historical Tasks for '{task_text}' ({len(similar_tasks)})"]
+        for st in similar_tasks:
+            t = st["task"]
+            lines.append(f"### Task: {t.task_text} (Status: {t.status}, Success: {t.success})")
+            if st["failure_episodes"]:
+                lines.append("  **Past Failures in Similar Tasks**:")
+                for fe in st["failure_episodes"]:
+                    lines.append(f"  - [{fe.error_class}] {fe.error_message} (Fix Status: {fe.fix_status})")
+            if st["fix_attempts"]:
+                lines.append("  **Successful Fixes & Approaches**:")
+                for fa in st["fix_attempts"]:
+                    lines.append(f"  - Approach: {fa.approach_description} (Outcome: {fa.outcome})")
+            lines.append("")
+        return "\n".join(lines)
+
+
 # ==================== 5. RESOURCES ====================
+
 
 @mcp_server.resource("cortex://project/architecture")
 async def resource_architecture() -> str:

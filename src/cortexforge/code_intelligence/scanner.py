@@ -7,6 +7,7 @@ import time
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from cortexforge.code_intelligence.git_provider import GitProvider
 from cortexforge.code_intelligence.parser import ParseResult
 from cortexforge.code_intelligence.treesitter.analyzer import TreeSitterProvider
 from cortexforge.core.models import (
@@ -129,8 +130,64 @@ class RepositoryScanner:
                 errors=[f"Directory does not exist: {project.local_path}"],
             )
 
-        rel_files = self.discover_files(canonical_root, max_files=max_files)
         errors: list[str] = []
+        is_git_incremental = False
+        git = GitProvider(canonical_root)
+        head_commit = git.get_head_commit() or get_git_head_commit(canonical_root)
+
+        if incremental and project.last_indexed_commit and head_commit:
+            diff_files = git.get_modified_files(base_commit=project.last_indexed_commit, target_commit="HEAD")
+            if diff_files:
+                is_git_incremental = True
+                # Clean up deleted files from entities
+                for df in diff_files:
+                    if df.status == "D":
+                        await session.execute(
+                            delete(Relationship).where(
+                                (Relationship.project_id == project.id)
+                                & (
+                                    Relationship.source_entity_id.in_(
+                                        select(CodeEntity.id).where(
+                                            CodeEntity.project_id == project.id,
+                                            CodeEntity.file_path == df.file_path,
+                                        )
+                                    )
+                                    | Relationship.target_entity_id.in_(
+                                        select(CodeEntity.id).where(
+                                            CodeEntity.project_id == project.id,
+                                            CodeEntity.file_path == df.file_path,
+                                        )
+                                    )
+                                )
+                            )
+                        )
+                        await session.execute(
+                            delete(CodeEntity).where(
+                                CodeEntity.project_id == project.id,
+                                CodeEntity.file_path == df.file_path,
+                            )
+                        )
+                # Only scan modified/added/renamed files
+                rel_files = [
+                    df.file_path
+                    for df in diff_files
+                    if df.status != "D"
+                    and os.path.exists(os.path.join(canonical_root, df.file_path))
+                    and self.provider.can_parse(df.file_path)
+                ]
+            elif project.last_indexed_commit == head_commit:
+                # No changes between last indexed commit and HEAD
+                return ScanResponse(
+                    project_id=project.id,
+                    files_scanned=0,
+                    entities_extracted=0,
+                    relationships_extracted=0,
+                    duration_ms=round((time.perf_counter() - start_time) * 1000, 2),
+                    status="SUCCESS",
+                )
+
+        if not is_git_incremental:
+            rel_files = self.discover_files(canonical_root, max_files=max_files)
 
         # If not incremental, clear previous entities and relationships
         if not incremental:

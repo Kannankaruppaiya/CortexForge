@@ -26,10 +26,19 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from cortexforge.agent.orchestrator import AgentWorkflowOrchestrator
 from cortexforge.code_intelligence.change_propagator import SemanticChangePropagator
 from cortexforge.code_intelligence.scanner import RepositoryScanner
-from cortexforge.core.models import Base, Memory, Project
+from cortexforge.core.models import (
+    Base,
+    FailureEpisode,
+    FixAttempt,
+    Memory,
+    Project,
+    TestCaseResult,
+    TestRun,
+)
 from cortexforge.core.schemas import MemoryCreate, MemoryEvidenceCreate
 from cortexforge.memory.consolidation import MemoryConsolidationEngine
 from cortexforge.memory.service import MemoryService
+from cortexforge.memory.snapshots import CognitiveSnapshotEngine
 from cortexforge.memory.verification import MemoryVerificationEngine
 from cortexforge.retrieval.composer import ContextComposer
 from cortexforge.retrieval.engine import HybridRetrievalEngine
@@ -345,7 +354,29 @@ async def test_end_to_end_cognitive_lifecycle(synthetic_repo, e2e_session: Async
         stack_trace='File "/app/auth.py", line 42, in test_rsa\n    verify(token)\nValueError: Invalid RSA key size 512',
     )
 
-    # Record passing fix
+    # ----------------------------------------------------
+    # Step 14: Verify Failure Intelligence & Record Fix Attempt
+    # ----------------------------------------------------
+    fe_stmt = select(FailureEpisode).where(FailureEpisode.task_id == task.id)
+    fe_res = await e2e_session.execute(fe_stmt)
+    fail_episodes = list(fe_res.scalars().all())
+    assert len(fail_episodes) >= 1
+    fail_ep = fail_episodes[0]
+    assert "Invalid RSA key size 512" in fail_ep.error_message
+    assert len(fail_ep.failure_signature) == 16
+
+    # Record fix attempt
+    fix = await orchestrator.record_fix_attempt(
+        e2e_session,
+        failure_episode_id=fail_ep.id,
+        attempted_fix="Upgrade key generation to 2048-bit RSA keys",
+        success=True,
+        why_worked_or_failed="2048-bit keys satisfy minimum cryptographic security requirement",
+    )
+    assert fix.id is not None
+    assert fix.success is True
+
+    # Record passing test result after fix
     await orchestrator.record_test_result(
         e2e_session,
         task_id=task.id,
@@ -353,6 +384,9 @@ async def test_end_to_end_cognitive_lifecycle(synthetic_repo, e2e_session: Async
         status="PASSED",
     )
 
+    # ----------------------------------------------------
+    # Step 15: Complete task and run verification
+    # ----------------------------------------------------
     completed_task = await orchestrator.complete_task(
         e2e_session,
         task_id=task.id,
@@ -361,6 +395,61 @@ async def test_end_to_end_cognitive_lifecycle(synthetic_repo, e2e_session: Async
     )
     assert completed_task.status == "COMPLETED"
     assert completed_task.success is True
+
+    # ----------------------------------------------------
+    # Step 16: Safe Idempotent Consolidation
+    # ----------------------------------------------------
+    c1 = await consolidator.consolidate_project_memories(e2e_session, project.id)
+    # Running consolidation a second time should be idempotent
+    c2 = await consolidator.consolidate_project_memories(e2e_session, project.id)
+    assert c2["durable_memories_created"] == 0  # Idempotent!
+
+    # ----------------------------------------------------
+    # Step 17: Capture Cognitive Snapshot
+    # ----------------------------------------------------
+    snapshot = await CognitiveSnapshotEngine.take_snapshot(
+        e2e_session,
+        project_id=project.id,
+        commit_sha="e2e4a8f9b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7",
+    )
+    assert snapshot.active_memories_count >= 1
+    assert snapshot.cognitive_generation >= 1
+
+    # ----------------------------------------------------
+    # Step 18: Re-request task context for next agent task
+    # ----------------------------------------------------
+    next_task_context = await composer.build_context(
+        e2e_session,
+        project_id=project.id,
+        task_text="Check authentication architecture and key sizing",
+        profile="medium",
+        target_files=["services/auth.py"],
+    )
+
+    # ----------------------------------------------------
+    # Step 19: Confirm obsolete memory NOT retrieved as active decision
+    # ----------------------------------------------------
+    # The old Redis session decision was SUPERSEDED and must not be selected as an active decision
+    assert "Redis Session Store for Auth" not in [
+        m["title"] for m in next_task_context.selected_memories if m.get("memory_type") == "DECISION"
+    ]
+
+    # ----------------------------------------------------
+    # Step 20: Confirm token budgeting, explainability, and replay
+    # ----------------------------------------------------
+    assert next_task_context.estimated_tokens <= next_task_context.token_budget
+    assert len(next_task_context.explainability_report) > 20
+    assert len(next_task_context.selected_memories) >= 1
+
+    # Replay state at snapshot commit
+    replay = await CognitiveSnapshotEngine.replay_state_at_commit(
+        e2e_session,
+        project_id=project.id,
+        commit_sha="e2e4a8f9b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7",
+        task_text="Check authentication architecture and key sizing",
+    )
+    assert replay["snapshot_generation"] == snapshot.cognitive_generation
+    assert len(replay["selected_memories"]) >= 1
 
 
 

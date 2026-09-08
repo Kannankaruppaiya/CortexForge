@@ -8,6 +8,7 @@ import {
   AlertTriangle,
   Clock,
   ShieldAlert,
+  ShieldCheck,
   GitCommit,
   ChevronDown,
   ChevronRight,
@@ -16,6 +17,7 @@ import {
   RefreshCw,
   Archive,
 } from 'lucide-react';
+import { ProvenanceModal } from './ProvenanceModal';
 
 interface MemoryExplorerProps {
   memories: Memory[];
@@ -46,6 +48,8 @@ export const MemoryExplorer: React.FC<MemoryExplorerProps> = ({
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [actionInProgress, setActionInProgress] = useState<string | null>(null);
+  const [provenanceMemoryId, setProvenanceMemoryId] = useState<string | null>(null);
+
 
   const memoryLayers = ['ALL', 'L0', 'L1', 'L2', 'L3', 'L4', 'L5', 'L6'];
 
@@ -318,6 +322,19 @@ export const MemoryExplorer: React.FC<MemoryExplorerProps> = ({
                         Verify
                       </button>
 
+                      <button
+                        title="Inspect Full Causal Provenance"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setProvenanceMemoryId(mem.id);
+                        }}
+                        className="px-2 py-1 bg-indigo-950/60 hover:bg-indigo-900/60 border border-indigo-800/60 text-indigo-300 rounded text-[11px] font-medium transition flex items-center gap-1"
+                      >
+                        <ShieldCheck className="w-3 h-3 text-indigo-400" />
+                        Provenance
+                      </button>
+
+
                       {mem.status !== 'DEPRECATED' && (
                         <button
                           title="Mark Memory as Deprecated"
@@ -445,6 +462,13 @@ export const MemoryExplorer: React.FC<MemoryExplorerProps> = ({
           })
         )}
       </div>
+
+      {/* Provenance Inspection Modal */}
+      <ProvenanceModal
+        memoryId={provenanceMemoryId}
+        onClose={() => setProvenanceMemoryId(null)}
+      />
     </div>
   );
 };
+
