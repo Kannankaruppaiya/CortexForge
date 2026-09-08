@@ -16,11 +16,19 @@ from cortexforge.core.schemas import (
     ScanRequest,
     ScanResponse,
 )
+from cortexforge.evaluation.runner import EvaluationRunner
 from cortexforge.graph.service import GraphService
+from cortexforge.retrieval.composer import ContextComposer
+from cortexforge.retrieval.engine import HybridRetrievalEngine
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 scanner = RepositoryScanner()
 graph_service = GraphService()
+retrieval_engine = HybridRetrievalEngine(graph_service=graph_service)
+context_composer = ContextComposer(retrieval_engine=retrieval_engine, graph_service=graph_service)
+evaluation_runner = EvaluationRunner(
+    retrieval_engine=retrieval_engine, context_composer=context_composer, scanner=scanner
+)
 
 
 @router.post("", response_model=ProjectRead, status_code=status.HTTP_201_CREATED)
@@ -147,3 +155,38 @@ async def get_project_architecture(
     if not arch:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     return arch
+
+
+@router.post("/{project_id}/benchmark")
+async def run_project_benchmark(
+    project_id: str, session: AsyncSession = Depends(get_db_session)
+) -> list[dict]:
+    """Run real empirical benchmark suite on project."""
+    project = await session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    scorecards = await evaluation_runner.run_benchmark(session, project.id)
+    out = []
+    for sc in scorecards:
+        results_dict = {}
+        for mode, res in sc.results.items():
+            results_dict[mode] = {
+                "mode": res.mode,
+                "files_explored": res.files_explored,
+                "input_tokens": res.input_tokens,
+                "output_tokens": res.output_tokens,
+                "tool_calls": res.tool_calls,
+                "duration_ms": round(res.duration_ms, 2),
+                "repeated_failures": res.repeated_failures,
+                "success": res.success,
+            }
+        out.append({
+            "task_id": sc.task_id,
+            "task_name": sc.task_name,
+            "results": results_dict,
+            "token_reduction_pct": sc.token_reduction_pct,
+            "exploration_reduction_pct": sc.exploration_reduction_pct,
+            "tool_calls_saved": sc.tool_calls_saved,
+        })
+    return out

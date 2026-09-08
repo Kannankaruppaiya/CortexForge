@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { checkImpact } from '../api';
-import { ChangeImpactReport } from '../types';
+import { ArchitectureResponse, ChangeImpactReport } from '../types';
 import {
   Flame,
   AlertTriangle,
@@ -14,12 +14,35 @@ import {
 
 interface ChangeImpactProps {
   projectId: string;
+  arch?: ArchitectureResponse | null;
 }
 
-export const ChangeImpact: React.FC<ChangeImpactProps> = ({ projectId }) => {
-  const [fileInput, setFileInput] = useState('src/cortexforge/core/db.py\nsrc/cortexforge/core/models.py');
+export const ChangeImpact: React.FC<ChangeImpactProps> = ({ projectId, arch }) => {
+  const [fileInput, setFileInput] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [report, setReport] = useState<ChangeImpactReport | null>(null);
+
+  // Auto-populate with real files from active project
+  React.useEffect(() => {
+    if (arch && arch.modules.length > 0) {
+      const realFiles: string[] = [];
+      for (const m of arch.modules) {
+        for (const c of m.top_level_components) {
+          if (c.file_path && !realFiles.includes(c.file_path)) {
+            realFiles.push(c.file_path);
+          }
+          if (realFiles.length >= 2) break;
+        }
+        if (realFiles.length >= 2) break;
+      }
+      if (realFiles.length > 0) {
+        setFileInput(realFiles.join('\n'));
+      }
+    } else {
+      setFileInput('');
+    }
+    setReport(null);
+  }, [projectId, arch]);
 
   const handleAnalyze = async () => {
     const files = fileInput
@@ -51,6 +74,15 @@ export const ChangeImpact: React.FC<ChangeImpactProps> = ({ projectId }) => {
     return { level: 'LOW RISK', color: 'text-emerald-400', bg: 'bg-emerald-950/40', border: 'border-emerald-800' };
   };
 
+  // Derive dynamic presets from active project modules
+  const modulePresets = (arch?.modules || []).slice(0, 4).map((mod) => {
+    const firstComp = mod.top_level_components[0];
+    return {
+      label: mod.module_path,
+      file: firstComp?.file_path || `${mod.module_path}/index.ts`,
+    };
+  });
+
   return (
     <div className="space-y-6">
       {/* Header card */}
@@ -71,40 +103,29 @@ export const ChangeImpact: React.FC<ChangeImpactProps> = ({ projectId }) => {
             rows={3}
             value={fileInput}
             onChange={(e) => setFileInput(e.target.value)}
-            placeholder="src/path/to/file.py&#10;src/another/module.py"
+            placeholder="relative/path/to/file.ts&#10;another/module/service.ts"
             className="w-full p-3 bg-slate-950 border border-slate-700/80 rounded-lg text-xs font-mono text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition leading-relaxed"
           />
 
           <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
             <div className="flex items-center gap-2 text-xs font-mono text-slate-500">
-              <span>Quick Presets:</span>
-              <button
-                type="button"
-                onClick={() => setFileInput('src/cortexforge/core/db.py\nsrc/cortexforge/core/models.py')}
-                className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 rounded text-slate-300 transition"
-              >
-                Core DB
-              </button>
-              <button
-                type="button"
-                onClick={() => setFileInput('src/cortexforge/code_intelligence/scanner.py')}
-                className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 rounded text-slate-300 transition"
-              >
-                Scanner
-              </button>
-              <button
-                type="button"
-                onClick={() => setFileInput('src/cortexforge/memory/service.py')}
-                className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 rounded text-slate-300 transition"
-              >
-                Memory Engine
-              </button>
+              {modulePresets.length > 0 && <span>Project Presets:</span>}
+              {modulePresets.map((preset) => (
+                <button
+                  key={preset.label}
+                  type="button"
+                  onClick={() => setFileInput(preset.file)}
+                  className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 rounded text-slate-300 transition"
+                >
+                  {preset.label}
+                </button>
+              ))}
             </div>
 
             <button
               type="button"
               onClick={handleAnalyze}
-              disabled={isAnalyzing}
+              disabled={isAnalyzing || !fileInput.trim()}
               className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold shadow-md shadow-indigo-950/40 transition disabled:opacity-50"
             >
               <Sparkles className={`w-3.5 h-3.5 ${isAnalyzing ? 'animate-spin' : ''}`} />

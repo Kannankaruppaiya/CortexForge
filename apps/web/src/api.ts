@@ -99,3 +99,16 @@ export async function checkImpact(
     return null;
   }
 }
+
+export async function runBenchmark(projectId: string): Promise<any> {
+  try {
+    const res = await fetch(`${API_BASE}/projects/${projectId}/benchmark`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}

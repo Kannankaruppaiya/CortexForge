@@ -45,7 +45,8 @@ export const App: React.FC = () => {
       const projectList = await fetchProjects();
       setProjects(projectList);
       if (projectList.length > 0) {
-        setSelectedProjectId(projectList[0].id);
+        const defaultProj = projectList.find((p) => p.name.toLowerCase().includes('vivek')) || projectList[0];
+        setSelectedProjectId(defaultProj.id);
       }
     }
     loadInitial();
@@ -231,12 +232,12 @@ export const App: React.FC = () => {
             )}
 
             {activeTab === 'impact' && (
-              <ChangeImpact projectId={selectedProjectId || ''} />
+              <ChangeImpact projectId={selectedProjectId || ''} arch={architecture} />
             )}
 
             {activeTab === 'economics' && <TokenEconomics />}
 
-            {activeTab === 'evaluation' && <EvaluationHarness />}
+            {activeTab === 'evaluation' && <EvaluationHarness projectId={selectedProjectId} />}
           </div>
         </main>
       </div>
