@@ -1,5 +1,6 @@
 """End-to-end agent workflow orchestration connecting tasks, diffs, tests, and cognitive memories."""
 
+import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -11,6 +12,7 @@ from cortexforge.agent.events import (
     EventAdapterRegistry,
 )
 from cortexforge.agent.failure_intelligence import FailureIntelligenceEngine
+from cortexforge.agent.success_intelligence import SuccessIntelligence
 from cortexforge.code_intelligence.change_propagator import (
     ChangeImpactReport,
     SemanticChangePropagator,
@@ -21,6 +23,7 @@ from cortexforge.core.models import (
     FailureEpisode,
     FixAttempt,
     Project,
+    RetrievalEvent,
     TestCaseResult,
     TestRun,
 )
@@ -28,7 +31,9 @@ from cortexforge.core.schemas import MemoryCreate, MemoryEvidenceCreate
 from cortexforge.memory.consolidation import MemoryConsolidationEngine
 from cortexforge.memory.service import MemoryService
 from cortexforge.memory.verification import MemoryVerificationEngine
+from cortexforge.observability.audit import record_audit
 from cortexforge.retrieval.composer import ComposedContext, ContextComposer
+from cortexforge.retrieval.usefulness import RetrievalUsefulnessTracker
 
 
 class AgentWorkflowOrchestrator:
@@ -42,6 +47,8 @@ class AgentWorkflowOrchestrator:
         verifier: MemoryVerificationEngine | None = None,
         failure_engine: FailureIntelligenceEngine | None = None,
         consolidator: MemoryConsolidationEngine | None = None,
+        success_intelligence: SuccessIntelligence | None = None,
+        usefulness: RetrievalUsefulnessTracker | None = None,
     ) -> None:
         self.memory_service = memory_service or MemoryService()
         self.composer = composer or ContextComposer()
@@ -49,6 +56,8 @@ class AgentWorkflowOrchestrator:
         self.verifier = verifier or MemoryVerificationEngine()
         self.failure_engine = failure_engine or FailureIntelligenceEngine()
         self.consolidator = consolidator or MemoryConsolidationEngine()
+        self.success_intelligence = success_intelligence or SuccessIntelligence()
+        self.usefulness = usefulness or RetrievalUsefulnessTracker()
 
     async def start_task(
         self,
@@ -92,6 +101,7 @@ class AgentWorkflowOrchestrator:
         )
 
         # 3. Generate token-budgeted explainable context
+        started = time.perf_counter()
         context = await self.composer.build_context(
             session=session,
             project_id=project_id,
@@ -99,6 +109,51 @@ class AgentWorkflowOrchestrator:
             profile=profile,
             target_files=target_files,
         )
+        latency_ms = (time.perf_counter() - started) * 1000
+
+        # 3a. Record what retrieval returned and what the composer selected from
+        #     it. The other half of the loop -- which memories the agent actually
+        #     used -- is attached when the task completes (section 27).
+        selected = [item["id"] for item in context.selected_memories]
+        excluded = [item["id"] for item in context.excluded_memories]
+        await self.usefulness.record_retrieval(
+            session,
+            project_id=project_id,
+            query=task_text,
+            returned_memory_ids=selected + excluded,
+            selected_memory_ids=selected,
+            excluded_reasons={
+                item["id"]: item.get("reason", "") for item in context.excluded_memories
+            },
+            stale_returned_count=len(context.stale_warnings),
+            conflicted_returned_count=len(context.conflict_warnings),
+            task_id=task.id,
+            context_tokens=getattr(context, "estimated_tokens", 0),
+            latency_ms=round(latency_ms, 2),
+            embedding_model=self.composer.retrieval_engine.embedding_provider.model_name,
+            embedding_version=self.composer.retrieval_engine.embedding_provider.version,
+        )
+
+        # 3b. Surface approaches that worked on similar tasks before, so the agent
+        #     starts from what is known to work rather than from nothing.
+        prior_successes = await self.success_intelligence.find_similar_successes(
+            session,
+            project_id=project_id,
+            task_text=task_text,
+            target_files=target_files,
+        )
+        if prior_successes:
+            session.add(
+                AgentEvent(
+                    task_id=task.id,
+                    event_type=CanonicalEventType.MEMORY_RETRIEVED.value,
+                    source=agent_source,
+                    payload={
+                        "kind": "prior_successes",
+                        "successes": prior_successes,
+                    },
+                )
+            )
 
         # 4. Record CONTEXT_REQUESTED event
         ev_ctx = adapter.normalize_event(
@@ -431,8 +486,17 @@ class AgentWorkflowOrchestrator:
         token_output: int = 0,
         lesson_learned: str | None = None,
         agent_source: str = "mcp",
+        successful_approach: str | None = None,
+        affected_files: list[str] | None = None,
+        commit_sha: str | None = None,
     ) -> AgentTask | None:
-        """Mark task completed, reverify project memories, and promote durable knowledge."""
+        """Close out a task: verify, record what worked, and log the outcome.
+
+        A completed task is the moment both kinds of learning are available. The
+        failure path was already recorded as episodes; this also records the
+        approach that *worked*, so a future agent facing a similar task can
+        retrieve it rather than rediscovering it (section 17).
+        """
         task = await session.get(AgentTask, task_id)
         if not task:
             return None
@@ -461,10 +525,26 @@ class AgentWorkflowOrchestrator:
             )
         )
 
-        # 1. Run memory verification engine across the project
-        await self.verifier.verify_project_memories(session, task.project_id)
+        # 1. Re-verify project memories against the repository as the task left it.
+        await self.verifier.verify_project_memories(
+            session, task.project_id, commit_sha=commit_sha
+        )
 
-        # 2. If a durable lesson was learned, record in L5
+        # 2. Record the approach that worked, so it is retrievable next time.
+        if success:
+            approach = successful_approach or lesson_learned
+            if approach:
+                await self.success_intelligence.record_task_success(
+                    session,
+                    task,
+                    approach=approach,
+                    affected_files=affected_files,
+                    commit_sha=commit_sha,
+                )
+
+        # 3. A lesson stated by an agent is an observation, not a verified rule.
+        #    It is recorded, and the activation policy in MemoryService decides
+        #    what state it enters -- which, absent code grounding, is UNVERIFIED.
         if success and lesson_learned:
             await self.memory_service.create_memory(
                 session=session,
@@ -477,10 +557,64 @@ class AgentWorkflowOrchestrator:
                     memory_type="LESSON",
                     source_type="agent_observation",
                     importance=0.8,
-                    confidence=0.85,
                 ),
             )
+
+        # 4. Close the retrieval loop: which memories this task actually used, and
+        #    how it turned out. Without this, retrieval quality stays unmeasurable
+        #    (section 27).
+        await self._close_retrieval_events(session, task, success)
+
+        await record_audit(
+            session,
+            action="TASK_COMPLETED",
+            resource_type="agent_task",
+            resource_id=task.id,
+            actor=agent_source,
+            project_id=task.project_id,
+            after={"success": success, "tokens": task.token_input + task.token_output},
+            reason=task.task_text[:200],
+        )
 
         await session.commit()
         await session.refresh(task)
         return task
+
+    async def _close_retrieval_events(
+        self, session: AsyncSession, task: AgentTask, success: bool
+    ) -> None:
+        """Attribute the task's outcome to the retrievals that informed it.
+
+        Memories the agent reported reading are recorded as *used*; the rest were
+        retrieved and not used, which is exactly the signal needed to tell useful
+        retrieval from noise.
+        """
+        events = await session.execute(
+            select(RetrievalEvent).where(
+                RetrievalEvent.task_id == task.id,
+                RetrievalEvent.task_outcome.is_(None),
+            )
+        )
+        pending = list(events.scalars().all())
+        if not pending:
+            return
+
+        used_ids: set[str] = set()
+        agent_events = await session.execute(
+            select(AgentEvent).where(AgentEvent.task_id == task.id)
+        )
+        for event in agent_events.scalars().all():
+            payload = event.payload or {}
+            for key in ("memory_ids", "used_memory_ids", "referenced_memory_ids"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    used_ids.update(str(item) for item in value)
+
+        outcome = "SUCCESS" if success else "FAILURE"
+        for event in pending:
+            await self.usefulness.record_usage(
+                session,
+                event.id,
+                used_memory_ids=sorted(used_ids & set(event.returned_memory_ids or [])),
+                task_outcome=outcome,
+            )

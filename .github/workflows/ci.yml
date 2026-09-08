@@ -33,6 +33,16 @@ jobs:
         run: |
           ruff check src tests
 
+      # A fresh deployment runs migrations, not create_all. This step catches a
+      # chain that only works against a database that already exists -- which is
+      # exactly the state this repository was previously in.
+      # The env block is used rather than an inline assignment so the step works
+      # on both the Ubuntu and Windows runners.
+      - name: Verify migrations build the schema from empty
+        env:
+          CORTEX_DB_URL: sqlite+aiosqlite:///migration_check.db
+        run: alembic upgrade head
+
       - name: Run Test Suite (pytest)
         run: |
           pytest -v

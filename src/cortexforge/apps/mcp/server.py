@@ -6,13 +6,15 @@ from mcp.server.mcpserver import MCPServer
 from sqlalchemy import func, select
 
 from cortexforge.agent.orchestrator import AgentWorkflowOrchestrator
+from cortexforge.agent.success_intelligence import SuccessIntelligence
 from cortexforge.architecture.invariants import ArchitectureInvariantEngine
 from cortexforge.code_intelligence.change_propagator import SemanticChangePropagator
 from cortexforge.code_intelligence.scanner import RepositoryScanner
 from cortexforge.core.db import init_db, session_scope
-from cortexforge.core.models import CodeEntity, Memory, Project
+from cortexforge.core.models import CodeEntity, Memory, MemoryDecision, Project
 from cortexforge.core.schemas import MemoryCreate, MemoryEvidenceCreate
 from cortexforge.graph.service import GraphService
+from cortexforge.memory.claims import ClaimService
 from cortexforge.memory.consolidation import MemoryConsolidationEngine
 from cortexforge.memory.provenance import ProvenanceEngine
 from cortexforge.memory.service import MemoryService
@@ -20,6 +22,7 @@ from cortexforge.memory.snapshots import CognitiveSnapshotEngine
 from cortexforge.memory.verification import MemoryVerificationEngine
 from cortexforge.retrieval.composer import ContextComposer
 from cortexforge.retrieval.engine import HybridRetrievalEngine
+from cortexforge.verification.engine import ClaimVerificationEngine
 
 mcp_server = MCPServer(
     name="cortexforge",
@@ -33,7 +36,12 @@ mcp_server = MCPServer(
 scanner = RepositoryScanner()
 graph_service = GraphService()
 memory_service = MemoryService()
+claim_service = ClaimService()
+# Two verification layers: memory-level (derives a memory's state from its
+# claims) and claim-level (evaluates the propositions themselves).
 verification_engine = MemoryVerificationEngine()
+claim_verification_engine = ClaimVerificationEngine()
+success_intelligence = SuccessIntelligence()
 consolidation_engine = MemoryConsolidationEngine(memory_service=memory_service)
 retrieval_engine = HybridRetrievalEngine(graph_service=graph_service)
 context_composer = ContextComposer(retrieval_engine=retrieval_engine, graph_service=graph_service)
@@ -916,6 +924,288 @@ async def task_find_similar(task_text: str, project_id_or_path: str = ".") -> st
 
 
 # ==================== 5. RESOURCES ====================
+
+
+# ==================== 8. SAFE MEMORY OPERATIONS ====================
+#
+# Specification section 32 asks for observe / propose / verify / approve rather
+# than unrestricted durable writes. `memory_create` remains for compatibility, but
+# these express intent explicitly: an agent that is reporting what it saw should
+# not have to decide whether that becomes project truth, and should not be able to.
+
+
+@mcp_server.tool(
+    name="memory_observe",
+    description=(
+        "Record something the agent observed. Observations are stored as "
+        "unverified working knowledge, never as established project truth."
+    ),
+)
+async def memory_observe(
+    title: str,
+    content: str,
+    summary: str | None = None,
+    evidence_file: str | None = None,
+    evidence_line_start: int | None = None,
+    evidence_line_end: int | None = None,
+    project_id_or_path: str = ".",
+) -> str:
+    """Record an agent observation without asserting that it is true."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(session, project_id_or_path)
+        if not project:
+            return f"Error: Project could not be resolved for '{project_id_or_path}'."
+
+        evidence = None
+        if evidence_file:
+            evidence = [
+                MemoryEvidenceCreate(
+                    file_path=evidence_file,
+                    source_type="agent_observation",
+                    line_start=evidence_line_start,
+                    line_end=evidence_line_end,
+                )
+            ]
+
+        memory = await memory_service.create_memory(
+            session,
+            project.id,
+            MemoryCreate(
+                memory_type="EPISODE",
+                layer="L6",
+                title=title,
+                content=content,
+                summary=summary or content[:150],
+                source_type="agent_observation",
+                importance=0.5,
+                evidence=evidence,
+            ),
+        )
+        return (
+            f"Recorded observation '{memory.title}' (ID: `{memory.id}`, "
+            f"status `{memory.status}`, authority `{memory.authority}`). "
+            "It is not project truth until verified."
+        )
+
+
+@mcp_server.tool(
+    name="memory_propose",
+    description=(
+        "Propose durable project knowledge (a decision, constraint or lesson). "
+        "Proposals wait for verification or human approval before being believed."
+    ),
+)
+async def memory_propose(
+    title: str,
+    content: str,
+    summary: str | None = None,
+    memory_type: str = "LESSON",
+    evidence_file: str | None = None,
+    evidence_line_start: int | None = None,
+    evidence_line_end: int | None = None,
+    project_id_or_path: str = ".",
+) -> str:
+    """Propose knowledge for review rather than writing it in as fact."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(session, project_id_or_path)
+        if not project:
+            return f"Error: Project could not be resolved for '{project_id_or_path}'."
+
+        evidence = None
+        if evidence_file:
+            evidence = [
+                MemoryEvidenceCreate(
+                    file_path=evidence_file,
+                    source_type="code",
+                    line_start=evidence_line_start,
+                    line_end=evidence_line_end,
+                )
+            ]
+
+        memory = await memory_service.create_memory(
+            session,
+            project.id,
+            MemoryCreate(
+                memory_type=memory_type.upper(),
+                title=title,
+                content=content,
+                summary=summary or content[:150],
+                source_type="agent_observation",
+                importance=0.75,
+                evidence=evidence,
+            ),
+        )
+        claims = await claim_service.get_claims_for_memory(session, memory.id)
+        return (
+            f"Proposed '{memory.title}' (ID: `{memory.id}`, status `{memory.status}`).\n"
+            f"Extracted {len(claims)} verifiable claim(s):\n"
+            + "\n".join(f"  - {claim.text}" for claim in claims[:5])
+        )
+
+
+@mcp_server.tool(
+    name="memory_verify_claims",
+    description=(
+        "Verify a project's claims against the current repository and report each "
+        "outcome with the reason behind it, including UNKNOWN where evidence is "
+        "insufficient."
+    ),
+)
+async def memory_verify_claims(
+    project_id_or_path: str = ".", commit_sha: str | None = None
+) -> str:
+    """Run claim verification and report what was found."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(session, project_id_or_path)
+        if not project:
+            return f"Error: Project could not be resolved for '{project_id_or_path}'."
+
+        run = await claim_verification_engine.verify_project(
+            session, project.id, commit_sha=commit_sha, verifier="mcp"
+        )
+        return (
+            f"# Verification run `{run.id}`\n"
+            f"- Claims evaluated: {run.claims_evaluated}\n"
+            f"- Verified: {run.verified_count}\n"
+            f"- Partially verified: {run.partially_verified_count}\n"
+            f"- Failed: {run.failed_count}\n"
+            f"- Conflicted: {run.conflicted_count}\n"
+            f"- Unknown (insufficient evidence): {run.unknown_count}\n"
+            f"- Not applicable: {run.not_applicable_count}"
+        )
+
+
+@mcp_server.tool(
+    name="memory_get_claims",
+    description="Lists the individually verifiable claims inside a memory and their verification state.",
+)
+async def memory_get_claims(memory_id: str) -> str:
+    """Show what a memory actually asserts, claim by claim."""
+    await init_db()
+    async with session_scope() as session:
+        claims = await claim_service.get_claims_for_memory(session, memory_id)
+        if not claims:
+            return f"No claims recorded for memory `{memory_id}`."
+
+        lines = [f"# Claims in memory `{memory_id}` ({len(claims)})"]
+        for claim in claims:
+            lines.append(f"- **{claim.text}**")
+            lines.append(
+                f"  status `{claim.status}` - authority `{claim.authority}` - "
+                f"confidence {claim.confidence:.2f}"
+            )
+            explanation = (claim.confidence_components or {}).get("explanation")
+            if explanation:
+                lines.append(f"  {explanation}")
+        return "\n".join(lines)
+
+
+@mcp_server.tool(
+    name="memory_pending_approvals",
+    description="Lists memories awaiting human approval before they may be treated as project truth.",
+)
+async def memory_pending_approvals(project_id_or_path: str = ".") -> str:
+    """Show what is waiting on a decision."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(session, project_id_or_path)
+        if not project:
+            return f"Error: Project could not be resolved for '{project_id_or_path}'."
+
+        pending: list = []
+        for state in ("REVIEW_REQUIRED", "CANDIDATE"):
+            pending.extend(
+                await memory_service.list_memories(session, project.id, status=state)
+            )
+        if not pending:
+            return f"Nothing is awaiting approval in '{project.name}'."
+
+        lines = [f"# Awaiting approval in {project.name} ({len(pending)})"]
+        for memory in pending:
+            lines.append(
+                f"- `{memory.id}` **{memory.title}** [{memory.status}, "
+                f"{memory.authority}]: {memory.summary}"
+            )
+        return "\n".join(lines)
+
+
+@mcp_server.tool(
+    name="task_find_successful_approaches",
+    description=(
+        "Retrieves approaches that previously worked on similar tasks, with the "
+        "reason each was considered relevant."
+    ),
+)
+async def task_find_successful_approaches(
+    task_text: str, project_id_or_path: str = ".", target_files: str | None = None
+) -> str:
+    """Surface what worked before, so the agent does not rediscover it."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(session, project_id_or_path)
+        if not project:
+            return f"Error: Project could not be resolved for '{project_id_or_path}'."
+
+        files = [f.strip() for f in target_files.split(",")] if target_files else None
+        successes = await success_intelligence.find_similar_successes(
+            session, project.id, task_text, target_files=files
+        )
+        if not successes:
+            return (
+                "No comparable successful approach has been recorded for this project "
+                "yet. That is an absence of evidence, not evidence that none exists."
+            )
+
+        lines = [f"# Approaches that worked on similar tasks ({len(successes)})"]
+        for item in successes:
+            lines.append(f"- **{item['title']}** (relevance {item['score']:.2f})")
+            lines.append(f"  *Why surfaced*: {item['why_selected']}")
+            lines.append(f"  *Approach*: {item['approach']}")
+            if item.get("why_it_worked"):
+                lines.append(f"  *Why it worked*: {item['why_it_worked']}")
+        return "\n".join(lines)
+
+
+@mcp_server.tool(
+    name="memory_get_decisions_log",
+    description=(
+        "Shows the reconciliation decision log: what each code change caused "
+        "CortexForge to conclude about its memories, and why."
+    ),
+)
+async def memory_get_decisions_log(project_id_or_path: str = ".", limit: int = 20) -> str:
+    """Explain how the project's beliefs got to their current state."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(session, project_id_or_path)
+        if not project:
+            return f"Error: Project could not be resolved for '{project_id_or_path}'."
+
+        result = await session.execute(
+            select(MemoryDecision)
+            .where(MemoryDecision.project_id == project.id)
+            .order_by(MemoryDecision.created_at.desc())
+            .limit(limit)
+        )
+        decisions = list(result.scalars().all())
+        if not decisions:
+            return f"No reconciliation decisions recorded for '{project.name}' yet."
+
+        lines = [f"# Reconciliation decisions for {project.name} ({len(decisions)})"]
+        for decision in decisions:
+            lines.append(
+                f"- **{decision.decision}** ({decision.reason_code}) on memory "
+                f"`{decision.memory_id}`"
+            )
+            lines.append(f"  {decision.reason}")
+            if decision.previous_status != decision.new_status:
+                lines.append(
+                    f"  status: {decision.previous_status} -> {decision.new_status}"
+                )
+        return "\n".join(lines)
 
 
 @mcp_server.resource("cortex://project/architecture")
