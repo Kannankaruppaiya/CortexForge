@@ -138,6 +138,7 @@ class MemoryEvidenceCreate(BaseModel):
     commit_sha: str | None = None
     line_start: int | None = None
     line_end: int | None = None
+    evidence_hash: str | None = None
     confidence: float = 1.0
 
 

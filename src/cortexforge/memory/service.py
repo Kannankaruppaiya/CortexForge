@@ -1,6 +1,8 @@
 """Layered Memory Service (L0-L6) for CortexForge."""
 
+import hashlib
 import math
+import os
 from datetime import UTC, datetime
 from typing import Any
 
@@ -13,9 +15,11 @@ from cortexforge.core.models import (
     MemoryEvidence,
     MemoryRelation,
     MemoryVersion,
+    Project,
 )
 from cortexforge.core.schemas import MemoryCreate
 from cortexforge.embeddings.provider import EmbeddingProvider, get_embedding_provider
+from cortexforge.security.redactor import sanitize_text
 
 
 def cosine_similarity(v1: list[float], v2: list[float]) -> float:
@@ -40,16 +44,21 @@ class MemoryService:
         self, session: AsyncSession, project_id: str, payload: MemoryCreate
     ) -> Memory:
         """Create a new grounded project memory with versioning and embeddings."""
-        # Generate embedding for memory content
-        embed_res = await self.embedding_provider.embed_text(f"{payload.title}\n{payload.content}")
+        # Sanitize untrusted input against secrets and prompt injections
+        sanitized_title = sanitize_text(payload.title)
+        sanitized_content = sanitize_text(payload.content)
+        sanitized_summary = sanitize_text(payload.summary)
+
+        # Generate embedding for sanitized memory content
+        embed_res = await self.embedding_provider.embed_text(f"{sanitized_title}\n{sanitized_content}")
 
         status = "ACTIVE" if payload.importance >= 0.3 else "UNVERIFIED"
         memory = Memory(
             project_id=project_id,
             memory_type=payload.memory_type.upper(),
-            title=payload.title,
-            content=payload.content,
-            summary=payload.summary,
+            title=sanitized_title,
+            content=sanitized_content,
+            summary=sanitized_summary,
             status=status,
             confidence=1.0,
             importance=payload.importance,
@@ -77,7 +86,27 @@ class MemoryService:
 
         # Attach evidences
         if payload.evidence:
+            project = await session.get(Project, project_id)
             for ev in payload.evidence:
+                ev_hash = ev.evidence_hash
+                if not ev_hash and project and project.local_path:
+                    abs_p = os.path.join(project.local_path, ev.file_path.replace("/", os.sep))
+                    if os.path.exists(abs_p):
+                        try:
+                            with open(abs_p, "r", encoding="utf-8", errors="ignore") as f:
+                                lines = f.readlines()
+                            if ev.line_start is not None:
+                                s_idx = max(0, ev.line_start - 1)
+                                e_idx = ev.line_end if ev.line_end is not None else ev.line_start
+                                snip = "".join(lines[s_idx:e_idx])
+                            else:
+                                snip = "".join(lines)
+                            ev_hash = hashlib.sha256(snip.strip().encode("utf-8")).hexdigest()
+                        except (OSError, UnicodeDecodeError):
+                            ev_hash = None
+                if not ev_hash:
+                    ev_hash = hashlib.sha256(f"{ev.file_path}:{ev.line_start or 0}".encode()).hexdigest()
+
                 ev_obj = MemoryEvidence(
                     memory_id=memory.id,
                     source_type=ev.source_type,
@@ -86,7 +115,7 @@ class MemoryService:
                     commit_sha=ev.commit_sha,
                     line_start=ev.line_start,
                     line_end=ev.line_end,
-                    evidence_hash=f"{ev.file_path}:{ev.line_start or 0}",
+                    evidence_hash=ev_hash,
                     confidence=ev.confidence,
                 )
                 session.add(ev_obj)
@@ -121,11 +150,11 @@ class MemoryService:
 
         prev_version = memory.version
         memory.version += 1
-        memory.content = content
+        memory.content = sanitize_text(content)
         if title:
-            memory.title = title
+            memory.title = sanitize_text(title)
         if summary:
-            memory.summary = summary
+            memory.summary = sanitize_text(summary)
 
         # Recompute embedding
         embed_res = await self.embedding_provider.embed_text(f"{memory.title}\n{memory.content}")

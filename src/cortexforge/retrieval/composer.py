@@ -52,13 +52,14 @@ class ContextComposer:
         other_lessons: list[ScoredItem] = []
 
         for item in items:
+            m_type = (item.memory_type or "").upper()
             if item.status == "STALE":
                 stale_warnings.append(item)
-            elif "[DECISION]" in item.title:
+            elif m_type == "DECISION" or "[DECISION]" in item.title:
                 decisions.append(item)
-            elif "[CONSTRAINT]" in item.title:
+            elif m_type == "CONSTRAINT" or "[CONSTRAINT]" in item.title:
                 constraints.append(item)
-            elif "[FAILURE]" in item.title or "[FIX]" in item.title:
+            elif m_type in ("FAILURE", "FIX") or "[FAILURE]" in item.title or "[FIX]" in item.title:
                 failures.append(item)
             else:
                 other_lessons.append(item)
@@ -120,6 +121,17 @@ class ContextComposer:
         if affected_components:
             lines.append("## Affected Components & Blast Radius")
             lines.append(f"- {', '.join(list(set(affected_components))[:8])}")
+            lines.append("")
+
+        # Project Conventions & Durable Lessons (L2/L5)
+        if other_lessons and profile in ("medium", "large"):
+            lines.append("## Project Conventions & Durable Lessons")
+            for item in other_lessons[:4]:
+                clean_t = item.title
+                for pfx in ["[CONVENTION] ", "[LESSON] ", "[ARCH] ", "[NOTE] "]:
+                    clean_t = clean_t.replace(pfx, "")
+                desc = item.summary or (item.content[:150] + ("..." if len(item.content) > 150 else ""))
+                lines.append(f"- **{clean_t}**: {desc}")
             lines.append("")
 
         # Stale Memory Warning

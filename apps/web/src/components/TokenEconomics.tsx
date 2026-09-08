@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Coins,
   TrendingDown,
@@ -8,11 +8,50 @@ import {
   DollarSign,
   FileCheck,
 } from 'lucide-react';
+import { fetchTokenEconomics } from '../api';
 
-export const TokenEconomics: React.FC = () => {
+interface LayerBreakdown {
+  name: string;
+  tokens: number;
+  pct: number;
+  color: string;
+}
+
+interface BudgetProfile {
+  totalTokens: number;
+  label: string;
+  description: string;
+  layers: LayerBreakdown[];
+}
+
+interface TokenEconomicsProps {
+  projectId?: string | null;
+}
+
+export const TokenEconomics: React.FC<TokenEconomicsProps> = ({ projectId }) => {
   const [selectedBudget, setSelectedBudget] = useState<'small' | 'medium' | 'large'>('medium');
+  const [liveData, setLiveData] = useState<any>(null);
+  const [_isLoading, setIsLoading] = useState<boolean>(false);
 
-  const budgetProfiles = {
+  useEffect(() => {
+    if (!projectId) return;
+    let isMounted = true;
+    setIsLoading(true);
+    fetchTokenEconomics(projectId)
+      .then((data) => {
+        if (isMounted && data) {
+          setLiveData(data);
+        }
+      })
+      .finally(() => {
+        if (isMounted) setIsLoading(false);
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, [projectId]);
+
+  const fallbackProfiles: Record<'small' | 'medium' | 'large', BudgetProfile> = {
     small: {
       totalTokens: 2400,
       label: 'Small Budget (Fast / Latency-Optimized)',
@@ -54,7 +93,19 @@ export const TokenEconomics: React.FC = () => {
     },
   };
 
-  const activeProfile = budgetProfiles[selectedBudget];
+  const profiles = liveData?.profiles || fallbackProfiles;
+  const activeProfile = profiles[selectedBudget] || fallbackProfiles[selectedBudget];
+
+  const savingsPct = liveData?.savings_pct ?? 88.5;
+  const avgCortexTokens = liveData?.avg_context_tokens_cortex ?? 2850;
+  const avgBaseTokens = liveData?.avg_context_tokens_baseline ?? 24500;
+  const filesCortex = liveData?.files_explored_cortex ?? 1.2;
+  const filesBase = liveData?.files_explored_baseline ?? 14.6;
+  const toolsCortex = liveData?.tool_calls_cortex ?? 1.4;
+  const toolsBase = liveData?.tool_calls_baseline ?? 6.8;
+  const costCortex = liveData?.cost_per_1k_cortex ?? 4.20;
+  const costBase = liveData?.cost_per_1k_baseline ?? 36.75;
+  const costSaved = liveData?.cost_saved_per_1k ?? 32.55;
 
   return (
     <div className="space-y-6">
@@ -70,8 +121,13 @@ export const TokenEconomics: React.FC = () => {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {liveData && (
+            <span className="px-2 py-0.5 bg-indigo-950 border border-indigo-800 text-indigo-300 text-[11px] font-mono rounded">
+              Live Model
+            </span>
+          )}
           <span className="px-3 py-1 bg-emerald-950/60 border border-emerald-800/80 text-emerald-400 text-xs font-mono font-bold rounded-lg flex items-center gap-1.5">
-            <TrendingDown className="w-3.5 h-3.5" /> 88.5% Context Savings
+            <TrendingDown className="w-3.5 h-3.5" /> {savingsPct}% Context Savings
           </span>
         </div>
       </div>
@@ -84,11 +140,11 @@ export const TokenEconomics: React.FC = () => {
             <Cpu className="w-4 h-4 text-indigo-400" />
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="text-2xl font-bold font-mono text-emerald-400">2,850</span>
-            <span className="text-xs font-mono text-slate-500 line-through">24,500</span>
+            <span className="text-2xl font-bold font-mono text-emerald-400">{avgCortexTokens.toLocaleString()}</span>
+            <span className="text-xs font-mono text-slate-500 line-through">{avgBaseTokens.toLocaleString()}</span>
           </div>
           <div className="text-[11px] text-slate-500 font-mono">
-            88.4% reduction per agent turn
+            {savingsPct}% reduction per agent turn
           </div>
         </div>
 
@@ -98,11 +154,11 @@ export const TokenEconomics: React.FC = () => {
             <FileCheck className="w-4 h-4 text-blue-400" />
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="text-2xl font-bold font-mono text-emerald-400">1.2</span>
-            <span className="text-xs font-mono text-slate-500 line-through">14.6</span>
+            <span className="text-2xl font-bold font-mono text-emerald-400">{filesCortex}</span>
+            <span className="text-xs font-mono text-slate-500 line-through">{filesBase}</span>
           </div>
           <div className="text-[11px] text-slate-500 font-mono">
-            91.8% fewer files re-read
+            {liveData?.files_reduction_pct ?? 91.8}% fewer files re-read
           </div>
         </div>
 
@@ -112,11 +168,11 @@ export const TokenEconomics: React.FC = () => {
             <Zap className="w-4 h-4 text-amber-400" />
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="text-2xl font-bold font-mono text-emerald-400">1.4</span>
-            <span className="text-xs font-mono text-slate-500 line-through">6.8</span>
+            <span className="text-2xl font-bold font-mono text-emerald-400">{toolsCortex}</span>
+            <span className="text-xs font-mono text-slate-500 line-through">{toolsBase}</span>
           </div>
           <div className="text-[11px] text-slate-500 font-mono">
-            79.4% fewer exploratory calls
+            {liveData?.tool_calls_reduction_pct ?? 79.4}% fewer exploratory calls
           </div>
         </div>
 
@@ -126,11 +182,11 @@ export const TokenEconomics: React.FC = () => {
             <DollarSign className="w-4 h-4 text-emerald-400" />
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="text-2xl font-bold font-mono text-emerald-400">$4.20</span>
-            <span className="text-xs font-mono text-slate-500 line-through">$36.75</span>
+            <span className="text-2xl font-bold font-mono text-emerald-400">${costCortex.toFixed(2)}</span>
+            <span className="text-xs font-mono text-slate-500 line-through">${costBase.toFixed(2)}</span>
           </div>
           <div className="text-[11px] text-slate-500 font-mono">
-            $32.55 saved per 1k runs
+            ${costSaved.toFixed(2)} saved per 1k runs
           </div>
         </div>
       </div>
@@ -180,7 +236,7 @@ export const TokenEconomics: React.FC = () => {
         {/* Segmented Progress Bar */}
         <div className="space-y-2">
           <div className="w-full h-3 bg-slate-950 rounded-full overflow-hidden flex border border-slate-800">
-            {activeProfile.layers.map((l, i) => (
+            {activeProfile.layers.map((l: LayerBreakdown, i: number) => (
               <div
                 key={i}
                 style={{ width: `${l.pct}%` }}
@@ -193,7 +249,7 @@ export const TokenEconomics: React.FC = () => {
 
         {/* Breakdown Table */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          {activeProfile.layers.map((l, idx) => (
+          {activeProfile.layers.map((l: LayerBreakdown, idx: number) => (
             <div
               key={idx}
               className="p-3 bg-slate-950/70 border border-slate-800/80 rounded-lg flex items-center justify-between text-xs font-mono"

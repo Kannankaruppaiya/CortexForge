@@ -235,7 +235,7 @@ export const App: React.FC = () => {
               <ChangeImpact projectId={selectedProjectId || ''} arch={architecture} />
             )}
 
-            {activeTab === 'economics' && <TokenEconomics />}
+            {activeTab === 'economics' && <TokenEconomics projectId={selectedProjectId} />}
 
             {activeTab === 'evaluation' && <EvaluationHarness projectId={selectedProjectId} />}
           </div>

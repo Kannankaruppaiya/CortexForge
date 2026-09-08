@@ -27,6 +27,18 @@ class SemanticChangePropagator:
     def __init__(self, graph_service: GraphService | None = None) -> None:
         self.graph_service = graph_service or GraphService()
 
+    async def analyze_change(
+        self,
+        session: AsyncSession,
+        project_id: str,
+        modified_files: list[str],
+        mark_stale: bool = True,
+    ) -> ChangeImpactReport:
+        """Alias for propagate_changes."""
+        return await self.propagate_changes(
+            session, project_id, modified_files, mark_stale=mark_stale
+        )
+
     async def propagate_changes(
         self,
         session: AsyncSession,

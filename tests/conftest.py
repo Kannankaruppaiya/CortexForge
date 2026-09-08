@@ -8,6 +8,8 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from cortexforge.core.db import engine as global_db_engine
+from cortexforge.core.db import set_engine
 from cortexforge.core.models import Base
 
 
@@ -58,12 +60,15 @@ export class ApiClient {
 
 @pytest_asyncio.fixture
 async def test_session():
-    """Create an in-memory SQLite async test database."""
+    """Create an in-memory SQLite async test database and isolate global engine."""
     test_engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:", connect_args={"check_same_thread": False}
     )
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    orig_engine = global_db_engine
+    set_engine(test_engine)
 
     session_maker = async_sessionmaker(
         bind=test_engine, class_=AsyncSession, expire_on_commit=False
@@ -71,4 +76,5 @@ async def test_session():
     async with session_maker() as session:
         yield session
 
+    set_engine(orig_engine)
     await test_engine.dispose()

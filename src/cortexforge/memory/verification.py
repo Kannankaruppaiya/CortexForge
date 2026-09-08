@@ -1,5 +1,6 @@
 """Automated memory verification engine."""
 
+import hashlib
 import os
 from datetime import UTC, datetime
 
@@ -67,15 +68,30 @@ class MemoryVerificationEngine:
                 all_evidences_intact = False
                 break
 
-            # If line numbers provided, verify file has at least that many lines
-            if ev.line_start:
-                try:
-                    with open(abs_file_path, "r", encoding="utf-8", errors="ignore") as f:
-                        lines = f.readlines()
+            try:
+                with open(abs_file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    lines = f.readlines()
+
+                if ev.line_start is not None:
                     if ev.line_start > len(lines):
                         all_evidences_intact = False
-                except Exception:
+                        break
+                    s_idx = max(0, ev.line_start - 1)
+                    e_idx = ev.line_end if ev.line_end is not None else ev.line_start
+                    snip = "".join(lines[s_idx:e_idx])
+                else:
+                    snip = "".join(lines)
+
+                curr_hash = hashlib.sha256(snip.strip().encode("utf-8")).hexdigest()
+
+                is_sha256 = len(ev.evidence_hash) == 64 and all(c in "0123456789abcdefABCDEF" for c in ev.evidence_hash) if ev.evidence_hash else False
+                is_custom_hash = ev.evidence_hash != f"{ev.file_path}:{ev.line_start or 0}" if ev.evidence_hash else False
+                if (is_sha256 or is_custom_hash) and curr_hash.lower() != (ev.evidence_hash or "").lower():
                     all_evidences_intact = False
+                    break
+            except Exception:
+                all_evidences_intact = False
+                break
 
         if has_missing_file or not all_evidences_intact:
             memory.status = "STALE"

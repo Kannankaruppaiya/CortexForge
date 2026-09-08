@@ -37,6 +37,8 @@ class ScoredItem(BaseModel):
     breakdown: dict[str, float]
     provenance: str | None = None
     status: str = "ACTIVE"
+    memory_type: str | None = None
+    layer: str | None = None
 
 
 class HybridRetrievalEngine:
@@ -168,6 +170,7 @@ class HybridRetrievalEngine:
                     },
                     provenance=mem.source_reference or (mem.evidences[0].file_path if mem.evidences else None),
                     status=mem.status,
+                    memory_type=mem.memory_type,
                 )
             )
 

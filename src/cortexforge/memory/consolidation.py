@@ -22,6 +22,12 @@ class MemoryConsolidationEngine:
         self.memory_service = memory_service or MemoryService()
         self.llm_provider = llm_provider or get_llm_provider()
 
+    async def consolidate_project_memories(
+        self, session: AsyncSession, project_id: str
+    ) -> dict[str, Any]:
+        """Alias for consolidate_project."""
+        return await self.consolidate_project(session, project_id)
+
     async def consolidate_project(
         self, session: AsyncSession, project_id: str
     ) -> dict[str, Any]:
