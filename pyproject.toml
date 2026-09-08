@@ -36,6 +36,13 @@ dev = [
     "ruff>=0.5.0",
     "mypy>=1.10.0",
 ]
+all = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.5.0",
+    "mypy>=1.10.0",
+]
+
 
 [project.scripts]
 cortex = "cortexforge.apps.cli.main:cli"
