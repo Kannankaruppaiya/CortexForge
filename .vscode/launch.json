@@ -1,0 +1,45 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Cortex: Serve REST API & Dashboard",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": [
+        "cortexforge.apps.api.main:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8000",
+        "--reload"
+      ],
+      "jinja": true,
+      "justMyCode": true
+    },
+    {
+      "name": "Cortex: Run MCP Server (stdio)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "cortexforge.apps.mcp.server",
+      "justMyCode": true
+    },
+    {
+      "name": "Cortex: Run Demo Agent",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/examples/demo_agent.py",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Cortex: Run Pytest",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["-v"],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    }
+  ]
+}
