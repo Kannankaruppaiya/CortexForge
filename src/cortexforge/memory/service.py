@@ -128,21 +128,32 @@ class MemoryService:
 
         # Activation policy (sections 7, 23, 43).
         #
-        # A statement from a proposal-only authority -- an LLM, repository prose,
-        # anything untrusted -- is never born believed. It enters as a CANDIDATE and
-        # must pass verification or human approval to become ACTIVE. High-impact
-        # memory types additionally route through review regardless of source,
-        # because being wrong about a security constraint is expensive.
+        # Three questions decide the initial state, in order:
+        #
+        # 1. Can this source establish truth at all? An LLM, repository prose or
+        #    untrusted input cannot. It enters as a CANDIDATE and must be verified
+        #    or approved before anything believes it.
+        # 2. Is it high-impact and *unevidenced*? A security constraint or
+        #    architectural rule asserted without grounding is exactly the kind of
+        #    claim that is expensive to get wrong, so it waits for a human.
+        #    A high-impact claim that *is* grounded in code takes the evidence
+        #    path instead -- routing verifiable claims through human review would
+        #    make grounding pointless.
+        # 3. Otherwise: grounded claims are believed and subsequently verified;
+        #    ungrounded ones are recorded as UNVERIFIED rather than presented as
+        #    established.
+        is_high_impact = payload.memory_type.upper() in _REVIEW_REQUIRED_TYPES
+        speaks_for_itself = authority_rank(authority) >= authority_rank(
+            Authority.USER_CONFIRMED
+        )
+
         if is_proposal_only(authority):
             status = MemoryState.CANDIDATE.value
-        elif payload.memory_type.upper() in _REVIEW_REQUIRED_TYPES and authority_rank(
-            authority
-        ) < authority_rank(Authority.USER_CONFIRMED):
+        elif is_high_impact and not payload.evidence and not speaks_for_itself:
             status = MemoryState.REVIEW_REQUIRED.value
         elif payload.evidence:
             status = MemoryState.ACTIVE.value
         else:
-            # No grounding evidence: recorded, but not presented as established.
             status = MemoryState.UNVERIFIED.value
 
         memory = Memory(
@@ -207,14 +218,31 @@ class MemoryService:
                             if ev.line_start is not None:
                                 s_idx = max(0, ev.line_start - 1)
                                 e_idx = ev.line_end if ev.line_end is not None else ev.line_start
-                                snip = "".join(lines[s_idx:e_idx])
+                                snip = (
+                                    "" if ev.line_start > len(lines)
+                                    else "".join(lines[s_idx:e_idx])
+                                )
                             else:
                                 snip = "".join(lines)
-                            ev_hash = hashlib.sha256(snip.strip().encode("utf-8")).hexdigest()
+                            # An anchor that resolves to nothing is not grounding.
+                            # Hashing an empty snippet would produce the constant
+                            # sha256 of the empty string, which would then "match"
+                            # at verification time and make a claim about
+                            # non-existent code verify as true.
+                            ev_hash = (
+                                hashlib.sha256(snip.strip().encode("utf-8")).hexdigest()
+                                if snip.strip()
+                                else None
+                            )
                         except (OSError, UnicodeDecodeError):
                             ev_hash = None
                 if not ev_hash:
-                    ev_hash = hashlib.sha256(f"{ev.file_path}:{ev.line_start or 0}".encode()).hexdigest()
+                    # A location-only fingerprint. It identifies the evidence for
+                    # deduplication but carries no content, so verification treats
+                    # it as unverifiable rather than as confirmed.
+                    ev_hash = hashlib.sha256(
+                        f"unresolved:{ev.file_path}:{ev.line_start or 0}".encode()
+                    ).hexdigest()
 
                 ev_obj = MemoryEvidence(
                     memory_id=memory.id,

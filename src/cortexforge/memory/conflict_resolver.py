@@ -20,6 +20,7 @@ import math
 import re
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -425,6 +426,16 @@ class ConflictResolver:
         # treat as succession only when the later memory actually postdates it.
         if later.valid_from_commit or later.valid_from_time:
             return True
-        return bool(
-            earlier.created_at and later.created_at and earlier.created_at < later.created_at
-        )
+        return _as_utc(earlier.created_at) < _as_utc(later.created_at)
+
+
+def _as_utc(value: datetime | None) -> datetime:
+    """Normalize a timestamp to an aware UTC datetime for comparison.
+
+    SQLite returns naive datetimes while PostgreSQL returns aware ones, so
+    comparing two timestamps directly raises depending on which database is in
+    use. Normalizing here keeps temporal reasoning backend-independent.
+    """
+    if value is None:
+        return datetime.min.replace(tzinfo=UTC)
+    return value if value.tzinfo else value.replace(tzinfo=UTC)

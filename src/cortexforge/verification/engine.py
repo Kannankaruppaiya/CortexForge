@@ -535,6 +535,17 @@ class ClaimVerificationEngine:
             actual = self._hash_range(abs_path, link.line_start, link.line_end)
             record["actual_hash"] = actual
             record["expected_hash"] = link.content_hash
+
+            if not actual:
+                # The anchor points at lines that do not exist or contain nothing.
+                # This is a missing referent, not a match.
+                link.state = "MISSING"
+                record["result"] = "range_does_not_resolve"
+                missing += 1
+                link.checked_at = datetime.now(UTC)
+                checked.append(record)
+                continue
+
             if actual == link.content_hash:
                 link.state = "INTACT"
                 record["result"] = "intact"
@@ -884,18 +895,35 @@ class ClaimVerificationEngine:
 
     @staticmethod
     def _hash_range(abs_path: str, line_start: int | None, line_end: int | None) -> str:
-        """sha256 of a line range, matching how evidence hashes are captured."""
+        """sha256 of a line range, or ``""`` when the range does not resolve.
+
+        The empty-range case matters more than it looks. Slicing a 6-line file at
+        lines 200-210 yields an empty string, whose sha256 is a fixed well-known
+        value -- so a claim anchored to lines that do not exist would hash to that
+        constant at capture time, hash to the same constant at verification time,
+        and be reported as VERIFIED. A claim about code that was never there would
+        come back true.
+
+        Returning the empty string instead lets the caller distinguish "this
+        anchor no longer resolves" from "this anchor still matches".
+        """
         try:
             with open(abs_path, encoding="utf-8", errors="ignore") as handle:
                 lines = handle.readlines()
         except OSError:
             return ""
+
         if line_start is None:
             snippet = "".join(lines)
         else:
+            if line_start > len(lines):
+                return ""
             start = max(0, line_start - 1)
             end = line_end if line_end is not None else line_start
             snippet = "".join(lines[start:end])
+
+        if not snippet.strip():
+            return ""
         return hashlib.sha256(snippet.strip().encode("utf-8")).hexdigest()
 
 
