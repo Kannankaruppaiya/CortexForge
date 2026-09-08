@@ -20,6 +20,7 @@ from cortexforge.core.models import (
     Memory,
     Project,
 )
+from cortexforge.core.schemas import MemoryCreate, MemoryEvidenceCreate
 from cortexforge.evaluation.runner import EvaluationRunner
 from cortexforge.graph.service import GraphService
 from cortexforge.memory.consolidation import MemoryConsolidationEngine
@@ -223,6 +224,55 @@ def status() -> None:
 @cli.group(help="Inspect, search, verify, and consolidate project memories.")
 def memory() -> None:
     pass
+
+
+@memory.command("create", help="Create a durable, evidence-grounded project memory.")
+@click.argument("project_ref", default=".", required=False)
+@click.option("--type", "memory_type", default="DECISION", help="Memory type (DECISION, CONSTRAINT, FAILURE, LESSON, etc.)")
+@click.option("--title", required=True, help="Short descriptive title")
+@click.option("--content", required=True, help="Detailed architectural or post-mortem content")
+@click.option("--summary", default=None, help="One-line summary for rapid agent scanning")
+@click.option("--importance", default=0.8, type=float, help="Importance weight (0.0 to 1.0)")
+@click.option("--file", "evidence_file", default=None, help="Relative file path for evidence grounding")
+def memory_create(
+    project_ref: str,
+    memory_type: str,
+    title: str,
+    content: str,
+    summary: str | None,
+    importance: float,
+    evidence_file: str | None,
+) -> None:
+    """Create project memory."""
+    async def _do_create() -> None:
+        await init_db()
+        async with session_scope() as session:
+            project = await _get_project_or_exit(session, project_ref)
+            evidence_list = []
+            if evidence_file:
+                evidence_list.append(
+                    MemoryEvidenceCreate(source_type="file", file_path=evidence_file, confidence=1.0)
+                )
+
+            payload = MemoryCreate(
+                memory_type=memory_type.upper(),
+                title=title,
+                content=content,
+                summary=summary or title,
+                importance=importance,
+                evidence=evidence_list if evidence_list else None,
+            )
+            created = await memory_service.create_memory(session, project.id, payload)
+            console.print(Panel(
+                f"[bold green]Successfully created memory:[/] {created.id}\n"
+                f"[bold white]Title:[/] {created.title}\n"
+                f"[bold white]Type:[/]  {created.memory_type} (Status: {created.status})\n"
+                f"[bold white]Summary:[/] {created.summary}",
+                title="Memory Stored",
+                border_style="green",
+            ))
+
+    asyncio.run(_do_create())
 
 
 @memory.command("list", help="List project memories.")
