@@ -48,3 +48,8 @@ coverage.xml
 *.swo
 .DS_Store
 Thumbs.db
+
+# Node / Web Frontend
+node_modules/
+.npm/
+

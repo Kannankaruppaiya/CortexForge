@@ -206,10 +206,10 @@ class Memory(Base):
 
     project: Mapped["Project"] = relationship("Project", back_populates="memories")
     evidences: Mapped[list["MemoryEvidence"]] = relationship(
-        "MemoryEvidence", back_populates="memory", cascade="all, delete-orphan"
+        "MemoryEvidence", back_populates="memory", cascade="all, delete-orphan", lazy="selectin"
     )
     versions: Mapped[list["MemoryVersion"]] = relationship(
-        "MemoryVersion", back_populates="memory", cascade="all, delete-orphan"
+        "MemoryVersion", back_populates="memory", cascade="all, delete-orphan", lazy="selectin"
     )
 
     __table_args__ = (

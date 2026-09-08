@@ -180,8 +180,24 @@ class MemoryVerifyRequest(BaseModel):
     verify_tests: bool = False
 
 
+class ChangeImpactRequest(BaseModel):
+    modified_files: list[str]
+    mark_stale: bool = False
+
+
+class ChangeImpactResponse(BaseModel):
+    project_id: str
+    modified_files: list[str]
+    directly_changed_entities: list[str]
+    affected_dependents: list[str]
+    memories_flagged_stale: list[str]
+    critical_constraints: list[str]
+    warnings: list[str]
+
+
 class HealthResponse(BaseModel):
     status: str = "healthy"
     database_connected: bool
     version: str = "0.1.0"
     timestamp: datetime
+

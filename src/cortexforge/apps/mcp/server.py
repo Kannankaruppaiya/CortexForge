@@ -1,36 +1,52 @@
-"""Model Context Protocol (MCP) Server for CortexForge."""
+"""Full-Featured Model Context Protocol (MCP) Server for CortexForge."""
 
 import os
 
 from mcp.server.mcpserver import MCPServer
-from sqlalchemy import select
+from sqlalchemy import func, select
 
+from cortexforge.code_intelligence.change_propagator import SemanticChangePropagator
 from cortexforge.code_intelligence.scanner import RepositoryScanner
 from cortexforge.core.db import init_db, session_scope
-from cortexforge.core.models import CodeEntity, Project
+from cortexforge.core.models import CodeEntity, Memory, Project
+from cortexforge.core.schemas import MemoryCreate, MemoryEvidenceCreate
 from cortexforge.graph.service import GraphService
+from cortexforge.memory.consolidation import MemoryConsolidationEngine
+from cortexforge.memory.service import MemoryService
+from cortexforge.memory.verification import MemoryVerificationEngine
+from cortexforge.retrieval.composer import ContextComposer
+from cortexforge.retrieval.engine import HybridRetrievalEngine
 
 mcp_server = MCPServer(
     name="cortexforge",
-    instructions="CortexForge verified project memory layer. Query architecture, components, and graph dependencies without re-exploring the entire repository.",
+    instructions=(
+        "CortexForge: Continuously evolving, verified project memory layer for AI coding agents. "
+        "Query architecture, retrieve decisions/constraints/failures, record outcomes, "
+        "and inspect blast radius before taking high-risk code modifications."
+    ),
 )
 
 scanner = RepositoryScanner()
 graph_service = GraphService()
+memory_service = MemoryService()
+verification_engine = MemoryVerificationEngine()
+consolidation_engine = MemoryConsolidationEngine(memory_service=memory_service)
+retrieval_engine = HybridRetrievalEngine(graph_service=graph_service)
+context_composer = ContextComposer(retrieval_engine=retrieval_engine, graph_service=graph_service)
+change_propagator = SemanticChangePropagator(graph_service=graph_service)
 
 
 async def _resolve_project(session, project_id_or_path: str) -> Project | None:
-    """Resolve project by ID or by local filesystem path, creating and scanning if needed."""
-    # Try ID first
+    """Resolve project by ID or local filesystem path, automatically initializing and scanning if needed."""
     project = await session.get(Project, project_id_or_path)
     if project:
         return project
 
-    # Try path
     canonical_path = os.path.realpath(project_id_or_path)
     stmt = select(Project).where(Project.local_path == canonical_path)
     res = await session.execute(stmt)
     project = res.scalars().first()
+
     if not project and os.path.exists(canonical_path):
         name = os.path.basename(canonical_path) or "project"
         project = Project(
@@ -44,6 +60,34 @@ async def _resolve_project(session, project_id_or_path: str) -> Project | None:
         await session.refresh(project)
 
     return project
+
+
+# ==================== 1. PROJECT ARCHITECTURE & CONTEXT TOOLS ====================
+
+@mcp_server.tool(
+    name="project_get_context",
+    description="Returns structured, token-budget-aware project context (architecture, active decisions, constraints, previous failures, and warnings) for a planned task.",
+)
+async def project_get_context(
+    task_text: str,
+    profile: str = "medium",
+    target_files: list[str] | None = None,
+    project_id_or_path: str = ".",
+) -> str:
+    """Build structured context block for coding agent prompt injection."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(session, project_id_or_path)
+        if not project:
+            return f"Error: Project could not be resolved for '{project_id_or_path}'."
+
+        return await context_composer.build_context(
+            session,
+            project_id=project.id,
+            task_text=task_text,
+            profile=profile,
+            target_files=target_files,
+        )
 
 
 @mcp_server.tool(
@@ -60,13 +104,10 @@ async def project_get_architecture(
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
-        arch = await graph_service.get_project_architecture(
-            session, project.id, depth=depth
-        )
+        arch = await graph_service.get_project_architecture(session, project.id, depth=depth)
         if not arch:
             return f"Error: Architecture not found for project '{project.name}'."
 
-        # Format as high-density structured markdown
         lines = [
             f"# Project Architecture: {arch.project_name}",
             f"- **Files**: {arch.total_files} | **Entities**: {arch.total_entities} | **Relationships**: {arch.total_relationships}",
@@ -98,12 +139,12 @@ async def project_get_architecture(
 
 @mcp_server.tool(
     name="project_get_component",
-    description="Inspects detailed AST symbol definition, signature, location, dependencies, and callers.",
+    description="Inspects detailed AST symbol definition, signature, location, dependencies, callers, and linked constraints.",
 )
 async def project_get_component(
     qualified_name: str, project_id_or_path: str = "."
 ) -> str:
-    """Retrieve detailed information on a specific code component."""
+    """Retrieve detailed AST component definition and graph connections."""
     await init_db()
     async with session_scope() as session:
         project = await _resolve_project(session, project_id_or_path)
@@ -146,9 +187,271 @@ async def project_get_component(
         return "\n".join(out)
 
 
+# ==================== 2. MEMORY EXPLORATION & RETRIEVAL TOOLS ====================
+
+@mcp_server.tool(
+    name="memory_search",
+    description="Performs multi-signal hybrid search across project memories (decisions, constraints, failures, lessons).",
+)
+async def memory_search(
+    query: str,
+    memory_type: str | None = None,
+    limit: int = 5,
+    project_id_or_path: str = ".",
+) -> str:
+    """Hybrid search across memories with provenance."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(session, project_id_or_path)
+        if not project:
+            return f"Error: Project could not be resolved for '{project_id_or_path}'."
+
+        results = await memory_service.search_memories(
+            session, project.id, query=query, memory_type=memory_type, limit=limit
+        )
+        if not results:
+            return f"No memories found matching query '{query}'."
+
+        lines = [f"# Memory Search Results for '{query}' ({len(results)})"]
+        for r in results:
+            m = r["memory"]
+            score = r["combined_score"]
+            status_tag = f"[{m.status}]" if m.status != "ACTIVE" else ""
+            lines.append(f"### {status_tag} [{m.memory_type}] {m.title} (Score: {score:.2f})")
+            lines.append(f"**Summary**: {m.summary}")
+            lines.append(f"**Content**: {m.content}")
+            if m.evidences:
+                ev_str = ", ".join(f"`{e.file_path}:{e.line_start or 1}`" for e in m.evidences)
+                lines.append(f"**Evidence Grounding**: {ev_str}")
+            lines.append(f"**ID**: `{m.id}` | **Version**: v{m.version}")
+            lines.append("")
+        return "\n".join(lines)
+
+
+@mcp_server.tool(
+    name="memory_get",
+    description="Fetches full details of a memory by ID, including evidence citations, relation links, and historical version changelog.",
+)
+async def memory_get(memory_id: str) -> str:
+    """Retrieve full memory record."""
+    await init_db()
+    async with session_scope() as session:
+        mem = await memory_service.get_memory(session, memory_id)
+        if not mem:
+            return f"Memory with ID '{memory_id}' not found."
+
+        lines = [
+            f"# [{mem.memory_type}] {mem.title}",
+            f"- **Status**: `{mem.status}` | **Confidence**: {mem.confidence:.2f} | **Importance**: {mem.importance:.2f}",
+            f"- **Version**: v{mem.version} | **Created**: {mem.created_at.strftime('%Y-%m-%d %H:%M')}",
+            "",
+            "## Summary",
+            mem.summary,
+            "",
+            "## Content",
+            mem.content,
+            "",
+            "## Evidence Citations",
+        ]
+        if mem.evidences:
+            for ev in mem.evidences:
+                lines.append(f"- `{ev.file_path}` (Lines {ev.line_start or 1}-{ev.line_end or 1}) [Commit: {ev.commit_sha or 'N/A'}]")
+        else:
+            lines.append("- None attached.")
+
+        lines.append("")
+        lines.append("## Version History")
+        if mem.versions:
+            for v in mem.versions:
+                lines.append(f"- **v{v.version}** ({v.created_at.strftime('%Y-%m-%d %H:%M')}): {v.change_reason}")
+        return "\n".join(lines)
+
+
+@mcp_server.tool(
+    name="memory_create",
+    description="Registers a new durable project memory (DECISION, CONSTRAINT, FAILURE, LESSON, etc.) with evidence grounding.",
+)
+async def memory_create(
+    title: str,
+    content: str,
+    summary: str,
+    memory_type: str = "LESSON",
+    evidence_file: str | None = None,
+    evidence_line_start: int | None = None,
+    evidence_line_end: int | None = None,
+    importance: float = 0.6,
+    project_id_or_path: str = ".",
+) -> str:
+    """Store a durable project memory."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(session, project_id_or_path)
+        if not project:
+            return f"Error: Project could not be resolved for '{project_id_or_path}'."
+
+        evidence_list = []
+        if evidence_file:
+            evidence_list.append(
+                MemoryEvidenceCreate(
+                    file_path=evidence_file,
+                    line_start=evidence_line_start,
+                    line_end=evidence_line_end,
+                )
+            )
+
+        payload = MemoryCreate(
+            memory_type=memory_type.upper(),
+            title=title,
+            content=content,
+            summary=summary,
+            importance=importance,
+            evidence=evidence_list if evidence_list else None,
+        )
+        mem = await memory_service.create_memory(session, project.id, payload)
+        return f"Successfully created memory '{mem.title}' (ID: `{mem.id}`, Status: `{mem.status}`, Version: v{mem.version})."
+
+
+@mcp_server.tool(
+    name="memory_update",
+    description="Updates existing memory content, automatically incrementing version and recording change rationale in audit trail.",
+)
+async def memory_update(
+    memory_id: str,
+    content: str,
+    change_reason: str,
+    title: str | None = None,
+    summary: str | None = None,
+) -> str:
+    """Update memory with audit trail."""
+    await init_db()
+    async with session_scope() as session:
+        updated = await memory_service.update_memory(
+            session,
+            memory_id=memory_id,
+            content=content,
+            change_reason=change_reason,
+            title=title,
+            summary=summary,
+        )
+        if not updated:
+            return f"Memory with ID '{memory_id}' not found."
+        return f"Successfully updated memory '{updated.title}' to version v{updated.version}."
+
+
+@mcp_server.tool(
+    name="memory_deprecate",
+    description="Deprecates a memory when an approach or pattern has become obsolete, optionally linking a superseding memory.",
+)
+async def memory_deprecate(
+    memory_id: str,
+    reason: str = "Deprecated by agent",
+    superseded_by_id: str | None = None,
+) -> str:
+    """Mark memory as deprecated."""
+    await init_db()
+    async with session_scope() as session:
+        dep = await memory_service.deprecate_memory(
+            session, memory_id=memory_id, superseded_by_id=superseded_by_id, reason=reason
+        )
+        if not dep:
+            return f"Memory with ID '{memory_id}' not found."
+        return f"Memory '{dep.title}' is now DEPRECATED."
+
+
+@mcp_server.tool(
+    name="memory_verify",
+    description="Verifies whether a memory's grounded code files and symbols still exist and are valid in the current working tree.",
+)
+async def memory_verify(memory_id: str) -> str:
+    """Trigger active verification on a memory."""
+    await init_db()
+    async with session_scope() as session:
+        mem = await memory_service.get_memory(session, memory_id)
+        if not mem:
+            return f"Memory with ID '{memory_id}' not found."
+
+        project = await session.get(Project, mem.project_id)
+        st = await verification_engine.verify_single_memory(session, mem, project.local_path)
+        await session.commit()
+        return f"Memory '{mem.title}' verified. Verification status: `{st}`."
+
+
+@mcp_server.tool(
+    name="memory_get_decisions",
+    description="Returns all active architectural decisions (ADRs) and trade-off rationales.",
+)
+async def memory_get_decisions(project_id_or_path: str = ".") -> str:
+    """Fetch architectural decisions."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(session, project_id_or_path)
+        if not project:
+            return f"Error: Project could not be resolved for '{project_id_or_path}'."
+
+        decisions = await memory_service.get_decisions(session, project.id)
+        if not decisions:
+            return f"No active architectural decisions recorded for project '{project.name}'."
+
+        lines = [f"# Architectural Decisions for {project.name} ({len(decisions)})"]
+        for d in decisions:
+            lines.append(f"- **{d.title}**: {d.summary}")
+            lines.append(f"  *Rationale*: {d.content}")
+        return "\n".join(lines)
+
+
+@mcp_server.tool(
+    name="memory_get_failures",
+    description="Returns previous bug post-mortems, failed attempts, and anti-patterns to prevent repeating past mistakes.",
+)
+async def memory_get_failures(project_id_or_path: str = ".") -> str:
+    """Fetch known failure post-mortems."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(session, project_id_or_path)
+        if not project:
+            return f"Error: Project could not be resolved for '{project_id_or_path}'."
+
+        failures = await memory_service.get_failures(session, project.id)
+        if not failures:
+            return f"No failure post-mortems recorded for project '{project.name}'."
+
+        lines = [f"# Historical Failures & Anti-Patterns for {project.name} ({len(failures)})"]
+        for f in failures:
+            lines.append(f"### [FAILURE] {f.title}")
+            lines.append(f"**Problem**: {f.summary}")
+            lines.append(f"**Root Cause & Fix**: {f.content}")
+            lines.append("")
+        return "\n".join(lines)
+
+
+@mcp_server.tool(
+    name="memory_get_constraints",
+    description="Returns operational invariants, safety guidelines, and architectural constraints that must not be broken.",
+)
+async def memory_get_constraints(project_id_or_path: str = ".") -> str:
+    """Fetch project constraints and invariants."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(session, project_id_or_path)
+        if not project:
+            return f"Error: Project could not be resolved for '{project_id_or_path}'."
+
+        constraints = await memory_service.get_constraints(session, project.id)
+        if not constraints:
+            return f"No operational constraints recorded for project '{project.name}'."
+
+        lines = [f"# Active Architectural Constraints for {project.name} ({len(constraints)})"]
+        for c in constraints:
+            lines.append(f"- **{c.title}**: {c.summary}")
+            lines.append(f"  *Invariant Requirement*: {c.content}")
+        return "\n".join(lines)
+
+
+# ==================== 3. GRAPH & CHANGE IMPACT TOOLS ====================
+
 @mcp_server.tool(
     name="graph_get_dependencies",
-    description="Returns all downstream dependencies of an entity up to depth N.",
+    description="Returns all downstream dependencies of an entity symbol or file up to depth N.",
 )
 async def graph_get_dependencies(
     entity_name: str, project_id_or_path: str = ".", depth: int = 2
@@ -160,9 +463,7 @@ async def graph_get_dependencies(
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
-        deps = await graph_service.get_dependencies(
-            session, project.id, entity_name, depth=depth
-        )
+        deps = await graph_service.get_dependencies(session, project.id, entity_name, depth=depth)
         if not deps:
             return f"No dependencies found for entity '{entity_name}'."
 
@@ -186,9 +487,7 @@ async def graph_get_dependents(
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
-        callers = await graph_service.get_dependents(
-            session, project.id, entity_name, depth=depth
-        )
+        callers = await graph_service.get_dependents(session, project.id, entity_name, depth=depth)
         if not callers:
             return f"No callers or dependents found for entity '{entity_name}'."
 
@@ -198,14 +497,170 @@ async def graph_get_dependents(
         return "\n".join(lines)
 
 
+@mcp_server.tool(
+    name="change_get_impact",
+    description="Pre-action governance check: analyzes the blast radius of modifying a given set of files and surfaces linked constraints and past failures.",
+)
+async def change_get_impact(
+    modified_files: list[str], project_id_or_path: str = "."
+) -> str:
+    """Pre-action governance check for proposed modifications."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(session, project_id_or_path)
+        if not project:
+            return f"Error: Project could not be resolved for '{project_id_or_path}'."
+
+        report = await change_propagator.propagate_changes(
+            session, project.id, modified_files, mark_stale=False
+        )
+
+        lines = [
+            "# Pre-Action Blast Radius & Impact Report",
+            f"- **Target Files**: {', '.join(report.modified_files)}",
+            f"- **Directly Changed Entities**: {len(report.directly_changed_entities)}",
+            f"- **Affected Downstream Callers**: {len(report.affected_dependents)}",
+            "",
+        ]
+
+        if report.warnings:
+            lines.append("## [HIGH RISK WARNINGS]")
+            for w in report.warnings:
+                lines.append(f"- {w}")
+            lines.append("")
+
+        if report.critical_constraints:
+            lines.append("## [INVARIANT CONSTRAINTS TO PRESERVE]")
+            for c in report.critical_constraints:
+                lines.append(f"- {c}")
+            lines.append("")
+
+        if report.affected_dependents:
+            lines.append("## Affected Consumers")
+            for dep in report.affected_dependents[:8]:
+                lines.append(f"- {dep}")
+            lines.append("")
+
+        return "\n".join(lines)
+
+
+# ==================== 4. SHORTCUT ACTIONS & MAINTENANCE TOOLS ====================
+
+@mcp_server.tool(
+    name="task_record_decision",
+    description="Convenience shortcut for an agent to record an architectural decision made during a task.",
+)
+async def task_record_decision(
+    title: str,
+    rationale: str,
+    component: str | None = None,
+    project_id_or_path: str = ".",
+) -> str:
+    """Record an architectural decision."""
+    return await memory_create(
+        title=title,
+        content=rationale,
+        summary=f"Decision made regarding {component or 'architecture'}",
+        memory_type="DECISION",
+        evidence_file=component,
+        project_id_or_path=project_id_or_path,
+    )
+
+
+@mcp_server.tool(
+    name="task_record_failure",
+    description="Convenience shortcut for an agent to record an obstacle or failed approach to prevent recurrence.",
+)
+async def task_record_failure(
+    title: str,
+    error_description: str,
+    attempted_fix: str,
+    component: str | None = None,
+    project_id_or_path: str = ".",
+) -> str:
+    """Record a failure post-mortem."""
+    content = f"Error: {error_description}\nAttempted Fix / Prevention: {attempted_fix}"
+    return await memory_create(
+        title=title,
+        content=content,
+        summary=f"Failed approach in {component or 'subsystem'}",
+        memory_type="FAILURE",
+        evidence_file=component,
+        project_id_or_path=project_id_or_path,
+    )
+
+
+@mcp_server.tool(
+    name="memory_consolidate",
+    description="Runs the memory consolidation engine to cluster episodic events into durable knowledge principles.",
+)
+async def memory_consolidate(project_id_or_path: str = ".") -> str:
+    """Trigger memory consolidation."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(session, project_id_or_path)
+        if not project:
+            return f"Error: Project could not be resolved for '{project_id_or_path}'."
+
+        res = await consolidation_engine.consolidate_project(session, project.id)
+        return (
+            f"Consolidation complete for '{project.name}': "
+            f"{res['clusters_consolidated']} clusters consolidated, "
+            f"{res['durable_memories_created']} durable memories synthesized, "
+            f"{res['memories_archived']} episodes archived."
+        )
+
+
+@mcp_server.tool(
+    name="memory_health",
+    description="Returns diagnostic statistics on memory health, active vs stale memories, and graph density.",
+)
+async def memory_health(project_id_or_path: str = ".") -> str:
+    """Report memory health metrics."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(session, project_id_or_path)
+        if not project:
+            return f"Error: Project could not be resolved for '{project_id_or_path}'."
+
+        total_mems = await session.scalar(select(func.count(Memory.id)).where(Memory.project_id == project.id))
+        active_mems = await session.scalar(select(func.count(Memory.id)).where(Memory.project_id == project.id, Memory.status == "ACTIVE"))
+        stale_mems = await session.scalar(select(func.count(Memory.id)).where(Memory.project_id == project.id, Memory.status == "STALE"))
+        conflicted_mems = await session.scalar(select(func.count(Memory.id)).where(Memory.project_id == project.id, Memory.status == "CONFLICTED"))
+        archived_mems = await session.scalar(select(func.count(Memory.id)).where(Memory.project_id == project.id, Memory.status == "ARCHIVED"))
+        entities_count = await session.scalar(select(func.count(CodeEntity.id)).where(CodeEntity.project_id == project.id))
+
+        stale_rate = (stale_mems / max(1, total_mems)) * 100
+
+        lines = [
+            f"# Memory Health Diagnostic: {project.name}",
+            f"- **Total Memories**: {total_mems}",
+            f"- **Active**: {active_mems} | **Stale**: {stale_mems} ({stale_rate:.1f}%) | **Conflicted**: {conflicted_mems} | **Archived**: {archived_mems}",
+            f"- **Code Graph Entities**: {entities_count}",
+            f"- **Overall Health Score**: {'EXCELLENT' if stale_rate < 10 else ('NEEDS_ATTENTION' if stale_rate < 30 else 'DEGRADED')}",
+        ]
+        return "\n".join(lines)
+
+
+# ==================== 5. RESOURCES ====================
+
 @mcp_server.resource("cortex://project/architecture")
 async def resource_architecture() -> str:
-    """Resource returning the current project architecture."""
     return await project_get_architecture(".")
 
 
+@mcp_server.resource("cortex://project/decisions")
+async def resource_decisions() -> str:
+    return await memory_get_decisions(".")
+
+
+@mcp_server.resource("cortex://project/constraints")
+async def resource_constraints() -> str:
+    return await memory_get_constraints(".")
+
+
 def main() -> None:
-    """Run the MCP server on stdio transport."""
+    """Run MCP server over stdio transport."""
     mcp_server.run()
 
 

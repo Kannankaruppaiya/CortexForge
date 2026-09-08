@@ -154,6 +154,21 @@ async def test_rest_api_endpoints(sample_repo, test_session: AsyncSession):
             assert arch_data["project_name"] == "ApiTestRepo"
             assert len(arch_data["modules"]) >= 2
 
+            # Check Change Impact
+            impact_resp = await client.post(
+                f"/api/v1/projects/{project_id}/impact",
+                json={"modified_files": ["services/auth.py"], "mark_stale": False},
+            )
+            assert impact_resp.status_code == 200
+            impact_data = impact_resp.json()
+            assert "directly_changed_entities" in impact_data
+            assert any("AuthService" in e for e in impact_data["directly_changed_entities"])
+
+        # Test Static SPA Dashboard serving
+        spa_resp = await client.get("/")
+        assert spa_resp.status_code == 200
+        assert "CortexForge" in spa_resp.text
+
     app.dependency_overrides.clear()
 
 
