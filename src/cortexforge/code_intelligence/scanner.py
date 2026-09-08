@@ -1,6 +1,7 @@
 """Incremental repository scanner and symbol extractor."""
 
 import os
+import subprocess
 import time
 
 from sqlalchemy import delete, select
@@ -15,6 +16,23 @@ from cortexforge.core.models import (
     RepositorySnapshot,
 )
 from cortexforge.core.schemas import ScanResponse
+
+
+def get_git_head_commit(root_path: str) -> str | None:
+    """Safely get current git HEAD commit SHA without shell injection."""
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root_path,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        )
+        sha = res.stdout.strip()
+        return sha if len(sha) == 40 else None
+    except Exception:
+        return None
 
 DEFAULT_IGNORED_DIRS = {
     ".git",
@@ -206,9 +224,13 @@ class RepositoryScanner:
                 total_relationships_extracted += 1
 
         # Record Snapshot
+        head_commit = get_git_head_commit(canonical_root)
+        if head_commit:
+            project.last_indexed_commit = head_commit
+
         snapshot = RepositorySnapshot(
             project_id=project.id,
-            commit_sha=project.last_indexed_commit or "initial-scan",
+            commit_sha=head_commit or project.last_indexed_commit or "initial-scan",
             file_count=len(rel_files),
             symbol_count=len(created_entities_by_qualified),
             dependency_count=total_relationships_extracted,
