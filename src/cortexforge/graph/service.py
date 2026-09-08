@@ -1,0 +1,214 @@
+"""Graph traversal and project architecture synthesis service."""
+
+from collections import defaultdict
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from cortexforge.core.models import CodeEntity, Project, Relationship
+from cortexforge.core.schemas import (
+    ArchitectureResponse,
+    ComponentSummary,
+    ModuleSummary,
+)
+
+
+class GraphService:
+    """Relational graph query and architecture synthesis service."""
+
+    async def get_project_architecture(
+        self, session: AsyncSession, project_id: str, depth: int = 2
+    ) -> ArchitectureResponse | None:
+        """Synthesize high-level structural model of the project."""
+        project = await session.get(Project, project_id)
+        if not project:
+            return None
+
+        # Fetch all code entities for the project
+        entities_stmt = select(CodeEntity).where(CodeEntity.project_id == project_id)
+        entities_res = await session.execute(entities_stmt)
+        all_entities = list(entities_res.scalars().all())
+
+        # Fetch all relationships
+        rels_stmt = select(Relationship).where(Relationship.project_id == project_id)
+        rels_res = await session.execute(rels_stmt)
+        all_rels = list(rels_res.scalars().all())
+
+        # Build adjacency maps
+        entity_by_id: dict[str, CodeEntity] = {e.id: e for e in all_entities}
+        outgoing: dict[str, list[str]] = defaultdict(list)
+        incoming: dict[str, list[str]] = defaultdict(list)
+
+        for rel in all_rels:
+            src = entity_by_id.get(rel.source_entity_id)
+            tgt = entity_by_id.get(rel.target_entity_id)
+            if src and tgt:
+                outgoing[src.qualified_name].append(tgt.name)
+                incoming[tgt.qualified_name].append(src.name)
+
+        # Partition entities into modules by top-level directory
+        modules_map: dict[str, list[CodeEntity]] = defaultdict(list)
+        files_set: set[str] = set()
+        languages_set: set[str] = set()
+
+        for entity in all_entities:
+            files_set.add(entity.file_path)
+            if entity.language != "unknown":
+                languages_set.add(entity.language)
+
+            parts = entity.file_path.replace("\\", "/").split("/")
+            module_name = parts[0] if len(parts) > 1 else "root"
+            if len(parts) > 2 and parts[0] in ("src", "packages", "apps", "libs"):
+                module_name = f"{parts[0]}/{parts[1]}"
+            modules_map[module_name].append(entity)
+
+        module_summaries: list[ModuleSummary] = []
+        primary_apis: list[ComponentSummary] = []
+        primary_models: list[ComponentSummary] = []
+
+        for mod_name, mod_entities in sorted(modules_map.items()):
+            mod_files = {e.file_path for e in mod_entities}
+            top_components: list[ComponentSummary] = []
+
+            for e in mod_entities:
+                if e.entity_type in ("class", "function", "interface", "model"):
+                    comp = ComponentSummary(
+                        name=e.name,
+                        qualified_name=e.qualified_name,
+                        entity_type=e.entity_type,
+                        file_path=e.file_path,
+                        line_range=[e.start_line, e.end_line],
+                        signature=e.signature,
+                        dependencies=list(set(outgoing.get(e.qualified_name, [])))[:10],
+                        dependents=list(set(incoming.get(e.qualified_name, [])))[:10],
+                    )
+                    top_components.append(comp)
+
+                    # Identify likely APIs or models
+                    lower_name = e.name.lower()
+                    if "api" in lower_name or "route" in lower_name or "controller" in lower_name or "service" in lower_name:
+                        primary_apis.append(comp)
+                    elif "model" in lower_name or "schema" in lower_name or e.entity_type in ("model", "interface"):
+                        primary_models.append(comp)
+
+            module_summaries.append(
+                ModuleSummary(
+                    module_path=mod_name,
+                    file_count=len(mod_files),
+                    entity_count=len(mod_entities),
+                    top_level_components=top_components[:15],
+                )
+            )
+
+        return ArchitectureResponse(
+            project_id=project.id,
+            project_name=project.name,
+            total_files=len(files_set),
+            total_entities=len(all_entities),
+            total_relationships=len(all_rels),
+            languages=sorted(languages_set),
+            modules=module_summaries,
+            primary_apis=primary_apis[:10],
+            primary_models=primary_models[:10],
+        )
+
+    async def get_dependencies(
+        self, session: AsyncSession, project_id: str, entity_name_or_id: str, depth: int = 2
+    ) -> list[dict[str, str]]:
+        """Resolve downstream dependencies for a given entity."""
+        # Find start entity by id or qualified name or name
+        stmt = select(CodeEntity).where(
+            CodeEntity.project_id == project_id,
+            (CodeEntity.id == entity_name_or_id)
+            | (CodeEntity.qualified_name == entity_name_or_id)
+            | (CodeEntity.name == entity_name_or_id),
+        )
+        res = await session.execute(stmt)
+        start_entity = res.scalars().first()
+        if not start_entity:
+            return []
+
+        visited: set[str] = {start_entity.id}
+        frontier: list[str] = [start_entity.id]
+        results: list[dict[str, str]] = []
+
+        for current_depth in range(1, depth + 1):
+            if not frontier:
+                break
+            next_frontier = []
+            rel_stmt = (
+                select(Relationship, CodeEntity)
+                .join(CodeEntity, Relationship.target_entity_id == CodeEntity.id)
+                .where(
+                    Relationship.project_id == project_id,
+                    Relationship.source_entity_id.in_(frontier),
+                )
+            )
+            rel_res = await session.execute(rel_stmt)
+            for rel, target_entity in rel_res.all():
+                if target_entity.id not in visited:
+                    visited.add(target_entity.id)
+                    next_frontier.append(target_entity.id)
+                    results.append(
+                        {
+                            "name": target_entity.name,
+                            "qualified_name": target_entity.qualified_name,
+                            "type": target_entity.entity_type,
+                            "file": target_entity.file_path,
+                            "relationship": rel.relationship_type,
+                            "depth": str(current_depth),
+                        }
+                    )
+            frontier = next_frontier
+
+        return results
+
+    async def get_dependents(
+        self, session: AsyncSession, project_id: str, entity_name_or_id: str, depth: int = 2
+    ) -> list[dict[str, str]]:
+        """Resolve upstream callers and dependents (blast radius) for a given entity."""
+        stmt = select(CodeEntity).where(
+            CodeEntity.project_id == project_id,
+            (CodeEntity.id == entity_name_or_id)
+            | (CodeEntity.qualified_name == entity_name_or_id)
+            | (CodeEntity.name == entity_name_or_id),
+        )
+        res = await session.execute(stmt)
+        start_entity = res.scalars().first()
+        if not start_entity:
+            return []
+
+        visited: set[str] = {start_entity.id}
+        frontier: list[str] = [start_entity.id]
+        results: list[dict[str, str]] = []
+
+        for current_depth in range(1, depth + 1):
+            if not frontier:
+                break
+            next_frontier = []
+            rel_stmt = (
+                select(Relationship, CodeEntity)
+                .join(CodeEntity, Relationship.source_entity_id == CodeEntity.id)
+                .where(
+                    Relationship.project_id == project_id,
+                    Relationship.target_entity_id.in_(frontier),
+                )
+            )
+            rel_res = await session.execute(rel_stmt)
+            for rel, source_entity in rel_res.all():
+                if source_entity.id not in visited:
+                    visited.add(source_entity.id)
+                    next_frontier.append(source_entity.id)
+                    results.append(
+                        {
+                            "name": source_entity.name,
+                            "qualified_name": source_entity.qualified_name,
+                            "type": source_entity.entity_type,
+                            "file": source_entity.file_path,
+                            "relationship": rel.relationship_type,
+                            "depth": str(current_depth),
+                        }
+                    )
+            frontier = next_frontier
+
+        return results
