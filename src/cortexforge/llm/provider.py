@@ -1,11 +1,33 @@
-"""Provider-neutral LLM abstraction for memory extraction and consolidation."""
+"""Provider-neutral LLM abstraction (specification sections 23 and 24).
 
+An LLM here is a proposal generator, never an authority. Two rules follow:
+
+* Production must never silently fall back to the mock provider. Mock output that
+  reaches durable memory is fabricated knowledge wearing the same clothes as the
+  real thing, so a misconfiguration fails loudly instead of quietly degrading.
+* Every response carries the provider that produced it, so downstream code can
+  refuse to treat mock output as evidence.
+"""
+
+import logging
 import os
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import httpx
+
+logger = logging.getLogger(__name__)
+
+# Environments in which a mock or unconfigured provider is a hard error.
+NON_MOCKABLE_ENVIRONMENTS = frozenset({"production", "prod", "staging"})
+
+
+def current_environment() -> str:
+    """The deployment environment, defaulting to development."""
+    return os.environ.get(
+        "CORTEX_ENV", os.environ.get("ENVIRONMENT", "development")
+    ).strip().lower()
 
 
 @dataclass
@@ -17,6 +39,15 @@ class LLMResponse:
     output_tokens: int
     latency_ms: float
     cost_estimate: float = 0.0
+
+    @property
+    def is_synthetic(self) -> bool:
+        """True when this text came from the offline mock rather than a model.
+
+        Callers that persist LLM output consult this so that mock text can never
+        be mistaken for a model's proposal.
+        """
+        return self.provider == "mock"
 
 
 class LLMProvider(ABC):
@@ -122,11 +153,17 @@ class OpenAIProvider(LLMProvider):
     ) -> LLMResponse:
         chosen_model = model or self.default_model
         if not self._api_key:
-            env = os.environ.get("CORTEX_ENV", os.environ.get("ENVIRONMENT", "development")).lower()
-            if env == "production":
+            environment = current_environment()
+            if environment in NON_MOCKABLE_ENVIRONMENTS:
                 raise RuntimeError(
-                    "Production configuration error: OpenAIProvider configured in production but OPENAI_API_KEY is not set."
+                    "OpenAIProvider is configured but OPENAI_API_KEY is not set, and "
+                    f"the environment is '{environment}'. Refusing to substitute "
+                    "mock output for a model response."
                 )
+            logger.warning(
+                "OPENAI_API_KEY is not set; returning deterministic mock output. "
+                "This text is not model output and must not be treated as one."
+            )
             return await MockLLMProvider().generate(prompt, system_prompt, chosen_model)
 
         messages = []
@@ -171,8 +208,28 @@ class OpenAIProvider(LLMProvider):
 
 
 def get_llm_provider(provider_type: str | None = None) -> LLMProvider:
-    """Factory returning configured LLM provider."""
-    ptype = (provider_type or os.environ.get("CORTEX_LLM_PROVIDER", "mock")).lower()
+    """Return the configured LLM provider.
+
+    The mock provider is only available outside production. Defaulting to it in a
+    production deployment -- which the previous unconditional fallback did -- would
+    let deterministic canned text flow into consolidation and become durable
+    project knowledge (section 24).
+    """
+    ptype = (provider_type or os.environ.get("CORTEX_LLM_PROVIDER", "mock")).strip().lower()
+    environment = current_environment()
+
     if ptype == "openai":
         return OpenAIProvider()
-    return MockLLMProvider()
+    if ptype == "mock":
+        if environment in NON_MOCKABLE_ENVIRONMENTS:
+            raise RuntimeError(
+                f"CORTEX_LLM_PROVIDER is 'mock' but the environment is "
+                f"'{environment}'. The mock provider returns canned text and must "
+                "not be used where its output can become durable memory."
+            )
+        return MockLLMProvider()
+
+    raise ValueError(
+        f"Unknown LLM provider '{ptype}'. Set CORTEX_LLM_PROVIDER to 'openai' or "
+        "'mock' (mock is unavailable in production)."
+    )

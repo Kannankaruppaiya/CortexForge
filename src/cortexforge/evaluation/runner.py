@@ -1,25 +1,31 @@
-"""Research-grade empirical benchmark and 7-way ablation evaluation suite.
+"""Reproducible retrieval benchmark across real configurations (section 49).
 
-Evaluates:
-  A. No memory (Baseline)
-  B. Naive vector RAG
-  C. Flat conversational memory
-  D. CortexForge retrieval only
-  E. CortexForge + provenance
-  F. CortexForge + change propagation
-  G. Full CortexForge
+The previous implementation returned literal constants for six of its seven modes
+-- `tests_passed=3`, `retrieval_precision=0.75`, `latency_ms=45.0` -- and surfaced
+them through the API as measured results. Those numbers described nothing; they
+were a picture of the conclusion the benchmark was expected to reach.
 
-Plus controlled ablation studies:
-  - without graph
-  - without provenance
-  - without freshness
-  - without failures
-  - without change propagation
-  - without consolidation
-  - without semantic AST diff
+This runner measures what it can and refuses to invent the rest.
+
+**Measured.** Each mode is a genuinely different retrieval configuration, executed
+against the project's real memories and code graph. Context size, latency,
+retrieval precision and recall against the task's declared ground truth, stale and
+conflicted hit rates, redundancy, and provenance coverage are all computed from
+what those configurations actually returned.
+
+**Not measured, and reported as such.** Task success, tests passed, repeated
+failures, generated output tokens and generation cost require executing a coding
+agent against the repository. This harness does not do that, so those fields are
+``None`` and the scorecard says why. A `None` here means "not measured", which is
+a different statement from zero and must not be displayed as one (section 30).
+
+Every run records the repository commit, providers, models, retrieval
+configuration and environment, so a number can always be traced to the conditions
+that produced it.
 """
 
 import json
+import logging
 import os
 import platform
 import subprocess
@@ -34,9 +40,20 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cortexforge.code_intelligence.scanner import RepositoryScanner
-from cortexforge.core.models import CodeEntity, Project
+from cortexforge.cognition.claims import canonicalize
+from cortexforge.core.models import CodeEntity, Memory, Project
+from cortexforge.embeddings.provider import get_embedding_provider
+from cortexforge.memory.conflict_resolver import cosine_similarity
+from cortexforge.memory.lifecycle import MemoryState
 from cortexforge.retrieval.composer import ContextComposer
 from cortexforge.retrieval.engine import HybridRetrievalEngine
+
+logger = logging.getLogger(__name__)
+
+# Rough characters-per-token ratio used to size context. It is an estimate and is
+# labelled as one wherever it surfaces; the comparison between modes is what the
+# benchmark is for, and every mode is estimated the same way.
+_CHARS_PER_TOKEN = 4.0
 
 
 class BenchmarkMode(str, Enum):
@@ -62,60 +79,88 @@ class AblationType(str, Enum):
 
 @dataclass
 class BenchmarkTask:
+    """A task with declared ground truth, so retrieval quality is checkable."""
+
     id: str
     name: str
     task_prompt: str
     target_files: list[str]
     expected_constraint_keywords: list[str]
     is_regression_risk: bool = False
+    # Memory ids known to be relevant, when a fixture can state them. When empty,
+    # relevance is judged by keyword and file overlap instead, and the scorecard
+    # records which basis was used.
+    relevant_memory_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
 class ModeEvaluationResult:
+    """One configuration's measured behaviour on one task.
+
+    Fields typed ``| None`` are not measured by this harness. They are left as
+    ``None`` rather than filled with a plausible value.
+    """
+
     mode: str
-    task_success: bool
-    tests_passed: int
-    files_inspected: int
-    lines_inspected: int
-    tool_calls: int
+    # --- measured ---
+    context_items: int
+    files_referenced: int
     input_tokens: int
-    output_tokens: int
-    total_tokens: int
     latency_ms: float
-    estimated_cost_usd: float
-    repeated_failures: int
     stale_retrieval_rate: float
-    retrieval_precision: float
-    retrieval_recall: float
-    context_usefulness: float
+    conflicted_retrieval_rate: float
+    retrieval_precision: float | None
+    retrieval_recall: float | None
     context_redundancy: float
-    provenance_correctness: float
-    conflict_detection_precision: float
-    false_stale_rate: float
+    provenance_coverage: float
+    relevance_basis: str
+    # --- not measured by this harness ---
+    task_success: bool | None = None
+    tests_passed: int | None = None
+    repeated_failures: int | None = None
+    output_tokens: int | None = None
+    estimated_cost_usd: float | None = None
+    unmeasured_reason: str = (
+        "Requires executing a coding agent against the repository; this harness "
+        "measures retrieval and context construction only."
+    )
 
     @property
     def files_explored(self) -> int:
-        return self.files_inspected
+        return self.files_referenced
 
     @property
     def duration_ms(self) -> float:
         return self.latency_ms
 
     @property
-    def success(self) -> bool:
-        return self.task_success
+    def total_tokens(self) -> int:
+        return self.input_tokens
 
+    @property
+    def files_inspected(self) -> int:
+        return self.files_referenced
 
 
 @dataclass
 class BenchmarkRunMetadata:
+    """The conditions a measurement was taken under."""
+
     repository_commit: str | None
     cortexforge_version: str = "0.1.0"
-    benchmark_suite_version: str = "1.0.0"
-    llm_provider: str = "FastDeterministic"
-    embedding_provider: str = "DeterministicEmbedding-384"
+    benchmark_suite_version: str = "2.0.0"
+    llm_provider: str = "not-invoked"
+    embedding_provider: str = "unknown"
+    embedding_model: str = "unknown"
+    embedding_quality_class: str = "unknown"
     retrieval_config: dict[str, Any] = field(default_factory=dict)
-    environment: str = field(default_factory=lambda: f"{platform.system()} {platform.release()} (Python {platform.python_version()})")
+    project_memory_count: int = 0
+    project_entity_count: int = 0
+    environment: str = field(
+        default_factory=lambda: (
+            f"{platform.system()} {platform.release()} (Python {platform.python_version()})"
+        )
+    )
     timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
@@ -127,32 +172,44 @@ class ComprehensiveScorecard:
     results: dict[str, ModeEvaluationResult]
     token_reduction_pct: float
     exploration_reduction_pct: float
-    tool_calls_saved: int
+    tool_calls_saved: int | None = None
     raw_log_path: str | None = None
+    measurement_notes: list[str] = field(default_factory=list)
 
 
 DEFAULT_BENCHMARK_SUITE: list[BenchmarkTask] = [
     BenchmarkTask(
         id="BENCH-001",
         name="Refresh Token Expiration & Stateless JWT Invariant",
-        task_prompt="Fix refresh token race condition during concurrent rotation without breaking revocability.",
-        target_files=["services/auth.py", "cortexforge/security/redactor.py"],
+        task_prompt=(
+            "Fix refresh token race condition during concurrent rotation without "
+            "breaking revocability."
+        ),
+        target_files=["services/auth.py"],
         expected_constraint_keywords=["jwt", "revocable", "token", "stateless"],
         is_regression_risk=True,
     ),
     BenchmarkTask(
         id="BENCH-002",
         name="Payment Webhook Idempotency Validation",
-        task_prompt="Implement idempotency check before recording payment transactions from Stripe webhooks.",
-        target_files=["services/payment.py", "cortexforge/apps/api/routes/projects.py"],
+        task_prompt=(
+            "Implement idempotency check before recording payment transactions "
+            "from Stripe webhooks."
+        ),
+        target_files=["services/payment.py"],
         expected_constraint_keywords=["idempotency", "webhook", "signature", "payment"],
         is_regression_risk=True,
     ),
 ]
 
 
+def estimate_tokens(text: str) -> int:
+    """Estimate token count from character length."""
+    return max(0, int(len(text) / _CHARS_PER_TOKEN))
+
+
 class EvaluationRunner:
-    """Automated benchmark harness for scientific comparison across 7 configurations and ablations."""
+    """Executes each retrieval configuration for real and measures the outcome."""
 
     def __init__(
         self,
@@ -162,7 +219,9 @@ class EvaluationRunner:
         results_dir: str = "benchmarks/results",
     ) -> None:
         self.retrieval_engine = retrieval_engine or HybridRetrievalEngine()
-        self.context_composer = context_composer or ContextComposer(retrieval_engine=self.retrieval_engine)
+        self.context_composer = context_composer or ContextComposer(
+            retrieval_engine=self.retrieval_engine
+        )
         self.scanner = scanner or RepositoryScanner()
         self.results_dir = Path(results_dir)
 
@@ -170,7 +229,7 @@ class EvaluationRunner:
         if not path or not os.path.exists(path):
             return None
         try:
-            res = subprocess.run(
+            result = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
                 cwd=path,
                 capture_output=True,
@@ -178,8 +237,8 @@ class EvaluationRunner:
                 check=True,
                 timeout=5,
             )
-            return res.stdout.strip()
-        except Exception:
+            return result.stdout.strip()
+        except (subprocess.SubprocessError, OSError):
             return None
 
     async def run_benchmark(
@@ -190,325 +249,433 @@ class EvaluationRunner:
         ablation: AblationType = AblationType.NONE,
         save_results: bool = True,
     ) -> list[ComprehensiveScorecard]:
-        """Execute full 7-way empirical comparison suite."""
+        """Run every configuration against every task and record what happened."""
         bench_tasks = tasks or DEFAULT_BENCHMARK_SUITE
-        scorecards: list[ComprehensiveScorecard] = []
-
         project = await session.get(Project, project_id)
         local_path = project.local_path if project else None
-        head_commit = self._get_git_commit(local_path)
 
+        memories = list(
+            (
+                await session.execute(
+                    select(Memory).where(Memory.project_id == project_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        entities = list(
+            (
+                await session.execute(
+                    select(CodeEntity).where(CodeEntity.project_id == project_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+        embedding_provider = get_embedding_provider()
         metadata = BenchmarkRunMetadata(
-            repository_commit=head_commit,
+            repository_commit=self._get_git_commit(local_path),
+            embedding_provider=type(embedding_provider).__name__,
+            embedding_model=embedding_provider.model_name,
+            embedding_quality_class=(
+                "LOCAL_DETERMINISTIC_HASH"
+                if "hash" in embedding_provider.model_name.lower()
+                else "REAL_SEMANTIC_EMBEDDING"
+            ),
             retrieval_config={
                 "ablation": ablation.value,
-                "vector_weight": 0.40,
-                "lexical_weight": 0.35,
-                "graph_weight": 0.25,
+                **self.retrieval_engine.weights.model_dump(),
             },
+            project_memory_count=len(memories),
+            project_entity_count=len(entities),
         )
 
-        ent_res = await session.execute(
-            select(CodeEntity).where(CodeEntity.project_id == project_id)
-        )
-        entities = list(ent_res.scalars().all())
-
-        # Build repository file and token map
-        file_token_map: dict[str, int] = {}
-        if local_path and os.path.exists(local_path):
-            root_p = Path(local_path)
-            ignored_dirs = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build", ".pytest_cache"}
-            valid_exts = {".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java", ".json", ".md"}
-            for p in root_p.rglob("*"):
-                if (
-                    p.is_file()
-                    and p.suffix in valid_exts
-                    and not any(part in ignored_dirs or part.startswith(".") for part in p.parts)
-                ):
-                    try:
-                        rel = str(p.relative_to(root_p)).replace("\\", "/")
-                        txt = p.read_text(encoding="utf-8", errors="ignore")
-                        file_token_map[rel] = max(50, int(len(txt.split()) * 1.33))
-                    except (OSError, UnicodeDecodeError):
-                        continue
-
-        if not file_token_map and entities:
-            for ent in entities:
-                lines = (ent.end_line or 10) - (ent.start_line or 1) + 1
-                file_token_map[ent.file_path] = file_token_map.get(ent.file_path, 0) + max(40, lines * 7)
-
-        if len(file_token_map) < 6:
-            defaults = {
-                "services/auth.py": 720,
-                "services/payment.py": 850,
-                "services/user.py": 640,
-                "core/config.py": 410,
-                "core/db.py": 530,
-                "api/routes.py": 910,
-                "models/entities.py": 680,
-                "utils/helpers.py": 380,
-            }
-            for k, v in defaults.items():
-                if k not in file_token_map:
-                    file_token_map[k] = v
-
-        all_files = list(file_token_map.keys())
+        repository_files = sorted({e.file_path for e in entities})
+        scorecards: list[ComprehensiveScorecard] = []
 
         for task in bench_tasks:
             matched_targets = [
-                f for f in all_files if any(tf in f or f.endswith(tf) for tf in task.target_files)
-            ]
-            if not matched_targets:
-                matched_targets = all_files[: min(2, len(all_files))]
+                path
+                for path in repository_files
+                if any(target in path or path.endswith(target) for target in task.target_files)
+            ] or repository_files[:2]
 
-            # Compute real cognitive context for Full CortexForge (Mode G)
-            t_cortex_start = time.perf_counter()
-            cortex_context = await self.context_composer.build_context(
-                session,
-                project_id=project_id,
-                task_text=task.task_prompt,
-                profile="medium",
-                target_files=matched_targets,
-            )
-            cortex_lat_ms = round((time.perf_counter() - t_cortex_start) * 1000, 2)
-            cortex_in_tok = max(180, int(len(cortex_context.split()) * 1.33))
-            cortex_files = len(matched_targets)
-
-            # Baseline metrics
-            base_files = min(len(all_files), max(len(matched_targets) * 4, 10))
-            explored_files = all_files[:base_files]
-            base_in_tok = sum(file_token_map.get(f, 500) for f in explored_files) + 450
-            base_lines = base_files * 120
-
-            cost_per_tok = 0.000003  # $3 / 1M tokens
-
-            # Evaluate each of the 7 configurations
             results: dict[str, ModeEvaluationResult] = {}
+            notes: list[str] = []
 
-            # Mode A: No Memory
-            results[BenchmarkMode.A_NO_MEMORY.value] = ModeEvaluationResult(
-                mode=BenchmarkMode.A_NO_MEMORY.value,
-                task_success=True,
-                tests_passed=3,
-                files_inspected=base_files,
-                lines_inspected=base_lines,
-                tool_calls=base_files + 3,
-                input_tokens=base_in_tok,
-                output_tokens=550,
-                total_tokens=base_in_tok + 550,
-                latency_ms=45.0,
-                estimated_cost_usd=round((base_in_tok + 550) * cost_per_tok, 5),
-                repeated_failures=1 if task.is_regression_risk else 0,
-                stale_retrieval_rate=0.0,
-                retrieval_precision=0.20,
-                retrieval_recall=0.35,
-                context_usefulness=0.40,
-                context_redundancy=0.85,
-                provenance_correctness=0.0,
-                conflict_detection_precision=0.0,
-                false_stale_rate=0.0,
+            if not memories:
+                notes.append(
+                    "The project has no memories, so every memory-backed mode is "
+                    "measured against an empty store. The comparison is valid but "
+                    "uninformative until memories exist."
+                )
+
+            results[BenchmarkMode.A_NO_MEMORY.value] = await self._run_no_memory(
+                task, repository_files, local_path
+            )
+            results[BenchmarkMode.B_NAIVE_RAG.value] = await self._run_naive_rag(
+                task, memories
+            )
+            results[BenchmarkMode.C_FLAT_MEMORY.value] = await self._run_flat_memory(
+                task, memories
+            )
+            for mode in (
+                BenchmarkMode.D_RETRIEVAL_ONLY,
+                BenchmarkMode.E_WITH_PROVENANCE,
+                BenchmarkMode.F_WITH_CHANGE_PROP,
+                BenchmarkMode.G_FULL_CORTEX,
+            ):
+                results[mode.value] = await self._run_cortex_mode(
+                    session, project_id, task, matched_targets, mode, ablation
+                )
+
+            baseline = results[BenchmarkMode.A_NO_MEMORY.value]
+            full = results[BenchmarkMode.G_FULL_CORTEX.value]
+            token_reduction = (
+                ((baseline.input_tokens - full.input_tokens) / baseline.input_tokens) * 100.0
+                if baseline.input_tokens
+                else 0.0
+            )
+            exploration_reduction = (
+                ((baseline.files_referenced - full.files_referenced) / baseline.files_referenced)
+                * 100.0
+                if baseline.files_referenced
+                else 0.0
             )
 
-            # Mode B: Naive Vector RAG
-            rag_files = min(base_files, max(2, len(matched_targets) + 2))
-            rag_in_tok = sum(min(file_token_map.get(f, 400), 500) for f in explored_files[:rag_files]) + 400
-            results[BenchmarkMode.B_NAIVE_RAG.value] = ModeEvaluationResult(
-                mode=BenchmarkMode.B_NAIVE_RAG.value,
-                task_success=True,
-                tests_passed=3,
-                files_inspected=rag_files,
-                lines_inspected=rag_files * 85,
-                tool_calls=rag_files + 1,
-                input_tokens=rag_in_tok,
-                output_tokens=520,
-                total_tokens=rag_in_tok + 520,
-                latency_ms=35.0,
-                estimated_cost_usd=round((rag_in_tok + 520) * cost_per_tok, 5),
-                repeated_failures=1 if task.is_regression_risk else 0,
-                stale_retrieval_rate=0.30,
-                retrieval_precision=0.55,
-                retrieval_recall=0.60,
-                context_usefulness=0.60,
-                context_redundancy=0.45,
-                provenance_correctness=0.10,
-                conflict_detection_precision=0.0,
-                false_stale_rate=0.25,
+            notes.append(
+                "Token counts are estimated at "
+                f"{_CHARS_PER_TOKEN} characters per token, applied identically to "
+                "every mode."
             )
-
-            # Mode C: Flat Conversational Memory
-            flat_in_tok = int(base_in_tok * 0.52) + 250
-            results[BenchmarkMode.C_FLAT_MEMORY.value] = ModeEvaluationResult(
-                mode=BenchmarkMode.C_FLAT_MEMORY.value,
-                task_success=True,
-                tests_passed=3,
-                files_inspected=rag_files,
-                lines_inspected=rag_files * 80,
-                tool_calls=rag_files + 1,
-                input_tokens=flat_in_tok,
-                output_tokens=500,
-                total_tokens=flat_in_tok + 500,
-                latency_ms=28.0,
-                estimated_cost_usd=round((flat_in_tok + 500) * cost_per_tok, 5),
-                repeated_failures=1 if task.is_regression_risk else 0,
-                stale_retrieval_rate=0.40,
-                retrieval_precision=0.50,
-                retrieval_recall=0.55,
-                context_usefulness=0.55,
-                context_redundancy=0.50,
-                provenance_correctness=0.05,
-                conflict_detection_precision=0.0,
-                false_stale_rate=0.30,
+            notes.append(
+                "Task success, tests passed, repeated failures and generation cost "
+                "are not measured by this harness and are reported as null."
             )
-
-            # Mode D: CortexForge Retrieval Only (BM25 + Vector, no graph/provenance)
-            d_tok = int(cortex_in_tok * 1.35)
-            results[BenchmarkMode.D_RETRIEVAL_ONLY.value] = ModeEvaluationResult(
-                mode=BenchmarkMode.D_RETRIEVAL_ONLY.value,
-                task_success=True,
-                tests_passed=4,
-                files_inspected=cortex_files + 1,
-                lines_inspected=(cortex_files + 1) * 60,
-                tool_calls=2,
-                input_tokens=d_tok,
-                output_tokens=480,
-                total_tokens=d_tok + 480,
-                latency_ms=18.0,
-                estimated_cost_usd=round((d_tok + 480) * cost_per_tok, 5),
-                repeated_failures=0,
-                stale_retrieval_rate=0.15,
-                retrieval_precision=0.75,
-                retrieval_recall=0.78,
-                context_usefulness=0.78,
-                context_redundancy=0.25,
-                provenance_correctness=0.30,
-                conflict_detection_precision=0.20,
-                false_stale_rate=0.15,
-            )
-
-            # Mode E: CortexForge + Provenance
-            e_tok = int(cortex_in_tok * 1.15)
-            results[BenchmarkMode.E_WITH_PROVENANCE.value] = ModeEvaluationResult(
-                mode=BenchmarkMode.E_WITH_PROVENANCE.value,
-                task_success=True,
-                tests_passed=4,
-                files_inspected=cortex_files,
-                lines_inspected=cortex_files * 50,
-                tool_calls=2,
-                input_tokens=e_tok,
-                output_tokens=480,
-                total_tokens=e_tok + 480,
-                latency_ms=22.0,
-                estimated_cost_usd=round((e_tok + 480) * cost_per_tok, 5),
-                repeated_failures=0,
-                stale_retrieval_rate=0.10,
-                retrieval_precision=0.84,
-                retrieval_recall=0.85,
-                context_usefulness=0.85,
-                context_redundancy=0.18,
-                provenance_correctness=0.92,
-                conflict_detection_precision=0.40,
-                false_stale_rate=0.10,
-            )
-
-            # Mode F: CortexForge + Change Propagation
-            f_tok = int(cortex_in_tok * 1.05)
-            results[BenchmarkMode.F_WITH_CHANGE_PROP.value] = ModeEvaluationResult(
-                mode=BenchmarkMode.F_WITH_CHANGE_PROP.value,
-                task_success=True,
-                tests_passed=4,
-                files_inspected=cortex_files,
-                lines_inspected=cortex_files * 45,
-                tool_calls=1,
-                input_tokens=f_tok,
-                output_tokens=480,
-                total_tokens=f_tok + 480,
-                latency_ms=25.0,
-                estimated_cost_usd=round((f_tok + 480) * cost_per_tok, 5),
-                repeated_failures=0,
-                stale_retrieval_rate=0.03,
-                retrieval_precision=0.90,
-                retrieval_recall=0.91,
-                context_usefulness=0.91,
-                context_redundancy=0.12,
-                provenance_correctness=0.95,
-                conflict_detection_precision=0.75,
-                false_stale_rate=0.04,
-            )
-
-            # Mode G: Full CortexForge
-            results[BenchmarkMode.G_FULL_CORTEX.value] = ModeEvaluationResult(
-                mode=BenchmarkMode.G_FULL_CORTEX.value,
-                task_success=True,
-                tests_passed=4,
-                files_inspected=cortex_files,
-                lines_inspected=cortex_files * 40,
-                tool_calls=1,
-                input_tokens=cortex_in_tok,
-                output_tokens=480,
-                total_tokens=cortex_in_tok + 480,
-                latency_ms=cortex_lat_ms or 26.0,
-                estimated_cost_usd=round((cortex_in_tok + 480) * cost_per_tok, 5),
-                repeated_failures=0,
-                stale_retrieval_rate=0.01,
-                retrieval_precision=0.94,
-                retrieval_recall=0.95,
-                context_usefulness=0.96,
-                context_redundancy=0.08,
-                provenance_correctness=0.98,
-                conflict_detection_precision=0.92,
-                false_stale_rate=0.02,
-            )
-
-            # Apply ablation degradation if active
-            if ablation == AblationType.WITHOUT_GRAPH:
-                results[BenchmarkMode.G_FULL_CORTEX.value].retrieval_recall = 0.82
-                results[BenchmarkMode.G_FULL_CORTEX.value].input_tokens += 120
-            elif ablation == AblationType.WITHOUT_PROVENANCE:
-                results[BenchmarkMode.G_FULL_CORTEX.value].provenance_correctness = 0.20
-            elif ablation == AblationType.WITHOUT_FRESHNESS:
-                results[BenchmarkMode.G_FULL_CORTEX.value].stale_retrieval_rate = 0.12
-            elif ablation == AblationType.WITHOUT_FAILURES:
-                results[BenchmarkMode.G_FULL_CORTEX.value].repeated_failures = 1
-            elif ablation == AblationType.WITHOUT_CHANGE_PROP:
-                results[BenchmarkMode.G_FULL_CORTEX.value].false_stale_rate = 0.22
-
-            token_red_pct = ((base_in_tok - cortex_in_tok) / max(1, base_in_tok)) * 100.0
-            expl_red_pct = ((base_files - cortex_files) / max(1, base_files)) * 100.0
-            tools_saved = max(1, (base_files + 3) - 1)
-
-            # Persist raw run if requested
-            log_path_str = None
-            if save_results:
-                try:
-                    self.results_dir.mkdir(parents=True, exist_ok=True)
-                    fname = f"run_{task.id}_{int(time.time())}.json"
-                    target_p = self.results_dir / fname
-                    raw_data = {
-                        "task_id": task.id,
-                        "task_name": task.name,
-                        "metadata": asdict(metadata),
-                        "results": {k: asdict(v) for k, v in results.items()},
-                        "token_reduction_pct": round(token_red_pct, 1),
-                        "exploration_reduction_pct": round(expl_red_pct, 1),
-                        "tool_calls_saved": tools_saved,
-                    }
-                    target_p.write_text(json.dumps(raw_data, indent=2), encoding="utf-8")
-                    log_path_str = str(target_p)
-                except OSError:
-                    log_path_str = None
-
-
+            if not task.relevant_memory_ids:
+                notes.append(
+                    "Retrieval precision and recall are judged against the task's "
+                    "declared keywords and target files, not a curated relevance "
+                    "set, so they measure topical match rather than usefulness."
+                )
 
             scorecard = ComprehensiveScorecard(
                 task_id=task.id,
                 task_name=task.name,
                 metadata=metadata,
                 results=results,
-                token_reduction_pct=round(token_red_pct, 1),
-                exploration_reduction_pct=round(expl_red_pct, 1),
-                tool_calls_saved=tools_saved,
-                raw_log_path=log_path_str,
+                token_reduction_pct=round(token_reduction, 1),
+                exploration_reduction_pct=round(exploration_reduction, 1),
+                tool_calls_saved=None,
+                measurement_notes=notes,
             )
+
+            if save_results:
+                scorecard.raw_log_path = self._persist(scorecard)
+
             scorecards.append(scorecard)
 
         return scorecards
+
+    # --------------------------------------------------------------- modes
+
+    async def _run_no_memory(
+        self, task: BenchmarkTask, repository_files: list[str], local_path: str | None
+    ) -> ModeEvaluationResult:
+        """Baseline: no memory at all, so the agent must read the repository.
+
+        Context size is the actual size of the candidate files on disk, not an
+        assumed per-file constant.
+        """
+        start = time.perf_counter()
+        total_chars = 0
+        counted = 0
+
+        for rel_path in repository_files:
+            if not local_path:
+                break
+            abs_path = os.path.join(local_path, rel_path.replace("/", os.sep))
+            try:
+                total_chars += len(Path(abs_path).read_text(encoding="utf-8", errors="ignore"))
+                counted += 1
+            except OSError:
+                continue
+
+        latency = (time.perf_counter() - start) * 1000
+        return ModeEvaluationResult(
+            mode=BenchmarkMode.A_NO_MEMORY.value,
+            context_items=counted,
+            files_referenced=counted,
+            input_tokens=estimate_tokens("x" * total_chars),
+            latency_ms=round(latency, 2),
+            stale_retrieval_rate=0.0,
+            conflicted_retrieval_rate=0.0,
+            # With no retrieval there is nothing to be precise about; recall is 0
+            # because no relevant memory is surfaced.
+            retrieval_precision=None,
+            retrieval_recall=0.0,
+            context_redundancy=0.0,
+            provenance_coverage=0.0,
+            relevance_basis="no retrieval performed",
+        )
+
+    async def _run_naive_rag(
+        self, task: BenchmarkTask, memories: list[Memory]
+    ) -> ModeEvaluationResult:
+        """Pure vector top-k over memories: no filtering, ranking or status checks.
+
+        This is the honest strawman -- what a plain embedding store would return,
+        including memories CortexForge knows are stale.
+        """
+        start = time.perf_counter()
+        provider = get_embedding_provider()
+        query = await provider.embed_text(task.task_prompt)
+
+        scored = []
+        for memory in memories:
+            vector = (memory.embedding or {}).get("vector")
+            if not vector:
+                continue
+            scored.append((cosine_similarity(query.vector, vector), memory))
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        selected = [memory for _, memory in scored[:8]]
+
+        latency = (time.perf_counter() - start) * 1000
+        return self._measure_selection(
+            BenchmarkMode.B_NAIVE_RAG.value, task, selected, latency, includes_provenance=False
+        )
+
+    async def _run_flat_memory(
+        self, task: BenchmarkTask, memories: list[Memory]
+    ) -> ModeEvaluationResult:
+        """Flat conversational memory: everything, newest first, until budget."""
+        start = time.perf_counter()
+        ordered = sorted(memories, key=lambda m: m.created_at, reverse=True)
+
+        selected: list[Memory] = []
+        budget = 3500
+        used = 0
+        for memory in ordered:
+            cost = estimate_tokens(f"{memory.title}\n{memory.content}")
+            if used + cost > budget:
+                break
+            selected.append(memory)
+            used += cost
+
+        latency = (time.perf_counter() - start) * 1000
+        return self._measure_selection(
+            BenchmarkMode.C_FLAT_MEMORY.value, task, selected, latency, includes_provenance=False
+        )
+
+    async def _run_cortex_mode(
+        self,
+        session: AsyncSession,
+        project_id: str,
+        task: BenchmarkTask,
+        target_files: list[str],
+        mode: BenchmarkMode,
+        ablation: AblationType,
+    ) -> ModeEvaluationResult:
+        """Run one CortexForge configuration for real and measure what it returned.
+
+        The modes differ in which signals they are allowed to use, so the deltas
+        between them come from executing different code paths rather than from
+        applied constants.
+        """
+        start = time.perf_counter()
+
+        uses_graph = mode in (
+            BenchmarkMode.E_WITH_PROVENANCE,
+            BenchmarkMode.F_WITH_CHANGE_PROP,
+            BenchmarkMode.G_FULL_CORTEX,
+        ) and ablation != AblationType.WITHOUT_GRAPH
+        excludes_stale = (
+            mode in (BenchmarkMode.F_WITH_CHANGE_PROP, BenchmarkMode.G_FULL_CORTEX)
+            and ablation != AblationType.WITHOUT_CHANGE_PROP
+        )
+        includes_provenance = (
+            mode
+            in (
+                BenchmarkMode.E_WITH_PROVENANCE,
+                BenchmarkMode.F_WITH_CHANGE_PROP,
+                BenchmarkMode.G_FULL_CORTEX,
+            )
+            and ablation != AblationType.WITHOUT_PROVENANCE
+        )
+
+        items = await self.retrieval_engine.retrieve(
+            session,
+            project_id=project_id,
+            query=task.task_prompt,
+            target_files=target_files if uses_graph else None,
+            limit=10,
+        )
+
+        if excludes_stale:
+            items = [
+                item
+                for item in items
+                if item.status
+                not in (MemoryState.STALE.value, MemoryState.INVALIDATED.value)
+            ]
+
+        memory_ids = [item.id for item in items]
+        memories: list[Memory] = []
+        if memory_ids:
+            res = await session.execute(select(Memory).where(Memory.id.in_(memory_ids)))
+            by_id = {m.id: m for m in res.scalars().all()}
+            memories = [by_id[mid] for mid in memory_ids if mid in by_id]
+
+        latency = (time.perf_counter() - start) * 1000
+        return self._measure_selection(
+            mode.value, task, memories, latency, includes_provenance=includes_provenance
+        )
+
+    # ------------------------------------------------------------ measuring
+
+    def _measure_selection(
+        self,
+        mode: str,
+        task: BenchmarkTask,
+        memories: list[Memory],
+        latency_ms: float,
+        includes_provenance: bool,
+    ) -> ModeEvaluationResult:
+        """Compute every measurable metric from a concrete selection of memories."""
+        if not memories:
+            return ModeEvaluationResult(
+                mode=mode,
+                context_items=0,
+                files_referenced=0,
+                input_tokens=0,
+                latency_ms=round(latency_ms, 2),
+                stale_retrieval_rate=0.0,
+                conflicted_retrieval_rate=0.0,
+                retrieval_precision=None,
+                retrieval_recall=0.0,
+                context_redundancy=0.0,
+                provenance_coverage=0.0,
+                relevance_basis="nothing retrieved",
+            )
+
+        relevant_ids = set(task.relevant_memory_ids)
+        basis = "curated relevance set"
+        if not relevant_ids:
+            basis = "keyword and target-file overlap"
+            relevant_ids = {
+                memory.id for memory in memories if self._is_topically_relevant(task, memory)
+            }
+
+        selected_ids = {memory.id for memory in memories}
+        hits = selected_ids & relevant_ids
+        precision = round(len(hits) / len(selected_ids), 4) if selected_ids else None
+        # Recall against a set derived from the selection itself would always be
+        # 1.0 and mean nothing, so it is only reported against a curated set.
+        recall = (
+            round(len(hits) / len(relevant_ids), 4)
+            if task.relevant_memory_ids and relevant_ids
+            else None
+        )
+
+        stale = sum(1 for m in memories if m.status == MemoryState.STALE.value)
+        conflicted = sum(1 for m in memories if m.status == MemoryState.CONFLICTED.value)
+
+        context_parts = []
+        files: set[str] = set()
+        with_evidence = 0
+        for memory in memories:
+            part = f"{memory.title}\n{memory.content}"
+            evidences = list(memory.evidences or [])
+            if evidences:
+                with_evidence += 1
+                files.update(e.file_path for e in evidences)
+                if includes_provenance:
+                    part += "\n" + "\n".join(
+                        f"evidence: {e.file_path}:{e.line_start}-{e.line_end}"
+                        for e in evidences
+                    )
+            context_parts.append(part)
+
+        return ModeEvaluationResult(
+            mode=mode,
+            context_items=len(memories),
+            files_referenced=len(files),
+            input_tokens=estimate_tokens("\n\n".join(context_parts)),
+            latency_ms=round(latency_ms, 2),
+            stale_retrieval_rate=round(stale / len(memories), 4),
+            conflicted_retrieval_rate=round(conflicted / len(memories), 4),
+            retrieval_precision=precision,
+            retrieval_recall=recall,
+            context_redundancy=self._redundancy(memories),
+            provenance_coverage=round(with_evidence / len(memories), 4),
+            relevance_basis=basis,
+        )
+
+    @staticmethod
+    def _is_topically_relevant(task: BenchmarkTask, memory: Memory) -> bool:
+        """Whether a memory matches the task's declared ground truth.
+
+        Deliberately conservative: a memory counts as relevant only if it shares
+        vocabulary with the task's expected constraints or is grounded in one of
+        the task's target files.
+        """
+        _, tokens = canonicalize(f"{memory.title} {memory.content}")
+        token_set = set(tokens)
+        for keyword in task.expected_constraint_keywords:
+            _, keyword_tokens = canonicalize(keyword)
+            if set(keyword_tokens) & token_set:
+                return True
+
+        for evidence in memory.evidences or []:
+            path = (evidence.file_path or "").replace("\\", "/")
+            if any(target in path or path.endswith(target) for target in task.target_files):
+                return True
+        return False
+
+    @staticmethod
+    def _redundancy(memories: list[Memory]) -> float:
+        """Mean pairwise content overlap among selected memories.
+
+        High redundancy means the context spends its budget saying the same thing
+        several times, which is a real cost even when every item is relevant.
+        """
+        if len(memories) < 2:
+            return 0.0
+
+        token_sets = []
+        for memory in memories:
+            _, tokens = canonicalize(f"{memory.title} {memory.summary}")
+            token_sets.append(set(tokens))
+
+        overlaps = []
+        for index, first in enumerate(token_sets):
+            for other in token_sets[index + 1 :]:
+                if first or other:
+                    overlaps.append(len(first & other) / max(1, len(first | other)))
+        return round(sum(overlaps) / len(overlaps), 4) if overlaps else 0.0
+
+    def _persist(self, scorecard: ComprehensiveScorecard) -> str | None:
+        """Write the raw run artifact, so a reported number can be traced back."""
+        try:
+            self.results_dir.mkdir(parents=True, exist_ok=True)
+            target = self.results_dir / f"run_{scorecard.task_id}_{int(time.time())}.json"
+            target.write_text(
+                json.dumps(
+                    {
+                        "task_id": scorecard.task_id,
+                        "task_name": scorecard.task_name,
+                        "metadata": asdict(scorecard.metadata),
+                        "results": {k: asdict(v) for k, v in scorecard.results.items()},
+                        "token_reduction_pct": scorecard.token_reduction_pct,
+                        "exploration_reduction_pct": scorecard.exploration_reduction_pct,
+                        "measurement_notes": scorecard.measurement_notes,
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            return str(target)
+        except OSError as exc:
+            logger.warning("Could not persist benchmark artifact: %s", exc)
+            return None

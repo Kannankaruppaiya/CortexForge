@@ -146,18 +146,46 @@ async def test_memory_verification_and_change_propagation(memory_test_repo, mem_
     st = await verifier.verify_single_memory(mem_session, mem, memory_test_repo)
     assert st == "ACTIVE"
 
-    # Test Semantic Change Propagation: modify services/auth.py
     propagator = SemanticChangePropagator()
+
+    # Declaring a file "modified" without changing it must not invalidate anything.
+    # Staleness has to be earned by an actual change to the grounding code, or the
+    # system would degrade its own knowledge every time a build touched a file.
+    unchanged_report = await propagator.propagate_changes(
+        mem_session, project.id, modified_files=["services/auth.py"], mark_stale=True
+    )
+    assert unchanged_report.memories_flagged_stale == []
+    await mem_session.refresh(mem)
+    assert mem.status == "ACTIVE"
+    assert any(d["decision"] == "KEEP" for d in unchanged_report.decisions)
+
+    # Now genuinely change the grounded method's implementation.
+    auth_path = os.path.join(memory_test_repo, "services", "auth.py")
+    with open(auth_path, "w", encoding="utf-8") as handle:
+        handle.write("""
+class AuthService:
+    def verify_token(self, token: str) -> bool:
+        return self.blacklist.check(token) is False
+""")
+
     impact_report = await propagator.propagate_changes(
         mem_session, project.id, modified_files=["services/auth.py"], mark_stale=True
     )
 
     assert len(impact_report.memories_flagged_stale) >= 1
-    assert len(impact_report.critical_constraints) >= 1
+    # The decision must be explainable, not merely applied.
+    revisions = [d for d in impact_report.decisions if d["decision"] == "REVISE"]
+    assert revisions
+    assert revisions[0]["reason_code"] in ("BODY_CHANGED", "SIGNATURE_CHANGED")
 
-    # Reload memory and check status became STALE
     await mem_session.refresh(mem)
     assert mem.status == "STALE"
+
+    # Re-running the identical analysis must not duplicate the change record.
+    repeat = await propagator.propagate_changes(
+        mem_session, project.id, modified_files=["services/auth.py"], mark_stale=True
+    )
+    assert repeat.change_set_id == impact_report.change_set_id
 
 
 @pytest.mark.asyncio

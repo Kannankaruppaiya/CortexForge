@@ -266,12 +266,27 @@ class ClaimService:
         symbol_names = await self._symbol_names(
             session, [ev.symbol_id for ev in memory.evidences if ev.symbol_id]
         )
+        # Evidence recorded as "this file, these lines" is resolved to the symbol
+        # that encloses those lines. Without this, grounding stays file-shaped: a
+        # rename looks like the file changed rather than like the symbol moving,
+        # and every memory in a touched file shares one fate. Symbol-level anchors
+        # are what let one memory be re-anchored while another goes stale.
+        enclosing = await self._resolve_enclosing_symbols(session, memory)
         created: list[ClaimEvidence] = []
 
         for ev in memory.evidences:
             evidence_type = (ev.evidence_type or EvidenceType.CODE.value).upper()
             relation = (ev.relation or EvidenceRelation.SUPPORTS.value).upper()
             qualified = symbol_names.get(ev.symbol_id) if ev.symbol_id else None
+            symbol_id = ev.symbol_id
+
+            if qualified is None:
+                resolved = enclosing.get(ev.id)
+                if resolved is not None:
+                    qualified = resolved.qualified_name
+                    symbol_id = resolved.id
+                    if evidence_type == EvidenceType.CODE.value:
+                        evidence_type = EvidenceType.SYMBOL.value
             fingerprint = evidence_fingerprint(
                 evidence_type,
                 relation,
@@ -296,12 +311,15 @@ class ClaimService:
                 branch=ev.branch or memory.branch,
                 workspace=ev.workspace or memory.workspace,
                 file_path=ev.file_path,
-                symbol_id=ev.symbol_id,
+                symbol_id=symbol_id,
                 qualified_name=qualified,
                 line_start=ev.line_start,
                 line_end=ev.line_end,
                 content_hash=ev.snippet_hash or ev.evidence_hash,
-                ast_fingerprint=ev.ast_fingerprint,
+                ast_fingerprint=(
+                    ev.ast_fingerprint
+                    or (enclosing[ev.id].content_hash if ev.id in enclosing else None)
+                ),
                 evidence_hash=fingerprint,
                 independence_group=_independence_group(ev.file_path, ev.commit_sha or commit_sha),
                 detail={"memory_evidence_id": ev.id},
@@ -310,6 +328,62 @@ class ClaimService:
             created.append(link)
 
         return created
+
+    @staticmethod
+    async def _resolve_enclosing_symbols(
+        session: AsyncSession, memory: Memory
+    ) -> dict[str, CodeEntity]:
+        """Map each unlinked evidence item to the symbol whose lines contain it.
+
+        Only genuine symbols are considered -- file-level entities are skipped,
+        since "the evidence is somewhere in this file" is the file-shaped grounding
+        this resolution exists to improve on. Evidence that matches no symbol is
+        simply left unresolved rather than being attached to an approximation.
+        """
+        unlinked = [
+            ev for ev in (memory.evidences or [])
+            if not ev.symbol_id and ev.file_path and ev.line_start is not None
+        ]
+        if not unlinked:
+            return {}
+
+        paths = {ev.file_path.replace("\\", "/") for ev in unlinked}
+        res = await session.execute(
+            select(CodeEntity).where(
+                CodeEntity.project_id == memory.project_id,
+                CodeEntity.entity_type != "file",
+            )
+        )
+        candidates = [
+            entity for entity in res.scalars().all()
+            if entity.file_path.replace("\\", "/") in paths
+            or any(path.endswith(entity.file_path.replace("\\", "/")) for path in paths)
+        ]
+        if not candidates:
+            return {}
+
+        resolved: dict[str, CodeEntity] = {}
+        for ev in unlinked:
+            ev_path = ev.file_path.replace("\\", "/")
+            ev_end = ev.line_end if ev.line_end is not None else ev.line_start
+
+            overlapping = [
+                entity for entity in candidates
+                if (
+                    entity.file_path.replace("\\", "/") == ev_path
+                    or ev_path.endswith(entity.file_path.replace("\\", "/"))
+                )
+                and not (ev_end < entity.start_line or ev.line_start > entity.end_line)
+            ]
+            if not overlapping:
+                continue
+            # The innermost enclosing symbol is the most specific anchor: a memory
+            # about one method should not be anchored to its whole class.
+            resolved[ev.id] = min(
+                overlapping, key=lambda e: (e.end_line - e.start_line, e.start_line)
+            )
+
+        return resolved
 
     @staticmethod
     async def _symbol_names(

@@ -121,12 +121,27 @@ async def test_symbol_reanchoring_and_invalidation(lineage_test_env):
     assert updated_tax.status == "INVALIDATED"
     assert any("Tax Calculation Formula" in t for t in impact.memories_invalidated)
 
-    # 5. Check Provenance for updated_discount
+    # 5. Provenance must explain the re-anchoring.
+    #
+    # Re-anchoring deliberately does not bump the memory's version: nothing the
+    # memory asserts changed, only where its evidence points. The audit trail for
+    # it therefore lives in the decision log, which records the decision code, the
+    # reason code and the symbols involved.
     provenance = await ProvenanceEngine.get_provenance(session, updated_discount.id)
     assert provenance is not None
     assert provenance.status == "ACTIVE"
-    assert len(provenance.version_history) >= 2
-    assert any("Re-anchored" in v["reason"] for v in provenance.version_history)
+    reanchor_decisions = [d for d in provenance.decisions if d["decision"] == "REANCHOR"]
+    assert reanchor_decisions, f"expected a REANCHOR decision, got {provenance.decisions}"
+    assert reanchor_decisions[0]["reason_code"] == "SYMBOL_RENAMED"
+    assert "compute_discount" in reanchor_decisions[0]["reason"]
+    # The claim inside the memory was re-verified against the symbol's new name.
+    assert any(claim["status"] == "VERIFIED" for claim in provenance.claims)
+
+    # The invalidated memory's decision log must say why it was invalidated.
+    tax_provenance = await ProvenanceEngine.get_provenance(session, updated_tax.id)
+    invalidations = [d for d in tax_provenance.decisions if d["decision"] == "INVALIDATE"]
+    assert invalidations
+    assert invalidations[0]["reason_code"] == "SYMBOL_REMOVED"
 
 
 @pytest.mark.asyncio

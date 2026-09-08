@@ -8,6 +8,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cortexforge.code_intelligence.git_provider import GitProvider
+from cortexforge.code_intelligence.lineage import SymbolLineageTracker
 from cortexforge.code_intelligence.parser import ParseResult
 from cortexforge.code_intelligence.treesitter.analyzer import TreeSitterProvider
 from cortexforge.core.models import (
@@ -82,7 +83,12 @@ DEFAULT_IGNORED_EXTS = {
 class RepositoryScanner:
     """Scans codebase on disk, extracts AST symbols, and persists entities to database."""
 
-    def __init__(self, provider: TreeSitterProvider | None = None) -> None:
+    def __init__(
+        self,
+        provider: TreeSitterProvider | None = None,
+        lineage: SymbolLineageTracker | None = None,
+    ) -> None:
+        self.lineage = lineage or SymbolLineageTracker()
         self.provider = provider or TreeSitterProvider()
 
     def discover_files(self, root_path: str, max_files: int | None = None) -> list[str]:
@@ -284,6 +290,18 @@ class RepositoryScanner:
         head_commit = get_git_head_commit(canonical_root)
         if head_commit:
             project.last_indexed_commit = head_commit
+
+        # Give every newly seen symbol a durable logical identity, so that a later
+        # rename can be recognised as the same symbol moving rather than as one
+        # symbol vanishing and another appearing (section 11). Symbols already
+        # tracked are untouched, so re-scanning an unchanged project writes nothing.
+        await self.lineage.observe_entities(
+            session,
+            project.id,
+            list(created_entities_by_qualified.values()),
+            commit_sha=head_commit,
+            branch=project.default_branch,
+        )
 
         snapshot = RepositorySnapshot(
             project_id=project.id,

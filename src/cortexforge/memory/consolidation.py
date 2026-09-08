@@ -319,6 +319,11 @@ class MemoryConsolidationEngine:
             "content": content,
             "provider": response.provider,
             "model": response.model,
+            # Mock output is canned text, not a model's proposal. It is still
+            # allowed to become a *candidate* -- that is what the offline mode is
+            # for -- but the fact is recorded so nothing downstream can mistake it
+            # for a model's judgement (section 24).
+            "synthetic": response.is_synthetic,
         }
 
     async def _find_duplicate_lesson(
@@ -439,6 +444,9 @@ class MemoryConsolidationEngine:
             **scored.components,
             "explanation": scored.explanation,
             "derived_from_episodes": len(cluster),
+            "proposal_provider": proposal.get("provider"),
+            "proposal_model": proposal.get("model"),
+            "proposal_is_synthetic": proposal.get("synthetic", False),
         }
         return lesson
 

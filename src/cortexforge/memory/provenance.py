@@ -13,9 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from cortexforge.core.models import (
+    Claim,
     CodeEntity,
     Commit,
     Memory,
+    MemoryDecision,
     MemoryVersion,
 )
 
@@ -48,6 +50,12 @@ class MemoryProvenanceReport:
     version_history: list[dict[str, Any]] = field(default_factory=list)
     associated_commits: list[dict[str, str]] = field(default_factory=list)
     associated_tests: list[dict[str, str]] = field(default_factory=list)
+    # Reconciliation decisions taken about this memory (section 9). Not every
+    # decision changes the memory's state -- re-anchoring evidence to a renamed
+    # symbol deliberately does not -- so the decision log, not the version
+    # history, is where "why does this memory look the way it does" is answered.
+    decisions: list[dict[str, Any]] = field(default_factory=list)
+    claims: list[dict[str, Any]] = field(default_factory=list)
 
 
 class ProvenanceEngine:
@@ -166,6 +174,8 @@ class ProvenanceEngine:
             last_verified_at=mem.last_verified_at.isoformat() if mem.last_verified_at else None,
             evidences=evidence_items,
             version_history=history,
+            decisions=await cls._decisions_for(session, memory_id),
+            claims=await cls._claims_for(session, memory_id),
             associated_commits=commits_data,
         )
 
@@ -223,6 +233,52 @@ class ProvenanceEngine:
             "files": files_list,
             "commits": commits_list,
             "versions": report.version_history,
+            "decisions": report.decisions,
+            "claims": report.claims,
             "tests": report.associated_tests,
         }
 
+    @staticmethod
+    async def _decisions_for(session: AsyncSession, memory_id: str) -> list[dict[str, Any]]:
+        """Every reconciliation decision recorded about this memory, oldest first."""
+        res = await session.execute(
+            select(MemoryDecision)
+            .where(MemoryDecision.memory_id == memory_id)
+            .order_by(MemoryDecision.created_at)
+        )
+        return [
+            {
+                "id": decision.id,
+                "decision": decision.decision,
+                "reason_code": decision.reason_code,
+                "reason": decision.reason,
+                "previous_status": decision.previous_status,
+                "new_status": decision.new_status,
+                "commit_sha": decision.commit_sha,
+                "actor": decision.actor,
+                "change_set_id": decision.change_set_id,
+                "created_at": decision.created_at.isoformat(),
+            }
+            for decision in res.scalars().all()
+        ]
+
+    @staticmethod
+    async def _claims_for(session: AsyncSession, memory_id: str) -> list[dict[str, Any]]:
+        """The propositions this memory asserts, with their verification state."""
+        res = await session.execute(
+            select(Claim)
+            .where(Claim.memory_id == memory_id, Claim.status != "RETIRED")
+            .order_by(Claim.created_at)
+        )
+        return [
+            {
+                "id": claim.id,
+                "text": claim.text,
+                "status": claim.status,
+                "last_outcome": claim.last_outcome,
+                "authority": claim.authority,
+                "confidence": claim.confidence,
+                "explanation": (claim.confidence_components or {}).get("explanation"),
+            }
+            for claim in res.scalars().all()
+        ]

@@ -173,23 +173,28 @@ async def run_project_benchmark(
         for mode, res in sc.results.items():
             results_dict[mode] = {
                 "mode": res.mode,
-                "files_explored": res.files_explored,
+                # Measured from the configuration that actually ran.
+                "context_items": res.context_items,
+                "files_referenced": res.files_referenced,
                 "files_inspected": res.files_inspected,
                 "input_tokens": res.input_tokens,
-                "output_tokens": res.output_tokens,
-                "total_tokens": res.total_tokens,
-                "tool_calls": res.tool_calls,
-                "duration_ms": round(res.duration_ms, 2),
                 "latency_ms": round(res.latency_ms, 2),
-                "estimated_cost_usd": res.estimated_cost_usd,
-                "repeated_failures": res.repeated_failures,
-                "success": res.success,
-                "task_success": res.task_success,
+                "duration_ms": round(res.duration_ms, 2),
                 "retrieval_precision": res.retrieval_precision,
                 "retrieval_recall": res.retrieval_recall,
+                "relevance_basis": res.relevance_basis,
                 "stale_retrieval_rate": res.stale_retrieval_rate,
-                "context_usefulness": res.context_usefulness,
-                "provenance_correctness": res.provenance_correctness,
+                "conflicted_retrieval_rate": res.conflicted_retrieval_rate,
+                "context_redundancy": res.context_redundancy,
+                "provenance_coverage": res.provenance_coverage,
+                # Null means "not measured by this harness", which the client must
+                # render as such rather than as a zero (specification section 49).
+                "task_success": res.task_success,
+                "tests_passed": res.tests_passed,
+                "repeated_failures": res.repeated_failures,
+                "output_tokens": res.output_tokens,
+                "estimated_cost_usd": res.estimated_cost_usd,
+                "unmeasured_reason": res.unmeasured_reason,
             }
 
         out.append({
@@ -199,6 +204,18 @@ async def run_project_benchmark(
             "token_reduction_pct": sc.token_reduction_pct,
             "exploration_reduction_pct": sc.exploration_reduction_pct,
             "tool_calls_saved": sc.tool_calls_saved,
+            "measurement_notes": sc.measurement_notes,
+            "metadata": {
+                "repository_commit": sc.metadata.repository_commit,
+                "benchmark_suite_version": sc.metadata.benchmark_suite_version,
+                "embedding_model": sc.metadata.embedding_model,
+                "embedding_quality_class": sc.metadata.embedding_quality_class,
+                "retrieval_config": sc.metadata.retrieval_config,
+                "project_memory_count": sc.metadata.project_memory_count,
+                "environment": sc.metadata.environment,
+                "timestamp": sc.metadata.timestamp,
+            },
+            "raw_log_path": sc.raw_log_path,
         })
     return out
 

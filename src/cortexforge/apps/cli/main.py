@@ -505,32 +505,43 @@ def benchmark(project_ref: str) -> None:
                 scorecards = await evaluation_runner.run_benchmark(session, project.id)
 
             for sc in scorecards:
-                table = Table(title=f"Benchmark Task: {sc.task_name} ({sc.task_id})", border_style="cyan")
-                table.add_column("Agent Configuration", style="bold white")
-                table.add_column("Files Explored", style="yellow")
+                table = Table(
+                    title=f"Benchmark Task: {sc.task_name} ({sc.task_id})", border_style="cyan"
+                )
+                table.add_column("Configuration", style="bold white")
+                table.add_column("Context Items", style="yellow")
+                table.add_column("Files Referenced", style="yellow")
                 table.add_column("Input Tokens", style="cyan")
-                table.add_column("Tool Calls", style="magenta")
-                table.add_column("Duration (ms)", style="dim")
-                table.add_column("Repeated Failures", style="red")
+                table.add_column("Latency (ms)", style="dim")
+                table.add_column("Stale Rate", style="red")
+                table.add_column("Precision", style="magenta")
 
                 for mode_name, res in sc.results.items():
-                    mode_style = "[bold green]CortexForge[/]" if mode_name == "CortexForge" else mode_name
                     table.add_row(
-                        mode_style,
-                        str(res.files_explored),
+                        mode_name,
+                        str(res.context_items),
+                        str(res.files_referenced),
                         f"{res.input_tokens:,}",
-                        str(res.tool_calls),
-                        f"{res.duration_ms:.1f}",
-                        str(res.repeated_failures),
+                        f"{res.latency_ms:.1f}",
+                        f"{res.stale_retrieval_rate:.0%}",
+                        # An unmeasured metric prints as "n/a", never as 0.
+                        "n/a" if res.retrieval_precision is None else f"{res.retrieval_precision:.2f}",
                     )
 
                 console.print(table)
                 console.print(Panel(
                     f"[bold green]Exploration Reduction:[/] {sc.exploration_reduction_pct}%\n"
                     f"[bold green]Token Reduction:[/]       {sc.token_reduction_pct}%\n"
-                    f"[bold green]Tool Calls Saved:[/]      {sc.tool_calls_saved} calls",
-                    title="Empirical Scorecard Summary",
+                    f"[dim]Relevance judged by: "
+                    f"{next(iter(sc.results.values())).relevance_basis}[/]",
+                    title="Measured Scorecard",
                     border_style="green",
+                ))
+
+                console.print(Panel(
+                    "\n".join(f"- {note}" for note in sc.measurement_notes),
+                    title="What was and was not measured",
+                    border_style="yellow",
                 ))
 
     asyncio.run(_do_bench())
