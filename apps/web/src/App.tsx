@@ -42,10 +42,10 @@ export const App: React.FC = () => {
   // Initial load
   useEffect(() => {
     async function loadInitial() {
-      const projs = await fetchProjects();
-      setProjects(projs);
-      if (projs.length > 0) {
-        setSelectedProjectId(projs[0].id);
+      const projectList = await fetchProjects();
+      setProjects(projectList);
+      if (projectList.length > 0) {
+        setSelectedProjectId(projectList[0].id);
       }
     }
     loadInitial();
@@ -79,14 +79,14 @@ export const App: React.FC = () => {
     const ok = await triggerScan(selectedProjectId);
     if (ok) {
       showToast('Scan complete: code graph and entities synchronized', 'success');
-      const [arch, mems, projs] = await Promise.all([
+      const [arch, mems, updatedProjects] = await Promise.all([
         fetchArchitecture(selectedProjectId),
         fetchMemories(selectedProjectId),
         fetchProjects(),
       ]);
       setArchitecture(arch);
       setMemories(mems);
-      setProjects(projs);
+      setProjects(updatedProjects);
     } else {
       showToast('Scan failed. Ensure directory is accessible.', 'error');
     }

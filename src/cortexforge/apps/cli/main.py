@@ -203,14 +203,14 @@ def status() -> None:
             table.add_column("Status", style="magenta")
 
             for p in projects:
-                ecount = await session.scalar(select(func.count(CodeEntity.id)).where(CodeEntity.project_id == p.id))
-                mcount = await session.scalar(select(func.count(Memory.id)).where(Memory.project_id == p.id))
+                entity_count = await session.scalar(select(func.count(CodeEntity.id)).where(CodeEntity.project_id == p.id))
+                memory_count = await session.scalar(select(func.count(Memory.id)).where(Memory.project_id == p.id))
                 table.add_row(
                     p.id[:8] + "...",
                     p.name,
                     p.local_path,
-                    str(ecount or 0),
-                    str(mcount or 0),
+                    str(entity_count or 0),
+                    str(memory_count or 0),
                     p.status,
                 )
 

@@ -18,5 +18,34 @@
   "[typescriptreact]": {
     "editor.defaultFormatter": "vscode.typescript-language-features",
     "editor.formatOnSave": true
-  }
+  },
+  "cSpell.words": [
+    "aiosqlite",
+    "asyncpg",
+    "cortexforge",
+    "CORTEXFORGE",
+    "fastapi",
+    "hmac",
+    "htmlcov",
+    "httpx",
+    "mypy",
+    "ondelete",
+    "onupdate",
+    "pgvector",
+    "pycache",
+    "pydantic",
+    "pytest",
+    "Pytest",
+    "sdist",
+    "selectin",
+    "sessionmaker",
+    "setuptools",
+    "sqlalchemy",
+    "testpaths",
+    "uvicorn",
+    "venv",
+    "virtualenv",
+    "Virtualenv"
+  ]
 }
+
