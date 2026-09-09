@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from cortexforge.agent.events import (
     CanonicalEventType,
@@ -32,7 +33,7 @@ from cortexforge.core.models import (
 )
 from cortexforge.core.schemas import MemoryCreate, MemoryEvidenceCreate
 from cortexforge.memory.consolidation import MemoryConsolidationEngine
-from cortexforge.memory.service import MemoryService
+from cortexforge.memory.service import MemoryService, cosine_similarity
 from cortexforge.memory.verification import MemoryVerificationEngine
 from cortexforge.observability.audit import record_audit
 from cortexforge.retrieval.composer import ComposedContext, ContextComposer
@@ -276,6 +277,7 @@ class AgentWorkflowOrchestrator:
         error_text: str | None = None,
         stack_trace: str | None = None,
         affected_files: list[str] | None = None,
+        affected_symbols: list[str] | None = None,
         agent_source: str = "mcp",
     ) -> None:
         """Capture test results, normalize stack traces, and record failure episodes."""
@@ -390,7 +392,8 @@ class AgentWorkflowOrchestrator:
                 error_message=episode.error_message,
                 normalized_trace=episode.normalized_trace,
                 attempted_approach=task.task_text,
-                affected_files={"files": affected_files or []},
+                affected_files=affected_files or [],
+                affected_symbols=affected_symbols or [],
             )
             fail_episode.rejected_reason = None
             session.add(fail_episode)
@@ -471,12 +474,22 @@ class AgentWorkflowOrchestrator:
         session: AsyncSession,
         project_id: str,
         task_text: str,
+        files: list[str] | None = None,
+        symbols: list[str] | None = None,
+        failure_signature: str | None = None,
         limit: int = 5,
     ) -> list[dict[str, Any]]:
-        """Retrieve historically similar engineering tasks, approaches, failures, and fixes."""
-        stmt = select(AgentTask).where(
-            AgentTask.project_id == project_id,
-            AgentTask.status == "COMPLETED",
+        """Retrieve historically similar tasks using embedding, files, symbols, and failure signatures."""
+        stmt = (
+            select(AgentTask)
+            .options(
+                selectinload(AgentTask.events),
+                selectinload(AgentTask.failure_episodes).selectinload(FailureEpisode.fix_attempts),
+            )
+            .where(
+                AgentTask.project_id == project_id,
+                AgentTask.status == "COMPLETED",
+            )
         )
         res = await session.execute(stmt)
         completed_tasks = list(res.scalars().all())
@@ -484,42 +497,165 @@ class AgentWorkflowOrchestrator:
         if not completed_tasks:
             return []
 
+        # 1. Text & Embedding Signal
         query_words = set(task_text.lower().split())
-        scored_tasks: list[tuple[float, AgentTask]] = []
+        query_embed = None
+        try:
+            query_embed_res = await self.memory_service.embedding_provider.embed_text(task_text)
+            query_embed = query_embed_res.vector
+        except Exception as exc:
+            logger.debug("Failed to embed task query for similarity: %s", exc)
+
+        scored_tasks: list[tuple[float, dict[str, float], AgentTask]] = []
+
+        q_files_norm = {f.replace("\\", "/").lower() for f in files} if files else set()
+        q_syms_norm = {s.lower() for s in symbols} if symbols else set()
+        q_sig_norm = failure_signature.strip().lower() if failure_signature else ""
 
         for t in completed_tasks:
+            # Semantic text score
             t_words = set(t.task_text.lower().split())
             overlap = len(query_words & t_words)
             jaccard = overlap / max(1, len(query_words | t_words))
-            if jaccard > 0.05 or overlap >= 2:
-                scored_tasks.append((jaccard, t))
+
+            cos_sim = 0.0
+            if query_embed:
+                try:
+                    t_embed_res = await self.memory_service.embedding_provider.embed_text(t.task_text)
+                    cos_sim = cosine_similarity(query_embed, t_embed_res.vector)
+                except Exception:
+                    cos_sim = 0.0
+
+            text_score = max(0.0, (0.65 * cos_sim) + (0.35 * jaccard)) if cos_sim > 0.0 else jaccard
+
+            # Extract files and symbols associated with the task
+            task_files: set[str] = set()
+            task_symbols: set[str] = set()
+            for ev in t.events:
+                p = ev.payload or {}
+                for key in ("path", "file_path", "target_path"):
+                    if key in p and isinstance(p[key], str):
+                        task_files.add(p[key].replace("\\", "/").lower())
+                for key in ("files", "affected_files"):
+                    if key in p and isinstance(p[key], list):
+                        for f in p[key]:
+                            if isinstance(f, str):
+                                task_files.add(f.replace("\\", "/").lower())
+                for key in ("symbol", "symbol_name", "target_symbol"):
+                    if key in p and isinstance(p[key], str):
+                        task_symbols.add(p[key].lower())
+                for key in ("symbols", "affected_symbols"):
+                    if key in p and isinstance(p[key], list):
+                        for s in p[key]:
+                            if isinstance(s, str):
+                                task_symbols.add(s.lower())
+
+            for fe in t.failure_episodes:
+                if fe.affected_files and isinstance(fe.affected_files, list):
+                    for f in fe.affected_files:
+                        if isinstance(f, str):
+                            task_files.add(f.replace("\\", "/").lower())
+                if fe.affected_symbols and isinstance(fe.affected_symbols, list):
+                    for s in fe.affected_symbols:
+                        if isinstance(s, str):
+                            task_symbols.add(s.lower())
+
+            # File overlap score
+            file_score = 0.0
+            if q_files_norm:
+                file_score = len(q_files_norm & task_files) / max(1, len(q_files_norm))
+
+            # Symbol overlap score
+            symbol_score = 0.0
+            if q_syms_norm:
+                symbol_score = len(q_syms_norm & task_symbols) / max(1, len(q_syms_norm))
+
+            # Failure signature score
+            failure_score = 0.0
+            if q_sig_norm:
+                for fe in t.failure_episodes:
+                    fe_sig = (fe.failure_signature or "").strip().lower()
+                    fe_err = (fe.error_message or "").strip().lower()
+                    fe_cls = (fe.error_class or "").strip().lower()
+                    if fe_sig and fe_sig == q_sig_norm:
+                        failure_score = max(failure_score, 1.0)
+                    elif q_sig_norm in fe_sig or fe_sig in q_sig_norm:
+                        failure_score = max(failure_score, 0.8)
+                    elif q_sig_norm in fe_err or fe_cls in q_sig_norm:
+                        failure_score = max(failure_score, 0.5)
+
+            # Weighted composite calculation (§28: embedding + files + symbols + failure signatures)
+            w_text = 0.35
+            w_file = 0.25 if q_files_norm else 0.0
+            w_symbol = 0.20 if q_syms_norm else 0.0
+            w_failure = 0.20 if q_sig_norm else 0.0
+            total_weight = w_text + w_file + w_symbol + w_failure
+
+            composite = (
+                (w_text * text_score)
+                + (w_file * file_score)
+                + (w_symbol * symbol_score)
+                + (w_failure * failure_score)
+            ) / max(1e-6, total_weight)
+
+            breakdown = {
+                "text_score": round(text_score, 4),
+                "file_score": round(file_score, 4),
+                "symbol_score": round(symbol_score, 4),
+                "failure_score": round(failure_score, 4),
+            }
+
+            if composite > 0.05 or overlap >= 1 or file_score > 0.0 or failure_score > 0.0:
+                scored_tasks.append((composite, breakdown, t))
 
         scored_tasks.sort(key=lambda x: x[0], reverse=True)
         top_tasks = scored_tasks[:limit]
 
         results: list[dict[str, Any]] = []
-        for score, t in top_tasks:
-            # Fetch failure episodes
-            fe_stmt = select(FailureEpisode).where(FailureEpisode.task_id == t.id)
-            fe_res = await session.execute(fe_stmt)
-            episodes = list(fe_res.scalars().all())
+        for composite, breakdown, t in top_tasks:
+            fail_data: list[dict[str, Any]] = []
+            fix_data: list[dict[str, Any]] = []
 
-            fail_data = []
-            for ep in episodes:
+            for ep in t.failure_episodes:
+                has_success = any(
+                    getattr(fa, "success", False) is True
+                    or (getattr(fa, "outcome", "") or "").upper() in ("SUCCESS", "FIXED")
+                    for fa in ep.fix_attempts
+                )
+                fix_status = "FIXED" if has_success else ("ATTEMPTED" if ep.fix_attempts else "UNRESOLVED")
+
                 fail_data.append({
+                    "error_class": ep.error_class,
                     "error_message": ep.error_message,
                     "failure_signature": ep.failure_signature,
                     "attempted_approach": ep.attempted_approach,
                     "rejected_reason": ep.rejected_reason,
+                    "fix_status": fix_status,
                 })
+                for fa in ep.fix_attempts:
+                    approach = getattr(fa, "attempted_fix", "") or getattr(fa, "approach_description", "")
+                    outcome = "SUCCESS" if getattr(fa, "success", False) else (getattr(fa, "outcome", "") or "FAILED")
+                    why = getattr(fa, "why_worked_or_failed", "") or getattr(fa, "explanation", "")
+                    fix_data.append({
+                        "attempted_fix": approach,
+                        "approach_description": approach,
+                        "success": getattr(fa, "success", False),
+                        "outcome": outcome,
+                        "why_worked_or_failed": why,
+                        "explanation": why,
+                    })
 
             results.append({
                 "task_id": t.id,
+                "task": t,
                 "task_text": t.task_text,
+                "status": t.status,
                 "success": t.success,
-                "similarity_score": round(score, 3),
+                "similarity_score": round(composite, 4),
+                "score_breakdown": breakdown,
                 "tool_calls": t.tool_calls,
                 "failure_episodes": fail_data,
+                "fix_attempts": fix_data,
             })
 
         return results

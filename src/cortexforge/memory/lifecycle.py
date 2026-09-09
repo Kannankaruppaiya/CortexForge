@@ -196,8 +196,23 @@ class MemoryLifecycleManager:
         memory.status = target_state
         memory.updated_at = datetime.now(UTC)
 
-        if target_state == MemoryState.ACTIVE.value:
+        if target_state in (
+            MemoryState.SUPERSEDED.value,
+            MemoryState.INVALIDATED.value,
+            MemoryState.ARCHIVED.value,
+        ):
+            if not memory.valid_to_time:
+                memory.valid_to_time = datetime.now(UTC)
+            if commit_sha and not memory.valid_to_commit:
+                memory.valid_to_commit = commit_sha
+        elif target_state == MemoryState.ACTIVE.value:
             memory.last_verified_at = datetime.now(UTC)
+            memory.valid_to_time = None
+            memory.valid_to_commit = None
+            if not memory.valid_from_time:
+                memory.valid_from_time = datetime.now(UTC)
+            if commit_sha and not memory.valid_from_commit:
+                memory.valid_from_commit = commit_sha
 
         if superseded_by_id:
             memory.superseded_by_id = superseded_by_id

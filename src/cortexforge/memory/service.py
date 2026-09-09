@@ -6,7 +6,7 @@ import os
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -181,6 +181,10 @@ class MemoryService:
             workspace=payload.workspace,
             source_reference=payload.source_reference,
             source_commit=payload.source_commit,
+            valid_from_commit=payload.valid_from_commit or payload.source_commit,
+            valid_to_commit=payload.valid_to_commit,
+            valid_from_time=payload.valid_from_time or datetime.now(UTC),
+            valid_to_time=payload.valid_to_time,
             created_by=payload.created_by,
             version=1,
             supersedes_id=payload.supersedes_id,
@@ -395,10 +399,12 @@ class MemoryService:
         memory_type: str | None = None,
         status: str | None = None,
         min_importance: float = 0.0,
+        as_of_time: datetime | None = None,
+        at_commit: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[Memory]:
-        """Query memories with multi-attribute filtering."""
+        """Query memories with multi-attribute and temporal validity filtering."""
         stmt = (
             select(Memory)
             .options(selectinload(Memory.evidences))
@@ -413,6 +419,22 @@ class MemoryService:
         if min_importance > 0.0:
             stmt = stmt.where(Memory.importance >= min_importance)
 
+        if as_of_time:
+            stmt = stmt.where(
+                or_(Memory.valid_from_time.is_(None), Memory.valid_from_time <= as_of_time),
+                or_(Memory.valid_to_time.is_(None), Memory.valid_to_time > as_of_time),
+            )
+        elif status == "ACTIVE":
+            stmt = stmt.where(
+                or_(Memory.valid_to_time.is_(None), Memory.valid_to_time > datetime.now(UTC))
+            )
+
+        if at_commit:
+            stmt = stmt.where(
+                or_(Memory.valid_from_commit.is_(None), Memory.valid_from_commit == at_commit),
+                or_(Memory.valid_to_commit.is_(None), Memory.valid_to_commit != at_commit),
+            )
+
         stmt = stmt.order_by(Memory.importance.desc(), Memory.created_at.desc()).offset(offset).limit(limit)
         res = await session.execute(stmt)
         return list(res.scalars().all())
@@ -423,20 +445,27 @@ class MemoryService:
         project_id: str,
         query: str,
         memory_type: str | None = None,
+        as_of_time: datetime | None = None,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
-        """Vector semantic similarity search over project memories."""
+        """Vector semantic similarity search over project memories with temporal filtering."""
         query_embed = await self.embedding_provider.embed_text(query)
         qvec = query_embed.vector
 
+        effective_time = as_of_time or datetime.now(UTC)
         stmt = (
             select(Memory)
             .options(selectinload(Memory.evidences))
             .where(
                 Memory.project_id == project_id,
                 Memory.status.in_(["ACTIVE", "UNVERIFIED", "STALE"]),
+                or_(Memory.valid_to_time.is_(None), Memory.valid_to_time > effective_time),
             )
         )
+        if as_of_time:
+            stmt = stmt.where(
+                or_(Memory.valid_from_time.is_(None), Memory.valid_from_time <= as_of_time)
+            )
         if memory_type:
             stmt = stmt.where(Memory.memory_type == memory_type.upper())
 

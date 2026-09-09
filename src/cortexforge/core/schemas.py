@@ -225,6 +225,10 @@ class MemoryCreate(BaseModel):
     supersedes_id: str | None = None
     superseded_by_id: str | None = None
     conflict_group: str | None = None
+    valid_from_commit: str | None = None
+    valid_to_commit: str | None = None
+    valid_from_time: datetime | None = None
+    valid_to_time: datetime | None = None
     evidence: list[MemoryEvidenceCreate] | None = None
 
 
@@ -243,6 +247,10 @@ class MemoryRead(BaseModel):
     source_type: str
     source_reference: str | None = None
     source_commit: str | None = None
+    valid_from_commit: str | None = None
+    valid_to_commit: str | None = None
+    valid_from_time: datetime | None = None
+    valid_to_time: datetime | None = None
     created_by: str
     version: int
     supersedes_id: str | None = None

@@ -304,6 +304,11 @@ class ConflictResolver:
                 existing.superseded_by_id = candidate_memory.id
                 candidate_memory.supersedes_id = existing.id
 
+                # Close the superseded memory's validity window
+                existing.valid_to_time = candidate_memory.valid_from_time or datetime.now(UTC)
+                if candidate_memory.valid_from_commit or candidate_memory.source_commit:
+                    existing.valid_to_commit = candidate_memory.valid_from_commit or candidate_memory.source_commit
+
                 # A statement that was never believed is *rejected*, not superseded.
                 # Supersession says "this used to be our position"; a candidate that
                 # was refuted before anyone accepted it never was, and recording it
@@ -328,6 +333,7 @@ class ConflictResolver:
                     ),
                     superseded_by_id=candidate_memory.id if was_believed else None,
                     conflict_group=conflict_id,
+                    commit_sha=existing.valid_to_commit,
                 )
                 if ver:
                     session.add(ver)
@@ -431,12 +437,22 @@ class ConflictResolver:
         answer is False: an unstated timeline is not a licence to assume the
         disagreement away.
         """
-        if not earlier.valid_to_commit:
+        if not earlier.valid_to_commit and not earlier.valid_to_time:
             return False
-        if later.valid_from_commit and later.valid_from_commit == earlier.valid_to_commit:
+        if (
+            earlier.valid_to_commit
+            and later.valid_from_commit
+            and later.valid_from_commit == earlier.valid_to_commit
+        ):
             return True
         if earlier.valid_to_time and later.valid_from_time:
-            return earlier.valid_to_time <= later.valid_from_time
+            return _as_utc(earlier.valid_to_time) <= _as_utc(later.valid_from_time)
+        if earlier.valid_to_commit and later.valid_from_commit:
+            return True
+        if earlier.valid_to_time:
+            later_time = later.valid_from_time or later.created_at
+            if later_time:
+                return _as_utc(earlier.valid_to_time) <= _as_utc(later_time)
         # The earlier memory is explicitly closed and the later one is open-ended:
         # treat as succession only when the later memory actually postdates it.
         if later.valid_from_commit or later.valid_from_time:

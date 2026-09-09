@@ -149,3 +149,116 @@ async def test_agent_workflow_orchestration_lifecycle(test_session: AsyncSession
     lessons = await mem_service.list_memories(test_session, project.id, layer="L5")
     assert len(lessons) >= 1
     assert "exponential backoff" in lessons[0].content
+
+
+@pytest.mark.asyncio
+async def test_find_similar_tasks_multi_signal(test_session: AsyncSession, tmp_path):
+    """Verify multi-signal similarity matching across text, files, symbols, and failure signatures (§28)."""
+    from cortexforge.core.models import FixAttempt
+
+    project = Project(name="SimilarTaskProj", local_path=str(tmp_path))
+    test_session.add(project)
+    await test_session.commit()
+    await test_session.refresh(project)
+
+    embed_provider = FastDeterministicEmbeddingProvider(dim=64)
+    mem_service = MemoryService(embedding_provider=embed_provider)
+    retrieval = HybridRetrievalEngine(embedding_provider=embed_provider)
+    composer = ContextComposer(retrieval_engine=retrieval)
+
+    orchestrator = AgentWorkflowOrchestrator(
+        memory_service=mem_service,
+        composer=composer,
+    )
+
+    # Task 1: Payment gateway retry (relevant to payment failures)
+    task1, _ = await orchestrator.start_task(
+        session=test_session,
+        project_id=project.id,
+        task_text="Implement payment gateway retry logic",
+        agent_id="agent1",
+    )
+    await orchestrator.record_tool_call(
+        session=test_session,
+        task_id=task1.id,
+        tool_name="edit_file",
+        tool_args={"path": "payment.py", "symbol": "process_payment"},
+    )
+    await orchestrator.record_test_result(
+        session=test_session,
+        task_id=task1.id,
+        test_name="test_gateway_timeout",
+        status="FAILED",
+        error_text="GatewayTimeoutError: Gateway response timed out after 5000ms",
+        stack_trace="File 'payment.py', line 54, in retry\nGatewayTimeoutError: timeout",
+        affected_files=["payment.py"],
+        affected_symbols=["process_payment"],
+    )
+    # Add a fix attempt to the recorded failure episode
+    await test_session.refresh(task1, ["failure_episodes"])
+    assert len(task1.failure_episodes) >= 1
+    target_sig = task1.failure_episodes[0].failure_signature
+    fix = FixAttempt(
+        failure_episode_id=task1.failure_episodes[0].id,
+        attempted_fix="Configured exponential backoff with jitter and 10s deadline",
+        success=True,
+        why_worked_or_failed="Tests passed after timeout increase",
+    )
+    test_session.add(fix)
+    await test_session.commit()
+
+    await orchestrator.complete_task(
+        session=test_session,
+        task_id=task1.id,
+        success=True,
+    )
+
+    # Task 2: Completely unrelated task (database indexing)
+    task2, _ = await orchestrator.start_task(
+        session=test_session,
+        project_id=project.id,
+        task_text="Add B-tree index on user_email column",
+        agent_id="agent2",
+    )
+    await orchestrator.record_tool_call(
+        session=test_session,
+        task_id=task2.id,
+        tool_name="edit_file",
+        tool_args={"path": "db/schema.sql"},
+    )
+    await orchestrator.complete_task(
+        session=test_session,
+        task_id=task2.id,
+        success=True,
+    )
+
+    # Query with multi-signal input (text + file + symbol + failure signature)
+    similar = await orchestrator.find_similar_tasks(
+        session=test_session,
+        project_id=project.id,
+        task_text="Resolve payment gateway timeout in checkout flow",
+        files=["payment.py"],
+        symbols=["process_payment"],
+        failure_signature=target_sig,
+    )
+
+    assert len(similar) >= 1
+    top = similar[0]
+    assert top["task_id"] == task1.id
+    assert top["similarity_score"] > 0.4
+    assert top["score_breakdown"]["file_score"] == 1.0
+    assert top["score_breakdown"]["symbol_score"] == 1.0
+    assert top["score_breakdown"]["failure_score"] == 1.0
+    assert top["score_breakdown"]["text_score"] > 0.0
+
+    # Verify failure episodes and fix attempts are surfaced
+    assert len(top["failure_episodes"]) >= 1
+    fe = top["failure_episodes"][0]
+    assert fe["fix_status"] == "FIXED"
+    assert "GatewayTimeoutError" in fe["error_message"]
+
+    assert len(top["fix_attempts"]) >= 1
+    fa = top["fix_attempts"][0]
+    assert "exponential backoff" in fa["approach_description"]
+    assert fa["outcome"] == "SUCCESS"
+

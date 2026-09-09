@@ -25,9 +25,10 @@ built from both would be worse than returning nothing.
 
 import logging
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import bindparam, select, text
+from sqlalchemy import bindparam, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cortexforge.core.models import Memory
@@ -91,6 +92,7 @@ class VectorStore:
         embedding_model: str | None = None,
         layer: str | None = None,
         memory_type: str | None = None,
+        as_of_time: datetime | None = None,
         limit: int = 50,
     ) -> VectorSearchResult:
         """Return the most similar memories, narrowing candidates in the database.
@@ -102,10 +104,10 @@ class VectorStore:
         """
         if await has_pgvector(session):
             return await self._search_pgvector(
-                session, project_id, query_vector, embedding_model, layer, memory_type, limit
+                session, project_id, query_vector, embedding_model, layer, memory_type, as_of_time, limit
             )
         return await self._search_python(
-            session, project_id, query_vector, embedding_model, layer, memory_type, limit
+            session, project_id, query_vector, embedding_model, layer, memory_type, as_of_time, limit
         )
 
     # ------------------------------------------------------------ postgres
@@ -118,9 +120,14 @@ class VectorStore:
         embedding_model: str | None,
         layer: str | None,
         memory_type: str | None,
+        as_of_time: datetime | None,
         limit: int,
     ) -> VectorSearchResult:
         """Indexed nearest-neighbour search; the database returns only the top k."""
+        statuses = list(RETRIEVABLE_STATUSES)
+        if as_of_time:
+            statuses.append("SUPERSEDED")
+
         conditions = [
             "m.project_id = :project_id",
             "m.embedding_vector IS NOT NULL",
@@ -128,10 +135,18 @@ class VectorStore:
         ]
         params: dict[str, Any] = {
             "project_id": project_id,
-            "statuses": list(RETRIEVABLE_STATUSES),
+            "statuses": statuses,
             "query_vector": str(query_vector),
             "limit": limit,
         }
+
+        if as_of_time:
+            conditions.append("(m.valid_from_time IS NULL OR m.valid_from_time <= :as_of_time)")
+            conditions.append("(m.valid_to_time IS NULL OR m.valid_to_time > :as_of_time)")
+            params["as_of_time"] = as_of_time
+        else:
+            conditions.append("(m.valid_to_time IS NULL OR m.valid_to_time > :now)")
+            params["now"] = datetime.now(UTC)
 
         # Scoping to one embedding model is what keeps incompatible vector spaces
         # out of a single ranked list.
@@ -193,6 +208,7 @@ class VectorStore:
         embedding_model: str | None,
         layer: str | None,
         memory_type: str | None,
+        as_of_time: datetime | None,
         limit: int,
     ) -> VectorSearchResult:
         """Fallback for databases without a vector index.
@@ -202,11 +218,24 @@ class VectorStore:
         is the honest limit of what SQLite can do; it is not an indexed search and
         is not reported as one.
         """
+        statuses = list(RETRIEVABLE_STATUSES)
+        if as_of_time:
+            statuses.append("SUPERSEDED")
+
         stmt = select(Memory).where(
             Memory.project_id == project_id,
-            Memory.status.in_(RETRIEVABLE_STATUSES),
+            Memory.status.in_(statuses),
             Memory.embedding.is_not(None),
         )
+        effective_time = as_of_time or datetime.now(UTC)
+        stmt = stmt.where(
+            or_(Memory.valid_to_time.is_(None), Memory.valid_to_time > effective_time)
+        )
+        if as_of_time:
+            stmt = stmt.where(
+                or_(Memory.valid_from_time.is_(None), Memory.valid_from_time <= as_of_time)
+            )
+
         if embedding_model:
             stmt = stmt.where(Memory.embedding_model == embedding_model)
         if layer:

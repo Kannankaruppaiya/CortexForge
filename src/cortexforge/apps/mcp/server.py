@@ -895,7 +895,13 @@ async def project_take_snapshot(commit_sha: str, project_id_or_path: str = ".") 
     name="task_find_similar",
     description="Retrieves historically similar engineering tasks, approaches attempted, failure post-mortems, and successful fixes.",
 )
-async def task_find_similar(task_text: str, project_id_or_path: str = ".") -> str:
+async def task_find_similar(
+    task_text: str,
+    project_id_or_path: str = ".",
+    files: list[str] | None = None,
+    symbols: list[str] | None = None,
+    failure_signature: str | None = None,
+) -> str:
     """Find similar previous tasks and their outcomes."""
     await init_db()
     async with session_scope() as session:
@@ -903,22 +909,43 @@ async def task_find_similar(task_text: str, project_id_or_path: str = ".") -> st
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
-        similar_tasks = await orchestrator.find_similar_tasks(session, project.id, task_text=task_text)
+        similar_tasks = await orchestrator.find_similar_tasks(
+            session,
+            project.id,
+            task_text=task_text,
+            files=files,
+            symbols=symbols,
+            failure_signature=failure_signature,
+        )
         if not similar_tasks:
             return f"No similar historical engineering tasks found for query '{task_text}'."
 
         lines = [f"# Similar Historical Tasks for '{task_text}' ({len(similar_tasks)})"]
         for st in similar_tasks:
             t = st["task"]
-            lines.append(f"### Task: {t.task_text} (Status: {t.status}, Success: {t.success})")
-            if st["failure_episodes"]:
+            score = st.get("similarity_score", 0.0)
+            breakdown = st.get("score_breakdown", {})
+            lines.append(f"### Task: {t.task_text} (Score: {score}, Status: {t.status}, Success: {t.success})")
+            if breakdown:
+                lines.append(
+                    f"  **Signals**: text={breakdown.get('text_score')}, "
+                    f"files={breakdown.get('file_score')}, "
+                    f"symbols={breakdown.get('symbol_score')}, "
+                    f"failure={breakdown.get('failure_score')}"
+                )
+            if st.get("failure_episodes"):
                 lines.append("  **Past Failures in Similar Tasks**:")
                 for fe in st["failure_episodes"]:
-                    lines.append(f"  - [{fe.error_class}] {fe.error_message} (Fix Status: {fe.fix_status})")
-            if st["fix_attempts"]:
+                    err_cls = fe.get("error_class") if isinstance(fe, dict) else getattr(fe, "error_class", "Error")
+                    err_msg = fe.get("error_message") if isinstance(fe, dict) else getattr(fe, "error_message", "")
+                    fix_stat = fe.get("fix_status") if isinstance(fe, dict) else getattr(fe, "fix_status", "UNRESOLVED")
+                    lines.append(f"  - [{err_cls}] {err_msg} (Fix Status: {fix_stat})")
+            if st.get("fix_attempts"):
                 lines.append("  **Successful Fixes & Approaches**:")
                 for fa in st["fix_attempts"]:
-                    lines.append(f"  - Approach: {fa.approach_description} (Outcome: {fa.outcome})")
+                    appr = fa.get("approach_description") if isinstance(fa, dict) else getattr(fa, "approach_description", "")
+                    outc = fa.get("outcome") if isinstance(fa, dict) else getattr(fa, "outcome", "")
+                    lines.append(f"  - Approach: {appr} (Outcome: {outc})")
             lines.append("")
         return "\n".join(lines)
 
