@@ -55,21 +55,40 @@ def test_multi_vendor_event_adapters():
     assert ev_claude.event_type == CanonicalEventType.TOOL_CALLED
     assert ev_claude.source == "claude_code"
 
+    # Claude explicit event_type pass-through
+    ev_claude_ctx = claude.normalize_event({"event_type": "CONTEXT_REQUESTED"}, task_id="t1")
+    assert ev_claude_ctx.event_type == CanonicalEventType.CONTEXT_REQUESTED
+
     antigravity = AntigravityAdapter()
     ev_ag = antigravity.normalize_event({"type": "USER_INPUT"}, task_id="t2")
     assert ev_ag.event_type == CanonicalEventType.TASK_STARTED
     assert ev_ag.source == "gemini_antigravity"
 
+    # Antigravity test failures and passes
+    ev_ag_fail = antigravity.normalize_event({"type": "TEST_RUN", "status": "FAILED"}, task_id="t2")
+    assert ev_ag_fail.event_type == CanonicalEventType.TEST_FAILED
+    ev_ag_pass = antigravity.normalize_event({"type": "TEST_RUN", "status": "PASSED"}, task_id="t2")
+    assert ev_ag_pass.event_type == CanonicalEventType.TEST_PASSED
+
+    # Antigravity explicit event_type pass-through
+    ev_ag_exp = antigravity.normalize_event({"event_type": CanonicalEventType.MEMORY_RETRIEVED.value}, task_id="t2")
+    assert ev_ag_exp.event_type == CanonicalEventType.MEMORY_RETRIEVED
+
     cursor = CursorAdapter()
     ev_cur = cursor.normalize_event({"action": "file_edit_save"}, task_id="t3")
     assert ev_cur.event_type == CanonicalEventType.FILE_CHANGED
+    ev_cur_fail = cursor.normalize_event({"action": "terminal_exec", "output": "TEST FAILED: 1 error"}, task_id="t3")
+    assert ev_cur_fail.event_type == CanonicalEventType.TEST_FAILED
 
     mcp = GenericMCPAdapter()
     ev_mcp = mcp.normalize_event({"type": "TEST_FAILED"}, task_id="t4")
     assert ev_mcp.event_type == CanonicalEventType.TEST_FAILED
 
-    # Registry lookup
+    # Registry lookup with aliases
     assert EventAdapterRegistry.get_adapter("claude_code").adapter_name == "claude_code"
+    assert EventAdapterRegistry.get_adapter("claude").adapter_name == "claude_code"
+    assert EventAdapterRegistry.get_adapter("gemini_antigravity").adapter_name == "gemini_antigravity"
+    assert EventAdapterRegistry.get_adapter("antigravity").adapter_name == "gemini_antigravity"
     assert EventAdapterRegistry.get_adapter("unknown").adapter_name == "mcp"
 
 
