@@ -1,5 +1,6 @@
 """End-to-end agent workflow orchestration connecting tasks, diffs, tests, and cognitive memories."""
 
+import logging
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -13,10 +14,12 @@ from cortexforge.agent.events import (
 )
 from cortexforge.agent.failure_intelligence import FailureIntelligenceEngine
 from cortexforge.agent.success_intelligence import SuccessIntelligence
+from cortexforge.agent.test_intelligence import TestIntelligenceEngine
 from cortexforge.code_intelligence.change_propagator import (
     ChangeImpactReport,
     SemanticChangePropagator,
 )
+from cortexforge.cognition.epistemics import TestAttribution
 from cortexforge.core.models import (
     AgentEvent,
     AgentTask,
@@ -34,6 +37,8 @@ from cortexforge.memory.verification import MemoryVerificationEngine
 from cortexforge.observability.audit import record_audit
 from cortexforge.retrieval.composer import ComposedContext, ContextComposer
 from cortexforge.retrieval.usefulness import RetrievalUsefulnessTracker
+
+logger = logging.getLogger(__name__)
 
 
 class AgentWorkflowOrchestrator:
@@ -58,6 +63,7 @@ class AgentWorkflowOrchestrator:
         self.consolidator = consolidator or MemoryConsolidationEngine()
         self.success_intelligence = success_intelligence or SuccessIntelligence()
         self.usefulness = usefulness or RetrievalUsefulnessTracker()
+        self.test_intelligence = TestIntelligenceEngine()
 
     async def start_task(
         self,
@@ -347,8 +353,34 @@ class AgentWorkflowOrchestrator:
         session.add(tc_result)
         await session.flush()
 
-        # 4. If test failed, create first-class FailureEpisode and structured L4 Memory
-        if is_failure and episode and error_text:
+        # 4. Attribute the outcome before deciding what it means.
+        #
+        # A failing test is not automatically evidence that this change is wrong.
+        # A test that has been flipping for weeks, or that was already red before
+        # the change, tells you about itself rather than about the work in hand
+        # (section 15). Recording a FAILURE memory for such a test would let a
+        # noisy suite erode the project's knowledge one build at a time.
+        attribution = None
+        if is_failure:
+            report = await self.test_intelligence.attribute_run(session, test_run.id)
+            verdict = next(
+                (v for v in report.verdicts if v.test_name == test_name), None
+            )
+            if verdict is not None:
+                attribution = verdict
+                tc_result.status = (
+                    "FLAKY"
+                    if verdict.attribution == TestAttribution.FLAKY.value
+                    else tc_result.status
+                )
+
+        blames_this_change = attribution is None or attribution.is_evidence_against_the_change
+
+        # 5. If the failure is genuinely attributable, record it as a first-class
+        #    episode and durable L4 memory. If it is not, the result is still
+        #    stored -- it happened -- but it does not become evidence against the
+        #    change.
+        if is_failure and episode and error_text and blames_this_change:
             fail_episode = FailureEpisode(
                 project_id=task.project_id,
                 task_id=task.id,
@@ -360,6 +392,7 @@ class AgentWorkflowOrchestrator:
                 attempted_approach=task.task_text,
                 affected_files={"files": affected_files or []},
             )
+            fail_episode.rejected_reason = None
             session.add(fail_episode)
 
             await self.memory_service.create_memory(
@@ -367,13 +400,18 @@ class AgentWorkflowOrchestrator:
                 project_id=task.project_id,
                 payload=MemoryCreate(
                     title=f"Test Failure in {test_name}",
-                    content=f"Error: {episode.error_message}\nSignature: {episode.failure_signature}\nTrace:\n{episode.normalized_trace}",
+                    content=(
+                        f"Error: {episode.error_message}\n"
+                        f"Signature: {episode.failure_signature}\n"
+                        f"Attribution: {attribution.attribution if attribution else 'UNKNOWN'}"
+                        f" - {attribution.reason if attribution else 'no history available'}\n"
+                        f"Trace:\n{episode.normalized_trace}"
+                    ),
                     summary=f"Failed test {test_name} with signature {episode.failure_signature}",
                     layer="L4",
                     memory_type="FAILURE",
                     source_type="verified_test",
                     importance=0.85,
-                    confidence=0.90,
                     evidence=[
                         MemoryEvidenceCreate(
                             file_path=f,
@@ -382,6 +420,15 @@ class AgentWorkflowOrchestrator:
                         for f in (affected_files or [])
                     ],
                 ),
+            )
+
+        elif is_failure and attribution is not None:
+            logger.info(
+                "Test %s failed but was attributed %s (%s); recorded without "
+                "creating a failure memory.",
+                test_name,
+                attribution.attribution,
+                attribution.reason,
             )
 
         await session.commit()

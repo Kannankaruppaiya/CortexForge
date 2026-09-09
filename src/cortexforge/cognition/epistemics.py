@@ -160,6 +160,10 @@ class ReasonCode(str, Enum):
 class TestAttribution(str, Enum):
     """Causal relationship between a change and a test outcome (section 15)."""
 
+    # pytest tries to collect any class whose name starts with "Test". This is a
+    # domain enum, not a test case, so collection is disabled explicitly.
+    __test__ = False
+
     INTRODUCED_BY = "INTRODUCED_BY"
     FIXED_BY = "FIXED_BY"
     REGRESSED_BY = "REGRESSED_BY"
