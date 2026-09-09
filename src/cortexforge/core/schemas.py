@@ -219,6 +219,7 @@ class MemoryCreate(BaseModel):
     scope: str = Field("PROJECT", description="PROJECT, MODULE, FILE, SYMBOL, FEATURE, TASK, BRANCH, ENVIRONMENT")
     branch: str | None = None
     workspace: str | None = None
+    is_working_tree: bool = Field(False, description="True if observed from an uncommitted working tree rather than committed truth")
     source_reference: str | None = None
     source_commit: str | None = None
     created_by: str = "agent"
@@ -245,6 +246,12 @@ class MemoryRead(BaseModel):
     importance: float
     freshness_score: float = 1.0
     source_type: str
+    authority: str = "AGENT_OBSERVED"
+    epistemic_state: str = "OBSERVATION"
+    scope: str = "PROJECT"
+    branch: str | None = None
+    workspace: str | None = None
+    is_working_tree: bool = False
     source_reference: str | None = None
     source_commit: str | None = None
     valid_from_commit: str | None = None

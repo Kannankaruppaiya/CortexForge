@@ -50,12 +50,27 @@ SECRET_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
             re.ASCII,
         ),
     ),
+    (
+        "GOOGLE_TOKEN",
+        re.compile(r"ya29\.[a-zA-Z0-9_\-]{25,}", re.ASCII),
+    ),
 ]
 
 # Injection delimiters commonly used to break out of agent instruction boundaries
 PROMPT_INJECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    ("SYSTEM_PROMPT_DELIMITER", re.compile(r"<\|im_start\|>|<\|im_end\|>|\[SYSTEM\]|\[HUMAN\]|\[ASSISTANT\]", re.IGNORECASE)),
-    ("INSTRUCTION_OVERRIDE", re.compile(r"(?i)(?:ignore\s+(?:all\s+)?previous\s+instructions|disregard\s+(?:all\s+)?prior\s+rules)")),
+    (
+        "SYSTEM_PROMPT_DELIMITER",
+        re.compile(
+            r"<\|im_start\|>|<\|im_end\|>|<\|system\|>|<\|user\|>|<\|assistant\|>|\[SYSTEM\]|\[HUMAN\]|\[ASSISTANT\]|\[INST\]|\[/INST\]",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "INSTRUCTION_OVERRIDE",
+        re.compile(
+            r"(?i)(?:ignore\s+(?:all\s+)?(?:previous|prior)\s+instructions|disregard\s+(?:all\s+)?(?:prior|previous)\s+rules|bypass\s+(?:system\s+)?safety)"
+        ),
+    ),
 ]
 
 

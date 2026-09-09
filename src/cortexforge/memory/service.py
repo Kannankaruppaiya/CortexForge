@@ -195,6 +195,7 @@ class MemoryService:
             scope=(payload.scope or "PROJECT").upper(),
             branch=payload.branch,
             workspace=payload.workspace,
+            is_working_tree=getattr(payload, "is_working_tree", False) or (payload.source_commit == "WORKING_TREE"),
             source_reference=payload.source_reference,
             source_commit=payload.source_commit,
             valid_from_commit=payload.valid_from_commit or payload.source_commit,
