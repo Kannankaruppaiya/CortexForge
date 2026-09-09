@@ -159,7 +159,12 @@ class MemoryEvidenceRead(BaseModel):
     id: str
     source_type: str
     source_id: str | None = None
-    file_path: str
+    file_path: str | None = None
+    uri: str | None = None
+    kind: str | None = None
+    evidence_type: str = "CODE"
+    relation: str = "SUPPORTS"
+    authority: str = "AGENT_OBSERVED"
     symbol_id: str | None = None
     commit_sha: str | None = None
     line_start: int | None = None
@@ -168,6 +173,7 @@ class MemoryEvidenceRead(BaseModel):
     snippet_hash: str | None = None
     ast_fingerprint: str | None = None
     confidence: float
+    detail: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
@@ -176,7 +182,12 @@ class MemoryEvidenceRead(BaseModel):
 class MemoryEvidenceCreate(BaseModel):
     source_type: str = "code"
     source_id: str | None = None
-    file_path: str
+    file_path: str | None = None
+    uri: str | None = None
+    kind: str | None = None
+    evidence_type: str = "CODE"
+    relation: str = "SUPPORTS"
+    authority: str | None = None
     symbol_id: str | None = None
     commit_sha: str | None = None
     line_start: int | None = None
@@ -185,6 +196,7 @@ class MemoryEvidenceCreate(BaseModel):
     snippet_hash: str | None = None
     ast_fingerprint: str | None = None
     confidence: float = 1.0
+    detail: dict[str, Any] = Field(default_factory=dict)
 
 
 class MemoryCreate(BaseModel):
@@ -445,6 +457,8 @@ class FailureEpisodeRead(BaseModel):
     rejected_reason: str | None = None
     command_or_tool: str | None = None
     root_cause: str | None = None
+    root_cause_claim_id: str | None = None
+    root_cause_details: dict[str, Any] = Field(default_factory=dict)
     affected_files: list[str] = Field(default_factory=list)
     affected_symbols: list[str] = Field(default_factory=list)
     created_at: datetime

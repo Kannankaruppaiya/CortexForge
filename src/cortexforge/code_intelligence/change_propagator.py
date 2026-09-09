@@ -56,6 +56,7 @@ class ChangeImpactReport:
     # explicitly rather than being silently counted as unaffected (section 30).
     memories_unknown: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    propagation_confidence: str = "EXACT"  # "EXACT" | "INFERRED" | "UNKNOWN_CHANGE_SCOPE" (Item 13)
     change_set_id: str | None = None
     verification_run_id: str | None = None
     # The full reconciliation record: decision code, reason code and reason per
@@ -349,6 +350,17 @@ class SemanticChangePropagator:
 
         await session.commit()
 
+        # Determine propagation confidence (Item 13)
+        if not normalized_files or (
+            all_semantic_changes
+            and len({sc.file_path for sc in all_semantic_changes}) >= len(normalized_files)
+        ):
+            prop_confidence = "EXACT"
+        elif all_semantic_changes or directly_changed_entities:
+            prop_confidence = "INFERRED"
+        else:
+            prop_confidence = "UNKNOWN_CHANGE_SCOPE"
+
         return ChangeImpactReport(
             modified_files=normalized_files,
             directly_changed_entities=[e.qualified_name for e in directly_changed_entities],
@@ -361,6 +373,7 @@ class SemanticChangePropagator:
             memories_invalidated=titles(DecisionCode.INVALIDATE.value),
             memories_unknown=titles(DecisionCode.UNKNOWN.value),
             warnings=warnings,
+            propagation_confidence=prop_confidence,
             change_set_id=change_set.id,
             verification_run_id=reconciliation.verification_run_id,
             decisions=[

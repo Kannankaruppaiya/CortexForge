@@ -6,6 +6,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from cortexforge.graph.service import GraphService
 from cortexforge.retrieval.engine import HybridRetrievalEngine, ScoredItem
 
+
+def count_tokens(text: str) -> int:
+    """Measure exact token count with tiktoken (cl100k_base) or conservative fallback."""
+    try:
+        import tiktoken
+        enc = tiktoken.get_encoding("cl100k_base")
+        return len(enc.encode(text))
+    except Exception:
+        return int(len(text.split()) * 1.33)
+
+
 PROFILE_BUDGETS = {
     "small": 1200,
     "medium": 3500,
@@ -301,13 +312,25 @@ class ContextComposer:
         lines.append("<!-- END CORTEXFORGE CONTEXT -->")
         raw_text = "\n".join(lines)
 
-        # Enforce Token Budget
-        words = raw_text.split()
-        max_words = int(budget * 0.75)
-        if len(words) > max_words:
-            raw_text = " ".join(words[:max_words]) + "\n\n<!-- Truncated to fit token budget -->\n<!-- END CORTEXFORGE CONTEXT -->"
+        # Enforce Hard Token Budget Guarantee (Item 19)
+        exact_tokens = count_tokens(raw_text)
+        if exact_tokens > budget:
+            try:
+                import tiktoken
+                enc = tiktoken.get_encoding("cl100k_base")
+                tokens = enc.encode(raw_text)
+                suffix = "\n\n<!-- Truncated to fit token budget -->\n<!-- END CORTEXFORGE CONTEXT -->"
+                suffix_tokens = len(enc.encode(suffix))
+                allowed_tokens = max(10, budget - suffix_tokens)
+                raw_text = enc.decode(tokens[:allowed_tokens]) + suffix
+                exact_tokens = len(enc.encode(raw_text))
+            except Exception:
+                words = raw_text.split()
+                max_words = int(budget * 0.75)
+                raw_text = " ".join(words[:max_words]) + "\n\n<!-- Truncated to fit token budget -->\n<!-- END CORTEXFORGE CONTEXT -->"
+                exact_tokens = count_tokens(raw_text)
 
-        estimated_tokens = int(len(raw_text.split()) * 1.33)
+        estimated_tokens = exact_tokens
 
         explainability_report = (
             f"Context Profile: {norm_profile.upper()} (Budget: {budget} tokens, Estimated: {estimated_tokens} tokens)\n"

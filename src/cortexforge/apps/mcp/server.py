@@ -174,16 +174,15 @@ async def project_get_component(
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
-        stmt = select(CodeEntity).where(
-            CodeEntity.project_id == project.id,
-            (CodeEntity.qualified_name == qualified_name)
-            | (CodeEntity.name == qualified_name)
-            | (CodeEntity.qualified_name.endswith(f":{qualified_name}"))
-            | (CodeEntity.qualified_name.endswith(f".{qualified_name}")),
-        )
-        res = await session.execute(stmt)
-        entity = res.scalars().first()
-        if not entity:
+        status, entity, candidates = await graph_service.resolve_entity(session, project.id, qualified_name)
+        if status == "AMBIGUOUS":
+            cand_list = "\n".join(f"- `{c}`" for c in candidates)
+            return (
+                f"Error: Symbol '{qualified_name}' is ambiguous in project '{project.name}'. "
+                f"Multiple matching components found:\n{cand_list}\n"
+                f"Please specify the full qualified name."
+            )
+        if status == "NOT_FOUND" or not entity:
             return f"Component '{qualified_name}' not found in project '{project.name}'."
 
         deps = await graph_service.get_dependencies(session, project.id, entity.id, depth=2)

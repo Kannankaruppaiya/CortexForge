@@ -326,7 +326,9 @@ class MemoryEvidence(Base):
         String(50), default="UNCHECKED", server_default="UNCHECKED", nullable=False
     )
     source_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    file_path: Mapped[str] = mapped_column(Text, nullable=False)
+    file_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    detail: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=dict, nullable=True)
     symbol_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("code_entities.id", ondelete="SET NULL"), nullable=True
     )
@@ -357,6 +359,9 @@ class MemoryRelation(Base):
     id: Mapped[str] = mapped_column(
         String(36), primary_key=True, default=lambda: str(uuid.uuid4())
     )
+    project_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=True
+    )
     source_memory_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("memories.id", ondelete="CASCADE"), nullable=False
     )
@@ -369,6 +374,12 @@ class MemoryRelation(Base):
     confidence: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+    __table_args__ = (
+        Index("idx_memrel_project", "project_id"),
+        Index("idx_memrel_source", "source_memory_id"),
+        Index("idx_memrel_target", "target_memory_id"),
     )
 
 
@@ -683,6 +694,10 @@ class FailureEpisode(Base):
     rejected_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     command_or_tool: Mapped[str | None] = mapped_column(String(100), nullable=True)
     root_cause: Mapped[str | None] = mapped_column(Text, nullable=True)
+    root_cause_claim_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("claims.id", ondelete="SET NULL"), nullable=True
+    )
+    root_cause_details: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=dict, nullable=True)
     affected_files: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=list, nullable=True)
     affected_symbols: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=list, nullable=True)
     commit_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -701,6 +716,7 @@ class FailureEpisode(Base):
 
     __table_args__ = (
         Index("idx_fail_project_sig", "project_id", "failure_signature"),
+        Index("idx_fail_root_cause_claim", "root_cause_claim_id"),
     )
 
 

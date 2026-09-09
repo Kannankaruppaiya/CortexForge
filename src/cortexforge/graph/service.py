@@ -112,20 +112,55 @@ class GraphService:
             primary_models=primary_models[:10],
         )
 
+    async def resolve_entity(
+        self, session: AsyncSession, project_id: str, entity_name_or_id: str
+    ) -> tuple[str, CodeEntity | None, list[str]]:
+        """Resolve an entity by ID, qualified name, or short name with ambiguity detection (Item 9).
+
+        Returns:
+            (status, entity, candidate_qualified_names)
+            where status is "RESOLVED", "AMBIGUOUS", or "NOT_FOUND".
+        """
+        # 1. Exact ID match
+        id_stmt = select(CodeEntity).where(
+            CodeEntity.project_id == project_id,
+            CodeEntity.id == entity_name_or_id,
+        )
+        exact_id = (await session.execute(id_stmt)).scalars().first()
+        if exact_id:
+            return "RESOLVED", exact_id, []
+
+        # 2. Exact qualified_name match
+        qn_stmt = select(CodeEntity).where(
+            CodeEntity.project_id == project_id,
+            CodeEntity.qualified_name == entity_name_or_id,
+        )
+        exact_qn = (await session.execute(qn_stmt)).scalars().first()
+        if exact_qn:
+            return "RESOLVED", exact_qn, []
+
+        # 3. Short name or suffix match -- check for ambiguity
+        name_stmt = select(CodeEntity).where(
+            CodeEntity.project_id == project_id,
+            (CodeEntity.name == entity_name_or_id)
+            | (CodeEntity.qualified_name.endswith(f":{entity_name_or_id}"))
+            | (CodeEntity.qualified_name.endswith(f".{entity_name_or_id}")),
+        )
+        matches = list((await session.execute(name_stmt)).scalars().all())
+        if len(matches) == 1:
+            return "RESOLVED", matches[0], []
+        elif len(matches) > 1:
+            candidates = [m.qualified_name for m in matches]
+            return "AMBIGUOUS", None, candidates
+
+        return "NOT_FOUND", None, []
+
     async def get_dependencies(
         self, session: AsyncSession, project_id: str, entity_name_or_id: str, depth: int = 2
     ) -> list[dict[str, str]]:
         """Resolve downstream dependencies for a given entity."""
-        # Find start entity by id or qualified name or name
-        stmt = select(CodeEntity).where(
-            CodeEntity.project_id == project_id,
-            (CodeEntity.id == entity_name_or_id)
-            | (CodeEntity.qualified_name == entity_name_or_id)
-            | (CodeEntity.name == entity_name_or_id),
-        )
-        res = await session.execute(stmt)
-        start_entity = res.scalars().first()
-        if not start_entity:
+        status, start_entity, _ = await self.resolve_entity(session, project_id, entity_name_or_id)
+        if status != "RESOLVED" or not start_entity:
             return []
 
         visited: set[str] = {start_entity.id}
@@ -167,15 +202,8 @@ class GraphService:
         self, session: AsyncSession, project_id: str, entity_name_or_id: str, depth: int = 2
     ) -> list[dict[str, str]]:
         """Resolve upstream callers and dependents (blast radius) for a given entity."""
-        stmt = select(CodeEntity).where(
-            CodeEntity.project_id == project_id,
-            (CodeEntity.id == entity_name_or_id)
-            | (CodeEntity.qualified_name == entity_name_or_id)
-            | (CodeEntity.name == entity_name_or_id),
-        )
-        res = await session.execute(stmt)
-        start_entity = res.scalars().first()
-        if not start_entity:
+        status, start_entity, _ = await self.resolve_entity(session, project_id, entity_name_or_id)
+        if status != "RESOLVED" or not start_entity:
             return []
 
         visited: set[str] = {start_entity.id}

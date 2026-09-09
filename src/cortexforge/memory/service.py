@@ -230,7 +230,7 @@ class MemoryService:
             project = await session.get(Project, project_id)
             for ev in payload.evidence:
                 ev_hash = ev.evidence_hash
-                if not ev_hash and project and project.local_path:
+                if not ev_hash and ev.file_path and project and project.local_path:
                     abs_p = os.path.join(project.local_path, ev.file_path.replace("/", os.sep))
                     if os.path.exists(abs_p):
                         try:
@@ -258,22 +258,28 @@ class MemoryService:
                         except (OSError, UnicodeDecodeError):
                             ev_hash = None
                 if not ev_hash:
-                    # A location-only fingerprint. It identifies the evidence for
-                    # deduplication but carries no content, so verification treats
-                    # it as unverifiable rather than as confirmed.
+                    # Universal locator fingerprint for non-file or unresolved evidence (Item 2)
+                    loc_id = ev.file_path or getattr(ev, "uri", None) or ev.source_id or ev.commit_sha or str(getattr(ev, "detail", {})) or "unresolved"
                     ev_hash = hashlib.sha256(
-                        f"unresolved:{ev.file_path}:{ev.line_start or 0}".encode()
+                        f"unresolved:{loc_id}:{ev.line_start or 0}".encode()
                     ).hexdigest()
+
+                ev_type = getattr(ev, "evidence_type", None) or _EVIDENCE_TYPE_FOR_SOURCE.get(
+                    (ev.source_type or "").lower(), EvidenceType.CODE.value
+                )
+                ev_auth = getattr(ev, "authority", None) or authority_from_source(ev.source_type).value
+                ev_rel = getattr(ev, "relation", "SUPPORTS")
 
                 ev_obj = MemoryEvidence(
                     memory_id=memory.id,
                     source_type=ev.source_type,
-                    evidence_type=_EVIDENCE_TYPE_FOR_SOURCE.get(
-                        (ev.source_type or "").lower(), EvidenceType.CODE.value
-                    ),
-                    authority=authority_from_source(ev.source_type).value,
+                    evidence_type=ev_type,
+                    authority=ev_auth,
+                    relation=ev_rel,
                     source_id=ev.source_id,
                     file_path=ev.file_path,
+                    uri=getattr(ev, "uri", None),
+                    detail=getattr(ev, "detail", {}) or {},
                     symbol_id=ev.symbol_id,
                     commit_sha=ev.commit_sha,
                     line_start=ev.line_start,
