@@ -554,6 +554,58 @@ def mcp() -> None:
     mcp_main()
 
 
+@cli.command(help="Mirror stored embeddings into the indexed vector column (PostgreSQL).")
+@click.argument("project_ref", default=".", required=False)
+def reindex(project_ref: str) -> None:
+    """Populate the pgvector column so retrieval can use the index.
+
+    Embeddings are stored as JSON so the SQLite fallback works. On PostgreSQL
+    that JSON is not searchable, so this mirrors it into the typed column the
+    index covers. Run it after upgrading an existing database, or after changing
+    embedding provider.
+    """
+    async def _do_reindex() -> None:
+        await init_db()
+        async with session_scope() as session:
+            from cortexforge.retrieval.vector_store import (
+                backfill_vector_column,
+                has_pgvector,
+            )
+
+            if not await has_pgvector(session):
+                console.print(
+                    Panel(
+                        "This database has no pgvector extension, so there is no "
+                        "indexed column to populate. Retrieval uses the Python "
+                        "fallback, which reads the JSON embeddings directly and "
+                        "needs no reindex.",
+                        title="Nothing to do",
+                        border_style="yellow",
+                    )
+                )
+                return
+
+            project_id = None
+            if project_ref != ".":
+                project = await _get_project_or_exit(session, project_ref)
+                project_id = project.id
+
+            with console.status("[bold green]Mirroring embeddings into the vector index...[/]"):
+                result = await backfill_vector_column(session, project_id=project_id)
+
+            console.print(
+                Panel(
+                    f"[bold green]Backfilled:[/] {result['backfilled']}\n"
+                    f"[bold yellow]Skipped:[/]    {result['skipped']}\n"
+                    f"[dim]{result['reason']}[/]",
+                    title="Vector Index Reindex",
+                    border_style="green" if not result["skipped"] else "yellow",
+                )
+            )
+
+    asyncio.run(_do_reindex())
+
+
 @cli.command(help="Check this project's documentation against what it actually contains.")
 @click.argument("root", default=".", required=False)
 @click.option(

@@ -92,14 +92,26 @@ def test_every_model_column_exists_in_migrations(migrated_inspector):
     )
 
 
+# Columns that exist in the database but deliberately are not mapped in the ORM.
+# `memories.embedding_vector` is a PostgreSQL-only pgvector projection of the JSON
+# `embedding` column: a single mapped class cannot carry a column that exists on
+# one dialect and not the other, so it is written and read through raw SQL in
+# `retrieval/vector_store.py`. It is listed here rather than tolerated silently,
+# so any *other* unmapped column still fails the test.
+INTENTIONALLY_UNMAPPED: dict[str, set[str]] = {
+    "memories": {"embedding_vector"},
+}
+
+
 def test_no_orphan_columns_in_migrations(migrated_inspector):
-    """Every migrated column must still be mapped by a model."""
+    """Every migrated column must still be mapped by a model, or be a known exception."""
     drift: dict[str, list[str]] = {}
 
     for table_name, table in Base.metadata.tables.items():
         if table_name not in set(migrated_inspector.get_table_names()):
             continue
         model_columns = {c.name for c in table.columns}
+        model_columns |= INTENTIONALLY_UNMAPPED.get(table_name, set())
         migrated_columns = {c["name"] for c in migrated_inspector.get_columns(table_name)}
         orphans = sorted(migrated_columns - model_columns)
         if orphans:

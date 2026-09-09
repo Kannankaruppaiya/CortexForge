@@ -57,7 +57,11 @@ def upgrade() -> None:
         sa.Column('project_id', sa.String(length=36), sa.ForeignKey('projects.id', ondelete='CASCADE'), nullable=False),
         sa.Column('base_commit_sha', sa.String(length=64), nullable=True),
         sa.Column('target_commit_sha', sa.String(length=64), nullable=False),
-        sa.Column('is_working_tree', sa.Boolean(), server_default=sa.text('0'), nullable=False),
+        # `sa.false()` rather than `sa.text('0')`: SQLite accepts the integer
+        # literal, PostgreSQL rejects it as a type mismatch against a boolean
+        # column. This migration had never been run against PostgreSQL, which is
+        # the declared production database.
+        sa.Column('is_working_tree', sa.Boolean(), server_default=sa.false(), nullable=False),
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
     )
     op.create_index('idx_changeset_project_commits', 'change_sets', ['project_id', 'base_commit_sha', 'target_commit_sha'], unique=False)
@@ -161,7 +165,7 @@ def upgrade() -> None:
         sa.Column('failure_episode_id', sa.String(length=36), sa.ForeignKey('failure_episodes.id', ondelete='CASCADE'), nullable=False),
         sa.Column('commit_sha', sa.String(length=64), nullable=True),
         sa.Column('attempted_fix', sa.Text(), nullable=False),
-        sa.Column('success', sa.Boolean(), server_default=sa.text('0'), nullable=False),
+        sa.Column('success', sa.Boolean(), server_default=sa.false(), nullable=False),
         sa.Column('why_worked_or_failed', sa.Text(), nullable=True),
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
     )
