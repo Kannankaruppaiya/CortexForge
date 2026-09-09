@@ -86,48 +86,186 @@ class ArchitectureInvariantEngine:
         has_critical = False
 
         for rule in rules:
-            for rel in all_rels:
-                src = entity_map.get(rel.source_entity_id)
-                tgt = entity_map.get(rel.target_entity_id)
-                if not src or not tgt:
-                    continue
+            modality = (rule.modality or "MUST_NOT").upper()
+            src_pat = rule.forbidden_source_pattern
+            tgt_pat = rule.forbidden_target_pattern
 
-                src_matches = (
-                    self._matches_pattern(rule.forbidden_source_pattern, src.qualified_name)
-                    or self._matches_pattern(rule.forbidden_source_pattern, src.file_path)
-                )
-                tgt_matches = (
-                    self._matches_pattern(rule.forbidden_target_pattern, tgt.qualified_name)
-                    or self._matches_pattern(rule.forbidden_target_pattern, tgt.file_path)
-                )
+            if modality == "MUST_NOT":
+                for rel in all_rels:
+                    src = entity_map.get(rel.source_entity_id)
+                    tgt = entity_map.get(rel.target_entity_id)
+                    if not src or not tgt:
+                        continue
 
-                if src_matches and tgt_matches:
-                    details = (
-                        f"Architecture violation [{rule.severity}]: '{src.qualified_name}' "
-                        f"({src.file_path}) has forbidden '{rel.relationship_type}' relationship "
-                        f"to '{tgt.qualified_name}' ({tgt.file_path}) violating rule '{rule.rule_name}'."
+                    src_matches = (
+                        self._matches_pattern(src_pat, src.qualified_name)
+                        or self._matches_pattern(src_pat, src.file_path)
                     )
-                    violation = RuleViolation(
-                        rule_id=rule.id,
-                        source_entity_id=src.id,
-                        target_entity_id=tgt.id,
-                        commit_sha=commit_sha,
-                        violation_details=details,
+                    tgt_matches = (
+                        self._matches_pattern(tgt_pat, tgt.qualified_name)
+                        or self._matches_pattern(tgt_pat, tgt.file_path)
                     )
-                    if persist_violations:
-                        session.add(violation)
 
-                    detected_violations.append({
-                        "rule_id": rule.id,
-                        "rule_name": rule.rule_name,
-                        "severity": rule.severity,
-                        "source": src.qualified_name,
-                        "target": tgt.qualified_name,
-                        "details": details,
-                    })
+                    if src_matches and tgt_matches:
+                        details = (
+                            f"Architecture violation [{rule.severity}] [MUST_NOT]: '{src.qualified_name}' "
+                            f"({src.file_path}) has forbidden '{rel.relationship_type}' relationship "
+                            f"to '{tgt.qualified_name}' ({tgt.file_path}) violating rule '{rule.rule_name}'."
+                        )
+                        violation = RuleViolation(
+                            rule_id=rule.id,
+                            source_entity_id=src.id,
+                            target_entity_id=tgt.id,
+                            commit_sha=commit_sha,
+                            violation_details=details,
+                        )
+                        if persist_violations:
+                            session.add(violation)
 
-                    if rule.severity.upper() in ("ERROR", "CRITICAL"):
-                        has_critical = True
+                        detected_violations.append({
+                            "rule_id": rule.id,
+                            "rule_name": rule.rule_name,
+                            "severity": rule.severity,
+                            "source": src.qualified_name,
+                            "target": tgt.qualified_name,
+                            "details": details,
+                        })
+
+                        if rule.severity.upper() in ("ERROR", "CRITICAL"):
+                            has_critical = True
+
+            elif modality == "ONLY_IF":
+                for rel in all_rels:
+                    src = entity_map.get(rel.source_entity_id)
+                    tgt = entity_map.get(rel.target_entity_id)
+                    if not src or not tgt:
+                        continue
+
+                    tgt_matches = (
+                        self._matches_pattern(tgt_pat, tgt.qualified_name)
+                        or self._matches_pattern(tgt_pat, tgt.file_path)
+                    )
+                    if tgt_matches:
+                        src_matches = (
+                            self._matches_pattern(src_pat, src.qualified_name)
+                            or self._matches_pattern(src_pat, src.file_path)
+                        )
+                        if not src_matches:
+                            details = (
+                                f"Architecture violation [{rule.severity}] [ONLY_IF]: '{tgt.qualified_name}' "
+                                f"({tgt.file_path}) may ONLY be accessed by '{src_pat}', "
+                                f"but was accessed via '{rel.relationship_type}' by '{src.qualified_name}' ({src.file_path}) "
+                                f"violating rule '{rule.rule_name}'."
+                            )
+                            violation = RuleViolation(
+                                rule_id=rule.id,
+                                source_entity_id=src.id,
+                                target_entity_id=tgt.id,
+                                commit_sha=commit_sha,
+                                violation_details=details,
+                            )
+                            if persist_violations:
+                                session.add(violation)
+
+                            detected_violations.append({
+                                "rule_id": rule.id,
+                                "rule_name": rule.rule_name,
+                                "severity": rule.severity,
+                                "source": src.qualified_name,
+                                "target": tgt.qualified_name,
+                                "details": details,
+                            })
+
+                            if rule.severity.upper() in ("ERROR", "CRITICAL"):
+                                has_critical = True
+
+            elif modality in ("MUST", "REQUIRES"):
+                matching_sources = [
+                    e for e in all_entities
+                    if self._matches_pattern(src_pat, e.qualified_name)
+                    or self._matches_pattern(src_pat, e.file_path)
+                ]
+                for src in matching_sources:
+                    out_rels = [r for r in all_rels if r.source_entity_id == src.id]
+                    has_required_target = any(
+                        (
+                            entity_map.get(r.target_entity_id) is not None
+                            and (
+                                self._matches_pattern(tgt_pat, entity_map[r.target_entity_id].qualified_name)
+                                or self._matches_pattern(tgt_pat, entity_map[r.target_entity_id].file_path)
+                            )
+                        )
+                        for r in out_rels
+                    )
+                    if not has_required_target:
+                        details = (
+                            f"Architecture violation [{rule.severity}] [{modality}]: '{src.qualified_name}' "
+                            f"({src.file_path}) {modality} have a relationship to a target matching "
+                            f"'{tgt_pat}', but none was found violating rule '{rule.rule_name}'."
+                        )
+                        violation = RuleViolation(
+                            rule_id=rule.id,
+                            source_entity_id=src.id,
+                            target_entity_id=src.id,
+                            commit_sha=commit_sha,
+                            violation_details=details,
+                        )
+                        if persist_violations:
+                            session.add(violation)
+
+                        detected_violations.append({
+                            "rule_id": rule.id,
+                            "rule_name": rule.rule_name,
+                            "severity": rule.severity,
+                            "source": src.qualified_name,
+                            "target": "<NONE>",
+                            "details": details,
+                        })
+
+                        if rule.severity.upper() in ("ERROR", "CRITICAL"):
+                            has_critical = True
+
+            elif modality == "SHOULD":
+                for rel in all_rels:
+                    src = entity_map.get(rel.source_entity_id)
+                    tgt = entity_map.get(rel.target_entity_id)
+                    if not src or not tgt:
+                        continue
+
+                    src_matches = (
+                        self._matches_pattern(src_pat, src.qualified_name)
+                        or self._matches_pattern(src_pat, src.file_path)
+                    )
+                    tgt_matches = (
+                        self._matches_pattern(tgt_pat, tgt.qualified_name)
+                        or self._matches_pattern(tgt_pat, tgt.file_path)
+                    )
+
+                    if src_matches and tgt_matches:
+                        severity = "WARNING"
+                        details = (
+                            f"Architecture advisory [SHOULD]: '{src.qualified_name}' "
+                            f"({src.file_path}) has discouraged '{rel.relationship_type}' relationship "
+                            f"to '{tgt.qualified_name}' ({tgt.file_path}) for rule '{rule.rule_name}'."
+                        )
+                        violation = RuleViolation(
+                            rule_id=rule.id,
+                            source_entity_id=src.id,
+                            target_entity_id=tgt.id,
+                            commit_sha=commit_sha,
+                            violation_details=details,
+                        )
+                        if persist_violations:
+                            session.add(violation)
+
+                        detected_violations.append({
+                            "rule_id": rule.id,
+                            "rule_name": rule.rule_name,
+                            "severity": severity,
+                            "source": src.qualified_name,
+                            "target": tgt.qualified_name,
+                            "details": details,
+                        })
 
         if persist_violations and detected_violations:
             await session.commit()

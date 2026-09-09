@@ -299,9 +299,22 @@ class CognitiveSnapshotRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class RuleModality(str, Enum):
+    MUST = "MUST"
+    MUST_NOT = "MUST_NOT"
+    SHOULD = "SHOULD"
+    ONLY_IF = "ONLY_IF"
+    REQUIRES = "REQUIRES"
+
+
 class ArchitectureRuleCreate(BaseModel):
     rule_name: str = Field(..., max_length=255)
     description: str = Field(..., description="Description or rationale for the rule")
+    modality: str = "MUST_NOT"
+    authority: str = "USER_CONFIRMED"
+    source: str = "user"
+    evidence: list[Any] = Field(default_factory=list)
+    version: int = 1
     scope: str = "PROJECT"
     severity: str = "ERROR"
     forbidden_source_pattern: str
@@ -314,8 +327,13 @@ class ArchitectureRuleRead(BaseModel):
     project_id: str
     rule_name: str
     description: str
-    scope: str
-    severity: str
+    modality: str = "MUST_NOT"
+    authority: str = "USER_CONFIRMED"
+    source: str = "user"
+    evidence: list[Any] = Field(default_factory=list)
+    version: int = 1
+    scope: str = "PROJECT"
+    severity: str = "ERROR"
     forbidden_source_pattern: str
     forbidden_target_pattern: str
     enforcement_status: str
