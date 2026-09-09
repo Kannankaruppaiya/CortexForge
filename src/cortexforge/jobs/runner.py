@@ -140,8 +140,19 @@ class JobRunner:
             self._heartbeat_loop(job_id, stop_event)
         )
 
+        from cortexforge.observability.tracing import start_async_span
+
         try:
-            result = await handler(context)
+            async with start_async_span(
+                "job.execute",
+                {
+                    "job_id": job_id,
+                    "job_type": job_type,
+                    "project_id": claimed.job.project_id or "",
+                    "attempt": claimed.job.attempt,
+                },
+            ):
+                result = await handler(context)
         except Exception as exc:
             stop_event.set()
             await asyncio.gather(heartbeat_task, return_exceptions=True)

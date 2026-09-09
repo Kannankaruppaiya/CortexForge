@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -57,6 +57,43 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def tracing_middleware(request: Request, call_next):
+    """Ambient distributed tracing middleware with X-Trace-ID injection."""
+    trace_id = request.headers.get("x-trace-id") or request.headers.get("traceparent")
+    if trace_id and trace_id.count("-") == 3:
+        parts = trace_id.split("-")
+        trace_id = parts[1]
+
+    from cortexforge.observability.tracing import (
+        _CURRENT_TRACE_ID,
+        generate_trace_id,
+        set_correlation_context,
+        start_async_span,
+    )
+
+    if not trace_id:
+        trace_id = generate_trace_id()
+
+    _CURRENT_TRACE_ID.set(trace_id)
+    set_correlation_context(trace_id=trace_id)
+
+    async with start_async_span(
+        "http_request",
+        {
+            "http.method": request.method,
+            "http.url": str(request.url.path),
+            "http.client_ip": request.client.host if request.client else "unknown",
+        },
+    ) as span:
+        response = await call_next(request)
+        span.attributes["http.status_code"] = response.status_code
+        if response.status_code >= 400:
+            span.status = "ERROR"
+        response.headers["X-Trace-ID"] = trace_id
+        return response
+
 # Mount API routers under /api/v1
 app.include_router(projects.router, prefix="/api/v1")
 app.include_router(graph.router, prefix="/api/v1")
@@ -88,6 +125,21 @@ async def get_metrics():
     """Retrieve runtime performance telemetry and counters."""
     from cortexforge.observability.metrics import MetricsCollector
     return MetricsCollector.get_instance().get_snapshot()
+
+
+@app.get("/api/v1/traces", tags=["observability"])
+async def get_traces(
+    trace_id: str | None = None,
+    project_id: str | None = None,
+    limit: int = 50,
+):
+    """Retrieve collected distributed trace spans with correlation and redacted attributes."""
+    from cortexforge.observability.tracing import TraceManager
+
+    spans = TraceManager.get_instance().get_spans(
+        trace_id=trace_id, project_id=project_id, limit=limit
+    )
+    return [s.to_dict() for s in spans]
 
 
 
