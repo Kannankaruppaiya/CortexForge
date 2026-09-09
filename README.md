@@ -1,8 +1,8 @@
 # CortexForge
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python: 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-[![MCP: 2.x](https://img.shields.io/badge/MCP-2.x_Compliant-emerald.svg)](https://modelcontextprotocol.io)
+[![MCP: 1.2+](https://img.shields.io/badge/MCP-1.2+-emerald.svg)](https://modelcontextprotocol.io)
 [![FastAPI](https://img.shields.io/badge/FastAPI-Production-green.svg)](https://fastapi.tiangolo.com)
 [![TypeScript: 5.7+](https://img.shields.io/badge/TypeScript-5.7+-blue.svg)](https://www.typescriptlang.org/)
 [![Vite: 6.x](https://img.shields.io/badge/Vite-6.x-purple.svg)](https://vitejs.dev/)
@@ -267,9 +267,5 @@ it does.
 ---
 
 ## 📜 License
-
-Apache-2.0, as declared in `pyproject.toml`.
-
-> **Note:** the repository does not yet contain a `LICENSE` file. `cortex integrity`
-> reports this, because a declared license that is not distributed with the code
-> is a claim the repository cannot back up.
+ 
+CortexForge is distributed under the [Apache License, Version 2.0](LICENSE), matching `pyproject.toml`.

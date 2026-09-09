@@ -144,18 +144,11 @@ def test_api_path_check_tolerates_path_parameters(tmp_path):
 async def test_cortexforge_documentation_matches_itself():
     """CortexForge's own documentation must not contradict its code.
 
-    The missing LICENSE file is the one accepted exception: adding one is a
-    licensing decision for the maintainers, not something a code change should
-    make on their behalf. It is named here so it stays visible rather than being
-    absorbed into a blanket tolerance.
+    With the Apache-2.0 LICENSE file present, matching pyproject.toml and README.md,
+    the repository is completely free of provable documentation drift.
     """
     report = ProjectIntegrityChecker(REPO_ROOT).check(
         api_paths=set(app.openapi()["paths"])
     )
 
-    unexpected = [
-        finding
-        for finding in report.findings
-        if not (finding.check == "license" and finding.severity == SEVERITY_MISSING)
-    ]
-    assert not unexpected, "\n".join(f.render() for f in unexpected)
+    assert not report.findings, "\n".join(f.render() for f in report.findings)
