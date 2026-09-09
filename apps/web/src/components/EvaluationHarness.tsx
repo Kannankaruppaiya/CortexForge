@@ -78,46 +78,69 @@ export const EvaluationHarness: React.FC<EvaluationHarnessProps> = ({ projectId 
   const [mutationResults, setMutationResults] = useState<MutationBenchmarkResult | null>(null);
 
 
+  // Compute empirical metrics dynamically from live benchmark runs if available
+  const avgExploration =
+    liveScorecards && liveScorecards.length > 0
+      ? `${(
+          liveScorecards.reduce((acc, sc) => acc + sc.exploration_reduction_pct, 0) /
+          liveScorecards.length
+        ).toFixed(1)}% reduction`
+      : null;
+
+  const avgTokens =
+    liveScorecards && liveScorecards.length > 0
+      ? `${(
+          liveScorecards.reduce((acc, sc) => acc + sc.token_reduction_pct, 0) /
+          liveScorecards.length
+        ).toFixed(1)}% reduction`
+      : null;
+
+  const mutationPassCount = mutationResults?.results.filter((r) => r.passed).length ?? null;
+  const mutationTotal = mutationResults?.results.length ?? null;
+
   const hypotheses = [
     {
       id: 'H1',
       title: 'Exploration Reduction',
       target: '> 75% reduction in exploratory file reads',
-      achieved: '93.3% reduction',
-      status: 'VERIFIED',
-      detail: 'Baseline required 15 exploratory file reads vs 1 targeted file retrieval with CortexForge cognitive model.',
+      achieved: avgExploration ?? 'Awaiting benchmark run',
+      status: avgExploration ? 'MEASURED' : 'PENDING_RUN',
+      detail: 'Measures exploratory file reads between baseline ungrounded access vs targeted CortexForge cognitive retrieval.',
     },
     {
       id: 'H2',
       title: 'Context Token Efficiency',
       target: '> 60% reduction in total context tokens',
-      achieved: '96.8% reduction',
-      status: 'VERIFIED',
-      detail: 'Tokens dropped from 8,500 down to 268 tokens via structured, budget-bounded context composition.',
+      achieved: avgTokens ?? 'Awaiting benchmark run',
+      status: avgTokens ? 'MEASURED' : 'PENDING_RUN',
+      detail: 'Evaluates context compaction and token efficiency via structured, budget-bounded context composition.',
     },
     {
       id: 'H3',
       title: 'Failure Prevention',
       target: 'Zero repeated previously-documented failures',
-      achieved: '0 repeated failures',
-      status: 'VERIFIED',
-      detail: 'Episodic failure memories and active constraints intercepted repeating known bugs.',
+      achieved: liveScorecards ? 'Evaluated in active run' : 'Awaiting agent task run',
+      status: liveScorecards ? 'MEASURED' : 'PENDING_RUN',
+      detail: 'Episodic failure memories and active constraints prevent repeating known bugs and antipatterns.',
     },
     {
       id: 'H4',
       title: 'Stale Invalidation Precision',
       target: '< 5% false stale classification rate',
-      achieved: '1.2% false stale',
-      status: 'VERIFIED',
-      detail: 'AST-grounded evidence verification accurately identified changed entities.',
+      achieved:
+        mutationTotal !== null
+          ? `${mutationPassCount}/${mutationTotal} invariant checks passed`
+          : 'Awaiting mutation run',
+      status: mutationTotal !== null ? 'MEASURED' : 'PENDING_RUN',
+      detail: 'AST-grounded evidence verification accurately identifies and invalidates changed entities.',
     },
     {
       id: 'H5',
       title: 'Consolidation Compaction',
       target: '> 50% memory volume reduction via clustering',
-      achieved: '66.7% compaction',
-      status: 'VERIFIED',
-      detail: 'Hierarchical consolidation synthesized repeated episodic failures into durable rules.',
+      achieved: liveScorecards ? 'Evaluated in active store' : 'Awaiting consolidation run',
+      status: liveScorecards ? 'MEASURED' : 'PENDING_RUN',
+      detail: 'Hierarchical consolidation synthesizes repeated episodic observations into durable architectural rules.',
     },
   ];
 
@@ -374,8 +397,10 @@ export const EvaluationHarness: React.FC<EvaluationHarnessProps> = ({ projectId 
                   <span className="px-2 py-0.5 rounded bg-indigo-950/80 text-indigo-400 border border-indigo-800/80 text-[10px] font-mono font-bold">
                     {h.id}
                   </span>
-                  <span className="flex items-center gap-1 text-[10px] font-mono text-emerald-400 font-semibold">
-                    <CheckCircle2 className="w-3 h-3" /> {h.status}
+                  <span className={`flex items-center gap-1 text-[10px] font-mono font-semibold ${
+                    h.status === 'MEASURED' ? 'text-emerald-400' : 'text-slate-400'
+                  }`}>
+                    {h.status === 'MEASURED' ? <CheckCircle2 className="w-3 h-3" /> : <Shield className="w-3 h-3" />} {h.status}
                   </span>
                 </div>
                 <h5 className="text-sm font-semibold text-slate-200 mt-2">{h.title}</h5>
@@ -385,7 +410,9 @@ export const EvaluationHarness: React.FC<EvaluationHarnessProps> = ({ projectId 
 
               <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between text-xs font-mono">
                 <span className="text-slate-500">Achieved:</span>
-                <span className="text-emerald-400 font-bold">{h.achieved}</span>
+                <span className={h.status === 'MEASURED' ? 'text-emerald-400 font-bold' : 'text-slate-400 font-medium italic'}>
+                  {h.achieved}
+                </span>
               </div>
             </div>
           ))}
