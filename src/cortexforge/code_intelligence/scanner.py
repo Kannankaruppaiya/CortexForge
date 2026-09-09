@@ -1,5 +1,6 @@
 """Incremental repository scanner and symbol extractor."""
 
+import hashlib
 import os
 import subprocess
 import time
@@ -7,6 +8,10 @@ import time
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from cortexforge.code_intelligence.config_intelligence import (
+    discover_config_files,
+    read_artifact,
+)
 from cortexforge.code_intelligence.git_provider import GitProvider
 from cortexforge.code_intelligence.lineage import SymbolLineageTracker
 from cortexforge.code_intelligence.parser import ParseResult
@@ -114,6 +119,107 @@ class RepositoryScanner:
                     return [rel for _, rel in matched_files]
 
         return [rel for _, rel in matched_files]
+
+    async def _index_config_artifacts(
+        self,
+        session: AsyncSession,
+        project: Project,
+        canonical_root: str,
+        created_entities_by_qualified: dict[str, CodeEntity],
+    ) -> int:
+        """Index configuration files as entities, one per artifact and per key.
+
+        Both granularities matter. The file-level entity is what a change to the
+        artifact anchors to; the key-level entities are what a claim about one
+        specific setting -- "the service requires REDIS_URL" -- can be grounded
+        in, so that removing that one key invalidates that one memory rather than
+        everything touching the file.
+        """
+        artifacts = discover_config_files(canonical_root, DEFAULT_IGNORED_DIRS)
+        indexed = 0
+
+        for relative_path in artifacts:
+            artifact = read_artifact(canonical_root, relative_path)
+            if artifact is None:
+                continue
+
+            config_metadata = {
+                "config_kind": artifact.kind,
+                "evidence_type": artifact.evidence_type,
+                "key_count": len(artifact.keys),
+                **artifact.detail,
+            }
+
+            file_entity = created_entities_by_qualified.get(artifact.qualified_name)
+            if file_entity is not None:
+                # A file can be both code and configuration -- an Alembic
+                # migration is Python *and* a schema change -- so the code
+                # entity already exists here. Its metadata is merged rather than
+                # replaced, and merged unconditionally: gating on the content
+                # hash would leave a pre-existing code entity permanently
+                # without its schema classification.
+                file_entity.entity_metadata = {
+                    **(file_entity.entity_metadata or {}),
+                    **config_metadata,
+                }
+            else:
+                file_entity = CodeEntity(
+                    project_id=project.id,
+                    entity_type="config",
+                    name=os.path.basename(artifact.file_path),
+                    qualified_name=artifact.qualified_name,
+                    file_path=artifact.file_path,
+                    start_line=1,
+                    end_line=max(1, len(artifact.keys)),
+                    signature=None,
+                    content_hash=artifact.content_hash,
+                    language=artifact.kind,
+                    entity_metadata=config_metadata,
+                )
+                session.add(file_entity)
+                created_entities_by_qualified[artifact.qualified_name] = file_entity
+                indexed += 1
+
+            for key in artifact.keys:
+                qualified = f"{artifact.file_path}:{key.name}"
+                # A key's identity is its name and location; its content hash
+                # covers the value preview so that changing a setting -- not just
+                # renaming it -- registers as a change.
+                key_hash = hashlib.sha256(
+                    f"{qualified}|{key.value_preview or ''}".encode()
+                ).hexdigest()
+
+                existing_key = created_entities_by_qualified.get(qualified)
+                if existing_key is not None:
+                    if existing_key.content_hash != key_hash:
+                        existing_key.content_hash = key_hash
+                        existing_key.start_line = key.line
+                        existing_key.end_line = key.line
+                    continue
+
+                key_entity = CodeEntity(
+                    project_id=project.id,
+                    entity_type="config_key",
+                    name=key.name,
+                    qualified_name=qualified,
+                    file_path=artifact.file_path,
+                    start_line=key.line,
+                    end_line=key.line,
+                    signature=None,
+                    content_hash=key_hash,
+                    language=artifact.kind,
+                    entity_metadata={
+                        "config_kind": artifact.kind,
+                        "evidence_type": artifact.evidence_type,
+                        "key": key.name,
+                    },
+                )
+                session.add(key_entity)
+                created_entities_by_qualified[qualified] = key_entity
+                indexed += 1
+
+        await session.flush()
+        return indexed
 
     async def scan_project(
         self,
@@ -285,6 +391,16 @@ class RepositoryScanner:
                 )
                 session.add(rel_obj)
                 total_relationships_extracted += 1
+
+        # Index configuration, schema and API-contract artifacts alongside code.
+        #
+        # These are recorded as CodeEntity rows on purpose: a schema change and a
+        # signature change should reach memory through one change-impact pipeline
+        # rather than two that drift apart (section 14).
+        config_entities = await self._index_config_artifacts(
+            session, project, canonical_root, created_entities_by_qualified
+        )
+        total_entities_extracted += config_entities
 
         # Record Snapshot
         head_commit = get_git_head_commit(canonical_root)

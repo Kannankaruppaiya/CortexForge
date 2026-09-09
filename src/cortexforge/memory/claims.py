@@ -280,13 +280,23 @@ class ClaimService:
             qualified = symbol_names.get(ev.symbol_id) if ev.symbol_id else None
             symbol_id = ev.symbol_id
 
-            if qualified is None:
-                resolved = enclosing.get(ev.id)
-                if resolved is not None:
-                    qualified = resolved.qualified_name
-                    symbol_id = resolved.id
-                    if evidence_type == EvidenceType.CODE.value:
-                        evidence_type = EvidenceType.SYMBOL.value
+            resolved = enclosing.get(ev.id)
+            if qualified is None and resolved is not None:
+                qualified = resolved.qualified_name
+                symbol_id = resolved.id
+                if evidence_type == EvidenceType.CODE.value:
+                    evidence_type = EvidenceType.SYMBOL.value
+
+            # Configuration evidence carries the specific key it depends on.
+            # Without it, verification can only ask "does the file still exist",
+            # which passes even after the setting the memory relies on was
+            # deleted -- making key-level grounding pointless.
+            entity_metadata = (resolved.entity_metadata or {}) if resolved else {}
+            config_key = entity_metadata.get("key")
+            if config_key:
+                evidence_type = entity_metadata.get(
+                    "evidence_type", EvidenceType.CONFIG.value
+                )
             fingerprint = evidence_fingerprint(
                 evidence_type,
                 relation,
@@ -322,7 +332,10 @@ class ClaimService:
                 ),
                 evidence_hash=fingerprint,
                 independence_group=_independence_group(ev.file_path, ev.commit_sha or commit_sha),
-                detail={"memory_evidence_id": ev.id},
+                detail={
+                    "memory_evidence_id": ev.id,
+                    **({"key": config_key} if config_key else {}),
+                },
             )
             session.add(link)
             created.append(link)
