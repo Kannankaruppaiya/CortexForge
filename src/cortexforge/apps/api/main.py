@@ -142,6 +142,30 @@ async def get_traces(
     return [s.to_dict() for s in spans]
 
 
+@app.get("/api/v1/capabilities", tags=["capabilities"])
+@app.get("/api/v1/cognitive/capabilities", tags=["capabilities"])
+async def get_capabilities(
+    status: str | None = None,
+    category: str | None = None,
+):
+    """Retrieve the machine-readable capability registry (Specification §42)."""
+    from cortexforge.core.capabilities import CapabilityRegistry, CapabilityStatus
+
+    reg = CapabilityRegistry.get_instance()
+    status_enum = None
+    if status:
+        try:
+            status_enum = CapabilityStatus(status.upper())
+        except ValueError:
+            pass
+
+    caps = reg.list_capabilities(status=status_enum, category=category)
+    return {
+        "summary": reg.summary(),
+        "capabilities": [c.model_dump() for c in caps],
+    }
+
+
 
 # Serve Developer Web Dashboard if built in apps/web/dist
 _dist_dir = Path(__file__).resolve().parents[4] / "apps" / "web" / "dist"

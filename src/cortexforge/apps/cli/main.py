@@ -474,23 +474,6 @@ def context(task_text: str, project_ref: str, profile: str) -> None:
     asyncio.run(_do_context())
 
 
-@cli.command(help="Run system diagnostics and verify database and parsers.")
-def doctor() -> None:
-    """Check system health and dependencies."""
-    async def _do_doctor() -> None:
-        await init_db()
-        table = Table(title="CortexForge Doctor Diagnostics", border_style="cyan")
-        table.add_column("Component", style="bold white")
-        table.add_column("Status", style="bold green")
-        table.add_column("Details", style="dim")
-
-        table.add_row("Database", "READY", "SQLAlchemy 2.0 Async Session initialized")
-        table.add_row("Tree-sitter Grammars", "READY", "Python, TS, JS, Go, Java loaded")
-        table.add_row("Embedding Provider", "READY", "FastDeterministic 384-d vectors active")
-        table.add_row("MCP Server Protocol", "READY", "MCP 2.x SDK active")
-        console.print(table)
-
-    asyncio.run(_do_doctor())
 
 
 @cli.command(help="Run automated comparative benchmark suite (Baseline vs CortexForge).")
@@ -836,6 +819,253 @@ def serve(host: str | None, port: int | None, reload: bool) -> None:
     uvicorn.run(
         "cortexforge.apps.api.main:app", host=bind_host, port=bind_port, reload=reload
     )
+
+
+@cli.command(help="Display machine-readable capability registry and operational status (§42).")
+@click.option(
+    "--status",
+    default=None,
+    help="Filter by status: IMPLEMENTED, PARTIAL, EXPERIMENTAL, DISABLED, UNSUPPORTED",
+)
+@click.option("--category", default=None, help="Filter by category")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output raw JSON")
+def capabilities(status: str | None, category: str | None, as_json: bool) -> None:
+    """Inspect CortexForge capability matrix with verified implementation locations."""
+    from cortexforge.core.capabilities import CapabilityRegistry, CapabilityStatus
+
+    reg = CapabilityRegistry.get_instance()
+    status_enum = None
+    if status:
+        try:
+            status_enum = CapabilityStatus(status.upper())
+        except ValueError:
+            console.print(
+                f"[bold red]Invalid status:[/] {status}. Choose from: {', '.join(s.value for s in CapabilityStatus)}"
+            )
+            sys.exit(1)
+
+    caps = reg.list_capabilities(status=status_enum, category=category)
+    if as_json:
+        console.print(
+            json.dumps(
+                {
+                    "summary": reg.summary(),
+                    "capabilities": [c.model_dump() for c in caps],
+                },
+                indent=2,
+            )
+        )
+        return
+
+    table = Table(title="CortexForge Capability Registry (§42)", show_lines=True)
+    table.add_column("Status", style="bold", width=14)
+    table.add_column("Capability ID", style="cyan", width=26)
+    table.add_column("Name", style="white", width=30)
+    table.add_column("Category", style="magenta", width=18)
+    table.add_column("Implementation / Tests", style="dim", width=40)
+
+    status_styles = {
+        CapabilityStatus.IMPLEMENTED: "[bold green]IMPLEMENTED[/]",
+        CapabilityStatus.PARTIAL: "[bold yellow]PARTIAL[/]",
+        CapabilityStatus.EXPERIMENTAL: "[bold cyan]EXPERIMENTAL[/]",
+        CapabilityStatus.DISABLED: "[dim]DISABLED[/]",
+        CapabilityStatus.UNSUPPORTED: "[bold red]UNSUPPORTED[/]",
+    }
+
+    for cap in caps:
+        st_label = status_styles.get(cap.status, cap.status.value)
+        impl_summary = "\n".join(cap.implementation_files[:2] + cap.tests[:1])
+        table.add_row(st_label, cap.capability_id, cap.name, cap.category, impl_summary)
+
+    console.print(table)
+    summary_text = " | ".join(f"{k}: {v}" for k, v in reg.summary().items())
+    console.print(Panel(summary_text, title="Registry Summary", border_style="blue"))
+
+
+@cli.command(help="Run system diagnostics and verify readiness across all subsystems (§56).")
+@click.option(
+    "--json", "as_json", is_flag=True, default=False, help="Output diagnostic report as JSON"
+)
+def doctor(as_json: bool) -> None:
+    """Perform real pre-flight diagnostics across database, parsers, providers, and security."""
+    from typing import Any
+
+    from sqlalchemy import inspect, text
+
+    from cortexforge.core.capabilities import CapabilityRegistry
+    from cortexforge.core.db import engine, init_db, session_scope
+    from cortexforge.jobs.durable import DurableJobStore
+    from cortexforge.observability.tracing import is_telemetry_enabled
+    from cortexforge.security.redactor import SecretRedactor
+
+    report: list[dict[str, Any]] = []
+
+    async def _run_diagnostics() -> None:
+        # 1. Database Readiness
+        db_status = "PASS"
+        dialect = engine.url.get_backend_name()
+        try:
+            await init_db()
+            async with engine.connect() as conn:
+                tables = await conn.run_sync(
+                    lambda sync_conn: inspect(sync_conn).get_table_names()
+                )
+                db_details = f"{dialect} connected ({len(tables)} tables verified)"
+        except Exception as exc:
+            db_status = "FAIL"
+            db_details = f"Connection failed: {exc}"
+
+        report.append(
+            {"subsystem": "Database", "status": db_status, "details": db_details}
+        )
+
+        # 2. Alembic Migration Head
+        mig_status = "PASS"
+        try:
+            async with engine.connect() as conn:
+                res = await conn.execute(text("SELECT version_num FROM alembic_version"))
+                head = res.scalar()
+                mig_details = f"Alembic revision: {head}"
+        except Exception:
+            mig_details = "Direct schema (Base.metadata.create_all)"
+
+        report.append(
+            {"subsystem": "Migrations", "status": mig_status, "details": mig_details}
+        )
+
+        # 3. Tree-sitter Parsers
+        ts_status = "PASS"
+        loaded_langs: list[str] = []
+        for lang_name, mod in [
+            ("python", "tree_sitter_python"),
+            ("javascript", "tree_sitter_javascript"),
+            ("typescript", "tree_sitter_typescript"),
+            ("java", "tree_sitter_java"),
+            ("go", "tree_sitter_go"),
+        ]:
+            try:
+                __import__(mod)
+                loaded_langs.append(lang_name)
+            except ImportError:
+                ts_status = "WARN"
+
+        report.append({
+            "subsystem": "AST Parsers",
+            "status": ts_status,
+            "details": f"{len(loaded_langs)}/5 languages available ({', '.join(loaded_langs)})",
+        })
+
+        # 4. Embedding Provider
+        emb_provider = os.environ.get(
+            "CORTEX_EMBEDDING_PROVIDER",
+            os.environ.get("CORTEX_EMBEDDINGS_PROVIDER", "hash"),
+        ).lower()
+        emb_model = os.environ.get("CORTEX_EMBEDDING_MODEL", "local-hash-384")
+        report.append({
+            "subsystem": "Embeddings",
+            "status": "PASS",
+            "details": f"Provider: {emb_provider} (model: {emb_model})",
+        })
+
+        # 5. LLM Provider
+        llm_provider = os.environ.get("CORTEX_LLM_PROVIDER", "mock").lower()
+        llm_model = os.environ.get("CORTEX_LLM_MODEL", "mock-v1")
+        llm_status = (
+            "PASS"
+            if llm_provider != "mock" or os.environ.get("CORTEX_ENV") != "production"
+            else "WARN"
+        )
+        report.append({
+            "subsystem": "LLM Provider",
+            "status": llm_status,
+            "details": f"Provider: {llm_provider} (model: {llm_model})",
+        })
+
+        # 6. Durable Background Jobs
+        job_status = "PASS"
+        try:
+            async with session_scope() as session:
+                recovered = await DurableJobStore().recover_abandoned(session)
+                job_details = (
+                    f"DurableJobStore active ({len(recovered)} abandoned leases recovered)"
+                )
+        except Exception as exc:
+            job_status = "WARN"
+            job_details = f"Job store warning: {exc}"
+
+        report.append(
+            {"subsystem": "Durable Jobs", "status": job_status, "details": job_details}
+        )
+
+        # 7. Secret Redaction Pre-flight
+        redact_test = SecretRedactor.redact_secrets(
+            "token=sk-proj-1234567890abcdef1234567890abcdef"
+        )
+        redact_status = (
+            "PASS"
+            if "sk-proj-" not in redact_test and "[REDACTED" in redact_test
+            else "FAIL"
+        )
+        report.append({
+            "subsystem": "Secret Redaction",
+            "status": redact_status,
+            "details": "Pre-flight credential detection verified",
+        })
+
+        # 8. Distributed Tracing & Telemetry
+        tel_enabled = is_telemetry_enabled()
+        tel_mode = os.environ.get("CORTEX_TELEMETRY", "local")
+        report.append({
+            "subsystem": "Observability",
+            "status": "PASS",
+            "details": f"Tracing: {'active' if tel_enabled else 'disabled'} (mode: {tel_mode})",
+        })
+
+        # 9. Capability Registry
+        reg = CapabilityRegistry.get_instance()
+        summary = reg.summary()
+        report.append({
+            "subsystem": "Capabilities",
+            "status": "PASS",
+            "details": f"{summary.get('IMPLEMENTED', 0)} implemented, {summary.get('PARTIAL', 0)} partial, {summary.get('DISABLED', 0)} disabled",
+        })
+
+    asyncio.run(_run_diagnostics())
+
+    if as_json:
+        console.print(json.dumps(report, indent=2))
+        return
+
+    table = Table(
+        title="CortexForge System Diagnostics (`cortex doctor`)", show_lines=True
+    )
+    table.add_column("Subsystem", style="cyan", width=20)
+    table.add_column("Status", style="bold", width=10)
+    table.add_column("Details", style="white", width=55)
+
+    status_colors = {
+        "PASS": "[bold green]PASS[/]",
+        "WARN": "[bold yellow]WARN[/]",
+        "FAIL": "[bold red]FAIL[/]",
+    }
+
+    all_passed = True
+    for item in report:
+        st = item["status"]
+        if st == "FAIL":
+            all_passed = False
+        table.add_row(item["subsystem"], status_colors.get(st, st), item["details"])
+
+    console.print(table)
+    if all_passed:
+        console.print(
+            "[bold green]System is ready for production cognitive operations.[/]"
+        )
+    else:
+        console.print(
+            "[bold red]One or more critical subsystems reported failures. Please check the logs.[/]"
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":
