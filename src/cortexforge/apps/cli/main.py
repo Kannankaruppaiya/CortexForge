@@ -143,7 +143,7 @@ def scan(path: str, incremental: bool, name: str | None) -> None:
 @click.argument("project_ref", default=".", required=False)
 def rebuild(project_ref: str) -> None:
     """Recover from inconsistent/corrupted index with clean full rebuild."""
-    from cortexforge.jobs.manager import JobRecord
+    from cortexforge.jobs.context import JobContext
     from cortexforge.jobs.tasks import rebuild_project_task
 
     async def _do_rebuild() -> None:
@@ -152,7 +152,7 @@ def rebuild(project_ref: str) -> None:
             project = await _get_project_or_exit(session, project_ref)
             console.print(f"[bold yellow]Initiating clean rebuild for project:[/] {project.name}")
 
-            job = JobRecord(id="rebuild_manual", job_type="REBUILD", project_id=project.id)
+            job = JobContext(job_id="rebuild_manual", job_type="REBUILD", project_id=project.id)
             with console.status("[bold blue]Purging stale index and rebuilding AST model...[/]"):
                 res = await rebuild_project_task(job)
 

@@ -26,8 +26,19 @@ from cortexforge.core.schemas import HealthResponse
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Lifespan handler for database initialization and cleanup."""
+    """Lifespan handler for database initialization, recovery, and cleanup."""
     await init_db()
+    from cortexforge.core.db import session_scope
+    from cortexforge.jobs.durable import DurableJobStore
+
+    try:
+        async with session_scope() as session:
+            await DurableJobStore().recover_abandoned(session)
+    except Exception as exc:
+        import logging
+        logging.getLogger("cortexforge.api").warning(
+            "Could not recover abandoned jobs at startup: %s", exc
+        )
     yield
 
 

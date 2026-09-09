@@ -1,6 +1,9 @@
-"""Background jobs and task execution module for CortexForge."""
+"""Background job execution and caching subsystems for CortexForge."""
 
-from cortexforge.jobs.manager import CacheManager, JobManager, JobRecord, JobStatus
+from cortexforge.jobs.cache import CacheManager, GenerationCache
+from cortexforge.jobs.context import JobContext
+from cortexforge.jobs.durable import ClaimedJob, DurableJobStore
+from cortexforge.jobs.runner import JobRunner
 from cortexforge.jobs.tasks import (
     benchmark_project_task,
     consolidate_project_task,
@@ -10,9 +13,11 @@ from cortexforge.jobs.tasks import (
 
 __all__ = [
     "CacheManager",
-    "JobManager",
-    "JobRecord",
-    "JobStatus",
+    "ClaimedJob",
+    "DurableJobStore",
+    "GenerationCache",
+    "JobContext",
+    "JobRunner",
     "benchmark_project_task",
     "consolidate_project_task",
     "rebuild_project_task",
