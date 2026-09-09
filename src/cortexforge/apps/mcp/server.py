@@ -292,7 +292,7 @@ async def memory_get(memory_id: str) -> str:
 
 @mcp_server.tool(
     name="memory_create",
-    description="Registers a new durable project memory (DECISION, CONSTRAINT, FAILURE, LESSON, etc.) with evidence grounding.",
+    description="Registers a new project memory (DECISION, CONSTRAINT, FAILURE, LESSON, etc.) with evidence grounding. Verifies agent observations before promotion to active truth.",
 )
 async def memory_create(
     title: str,
@@ -304,8 +304,9 @@ async def memory_create(
     evidence_line_end: int | None = None,
     importance: float = 0.6,
     project_id_or_path: str = ".",
+    trusted_user_confirmed: bool = False,
 ) -> str:
-    """Store a durable project memory."""
+    """Store a project memory with validation, trust classification, and verification pipeline."""
     await init_db()
     async with session_scope() as session:
         project = await _resolve_project(session, project_id_or_path)
@@ -322,6 +323,9 @@ async def memory_create(
                 )
             )
 
+        authority = "USER_CONFIRMED" if trusted_user_confirmed else "AGENT_OBSERVED"
+        source_type = "user" if trusted_user_confirmed else "agent_observation"
+
         payload = MemoryCreate(
             memory_type=memory_type.upper(),
             title=title,
@@ -329,8 +333,24 @@ async def memory_create(
             summary=summary,
             importance=importance,
             evidence=evidence_list if evidence_list else None,
+            authority=authority,
+            source_type=source_type,
         )
         mem = await memory_service.create_memory(session, project.id, payload)
+
+        # Verification pipeline for agent observations (§29, §32)
+        if not trusted_user_confirmed:
+            if evidence_list:
+                verdict = await verification_engine.verify_single_memory(
+                    session, mem, project.local_path
+                )
+                await session.commit()
+                if verdict == "ACTIVE":
+                    return f"[VERIFIED_ACTIVE] Memory '{mem.title}' verified against code grounding (ID: `{mem.id}`, Status: `{verdict}`, Version: v{mem.version})."
+                return f"[VERIFICATION_REQUIRED] Memory '{mem.title}' recorded with unverified grounding (ID: `{mem.id}`, Status: `{verdict}`). Evidence check did not confirm active state."
+            else:
+                return f"[CANDIDATE_CREATED] Candidate memory '{mem.title}' recorded without code evidence (ID: `{mem.id}`, Status: `{mem.status}`). Requires verification or human approval."
+
         return f"Successfully created memory '{mem.title}' (ID: `{mem.id}`, Status: `{mem.status}`, Version: v{mem.version})."
 
 
