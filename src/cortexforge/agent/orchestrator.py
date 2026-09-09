@@ -75,19 +75,31 @@ class AgentWorkflowOrchestrator:
         agent_source: str = "mcp",
         profile: str = "medium",
         target_files: list[str] | None = None,
+        workspace_id: str | None = None,
+        session_id: str | None = None,
+        parent_task_id: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        model_version: str | None = None,
     ) -> tuple[AgentTask, ComposedContext]:
         """Initialize task, generate token-budgeted cognitive context, and start audit trail."""
         project = await session.get(Project, project_id)
         if not project:
             raise ValueError(f"Project {project_id} does not exist.")
 
-        # 1. Create AgentTask record
+        # 1. Create AgentTask record with session provenance
         task = AgentTask(
             project_id=project_id,
             agent_id=agent_id,
             task_text=task_text,
             status="IN_PROGRESS",
             created_at=datetime.now(UTC),
+            workspace_id=workspace_id,
+            session_id=session_id,
+            parent_task_id=parent_task_id,
+            provider=provider,
+            model=model,
+            model_version=model_version,
         )
         session.add(task)
         await session.flush()

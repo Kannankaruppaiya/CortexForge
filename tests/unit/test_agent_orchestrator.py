@@ -13,7 +13,7 @@ from cortexforge.agent.events import (
 )
 from cortexforge.agent.failure_intelligence import FailureNormalizer
 from cortexforge.agent.orchestrator import AgentWorkflowOrchestrator
-from cortexforge.core.models import Project
+from cortexforge.core.models import AgentTask, Project
 from cortexforge.embeddings.provider import FastDeterministicEmbeddingProvider
 from cortexforge.memory.service import MemoryService
 from cortexforge.retrieval.composer import ContextComposer
@@ -261,4 +261,39 @@ async def test_find_similar_tasks_multi_signal(test_session: AsyncSession, tmp_p
     fa = top["fix_attempts"][0]
     assert "exponential backoff" in fa["approach_description"]
     assert fa["outcome"] == "SUCCESS"
+
+
+@pytest.mark.asyncio
+async def test_task_session_provenance_persistence(test_session: AsyncSession, tmp_path):
+    """Verify that start_task records workspace, session, provider, model, and parent task provenance."""
+    project = Project(name="ProvenanceProj", local_path=str(tmp_path))
+    test_session.add(project)
+    await test_session.commit()
+    await test_session.refresh(project)
+
+    orchestrator = AgentWorkflowOrchestrator()
+
+    task, _ = await orchestrator.start_task(
+        session=test_session,
+        project_id=project.id,
+        task_text="Refactor payment webhook authentication",
+        agent_id="agent-claude-3-7",
+        agent_source="claude_code",
+        workspace_id="ws-enterprise-prod-01",
+        session_id="sess-8899aabb",
+        parent_task_id="task-root-1122",
+        provider="anthropic",
+        model="claude-3-7-sonnet",
+        model_version="20250219",
+    )
+    await test_session.commit()
+
+    reloaded = await test_session.get(AgentTask, task.id)
+    assert reloaded is not None
+    assert reloaded.workspace_id == "ws-enterprise-prod-01"
+    assert reloaded.session_id == "sess-8899aabb"
+    assert reloaded.parent_task_id == "task-root-1122"
+    assert reloaded.provider == "anthropic"
+    assert reloaded.model == "claude-3-7-sonnet"
+    assert reloaded.model_version == "20250219"
 

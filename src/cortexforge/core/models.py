@@ -418,6 +418,12 @@ class AgentTask(Base):
     token_input: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     token_output: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     tool_calls: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    workspace_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    session_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    parent_task_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    provider: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    model_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     project: Mapped["Project"] = relationship("Project", back_populates="agent_tasks")
     events: Mapped[list["AgentEvent"]] = relationship(

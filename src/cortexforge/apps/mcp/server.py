@@ -680,6 +680,12 @@ async def task_start(
     profile: str = "medium",
     target_files: list[str] | None = None,
     project_id_or_path: str = ".",
+    workspace_id: str | None = None,
+    session_id: str | None = None,
+    parent_task_id: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    model_version: str | None = None,
 ) -> str:
     """Start task and generate project cognitive context packet."""
     await init_db()
@@ -695,6 +701,12 @@ async def task_start(
             agent_id=agent_id,
             profile=profile,
             target_files=target_files,
+            workspace_id=workspace_id,
+            session_id=session_id,
+            parent_task_id=parent_task_id,
+            provider=provider,
+            model=model,
+            model_version=model_version,
         )
         return f"Task started: `{task.id}` (Status: {task.status})\n\n{context}"
 
