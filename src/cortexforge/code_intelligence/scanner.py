@@ -5,7 +5,7 @@ import os
 import subprocess
 import time
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cortexforge.code_intelligence.config_intelligence import (
@@ -289,11 +289,19 @@ class RepositoryScanner:
                 ]
             elif project.last_indexed_commit == head_commit:
                 # No changes between last indexed commit and HEAD
+                existing_snaps = (
+                    await session.execute(
+                        select(func.count(RepositorySnapshot.id)).where(
+                            RepositorySnapshot.project_id == project.id
+                        )
+                    )
+                ).scalar() or 0
                 return ScanResponse(
                     project_id=project.id,
                     files_scanned=0,
                     entities_extracted=0,
                     relationships_extracted=0,
+                    graph_generation=max(1, existing_snaps),
                     duration_ms=round((time.perf_counter() - start_time) * 1000, 2),
                     status="SUCCESS",
                 )
@@ -337,6 +345,29 @@ class RepositoryScanner:
                 errors.append(f"Parse error in {rel_path}: {parse_result.error}")
                 continue
 
+            if incremental:
+                # If an existing entity in this file was removed, clean it and its relationships
+                file_existing = [e for e in existing_by_qualified.values() if e.file_path == rel_path]
+                new_qnames = {sym.qualified_name for sym in parse_result.symbols}
+                removed_entities = [e for e in file_existing if e.qualified_name not in new_qnames]
+                if removed_entities:
+                    removed_ids = [e.id for e in removed_entities]
+                    await session.execute(
+                        delete(Relationship).where(
+                            (Relationship.project_id == project.id)
+                            & (
+                                Relationship.source_entity_id.in_(removed_ids)
+                                | Relationship.target_entity_id.in_(removed_ids)
+                            )
+                        )
+                    )
+                    await session.execute(
+                        delete(CodeEntity).where(CodeEntity.id.in_(removed_ids))
+                    )
+                    for re in removed_entities:
+                        created_entities_by_qualified.pop(re.qualified_name, None)
+                        existing_by_qualified.pop(re.qualified_name, None)
+
             for sym in parse_result.symbols:
                 existing_entity = created_entities_by_qualified.get(sym.qualified_name)
                 if existing_entity:
@@ -371,16 +402,37 @@ class RepositoryScanner:
         await session.flush()
 
         # Persist Relationships
-        # Clear existing relationships to avoid duplicates
-        await session.execute(
-            delete(Relationship).where(Relationship.project_id == project.id)
-        )
+        # In an incremental scan, preserve relationships whose source is an untouched file
+        # (inbound edges to rescanned entities, and untouched internal edges).
+        # Only delete outbound relationships from the rescanned files.
+        if incremental:
+            rescanned_files_set = set(rel_files)
+            rescanned_entity_ids = [
+                e.id for e in created_entities_by_qualified.values()
+                if e.file_path in rescanned_files_set
+            ]
+            if rescanned_entity_ids:
+                await session.execute(
+                    delete(Relationship).where(
+                        (Relationship.project_id == project.id)
+                        & Relationship.source_entity_id.in_(rescanned_entity_ids)
+                    )
+                )
+        else:
+            await session.execute(
+                delete(Relationship).where(Relationship.project_id == project.id)
+            )
         await session.flush()
 
+        seen_rel_keys: set[tuple[str, str, str]] = set()
         for rel in all_parsed_relationships:
             src_entity = created_entities_by_qualified.get(rel.source_qualified_name)
             tgt_entity = created_entities_by_qualified.get(rel.target_qualified_name)
             if src_entity and tgt_entity:
+                rel_key = (src_entity.id, tgt_entity.id, rel.relationship_type)
+                if rel_key in seen_rel_keys:
+                    continue
+                seen_rel_keys.add(rel_key)
                 rel_obj = Relationship(
                     project_id=project.id,
                     source_entity_id=src_entity.id,
@@ -419,12 +471,41 @@ class RepositoryScanner:
             branch=project.default_branch,
         )
 
+        total_entities_count = (
+            await session.execute(
+                select(func.count(CodeEntity.id)).where(CodeEntity.project_id == project.id)
+            )
+        ).scalar() or 0
+
+        total_relationships_count = (
+            await session.execute(
+                select(func.count(Relationship.id)).where(Relationship.project_id == project.id)
+            )
+        ).scalar() or 0
+
+        total_files_count = (
+            await session.execute(
+                select(func.count(func.distinct(CodeEntity.file_path))).where(
+                    CodeEntity.project_id == project.id
+                )
+            )
+        ).scalar() or 0
+
+        existing_snapshots_count = (
+            await session.execute(
+                select(func.count(RepositorySnapshot.id)).where(
+                    RepositorySnapshot.project_id == project.id
+                )
+            )
+        ).scalar() or 0
+        graph_gen = existing_snapshots_count + 1
+
         snapshot = RepositorySnapshot(
             project_id=project.id,
             commit_sha=head_commit or project.last_indexed_commit or "initial-scan",
-            file_count=len(rel_files),
-            symbol_count=len(created_entities_by_qualified),
-            dependency_count=total_relationships_extracted,
+            file_count=total_files_count if incremental else len(rel_files),
+            symbol_count=total_entities_count,
+            dependency_count=total_relationships_count,
         )
         session.add(snapshot)
 
@@ -437,6 +518,7 @@ class RepositoryScanner:
             files_scanned=len(rel_files),
             entities_extracted=total_entities_extracted,
             relationships_extracted=total_relationships_extracted,
+            graph_generation=graph_gen,
             duration_ms=round(duration_ms, 2),
             status="SUCCESS" if not errors else "PARTIAL_SUCCESS",
             errors=errors,

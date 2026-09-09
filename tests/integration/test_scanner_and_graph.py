@@ -2,12 +2,14 @@
 
 import os
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 import cortexforge.apps.api.main
@@ -22,7 +24,7 @@ from cortexforge.apps.mcp.server import (
 )
 from cortexforge.code_intelligence.scanner import RepositoryScanner
 from cortexforge.core.db import get_db_session
-from cortexforge.core.models import Base, Project
+from cortexforge.core.models import Base, CodeEntity, Project, Relationship
 from cortexforge.graph.service import GraphService
 
 
@@ -228,3 +230,111 @@ async def test_mcp_tools(sample_repo):
     lessons_res = await memory_get_lessons(sample_repo)
     assert "Lessons" in lessons_res
     assert "AuthService" in lessons_res
+
+
+def _git_run(repo: str, *args: str) -> str:
+    res = subprocess.run(
+        ["git", *args], cwd=repo, capture_output=True, text=True, check=True, timeout=30
+    )
+    return res.stdout.strip()
+
+
+def _git_commit(repo: str, msg: str) -> str:
+    _git_run(repo, "add", "-A")
+    _git_run(repo, "commit", "-q", "-m", msg)
+    return _git_run(repo, "rev-parse", "HEAD")
+
+
+@pytest.mark.asyncio
+async def test_incremental_relationship_graph_preservation(tmp_path, test_session: AsyncSession):
+    """Verify incremental scan preserves cross-file inbound relationships and updates generations."""
+    repo = str(tmp_path / "inc_repo")
+    os.makedirs(os.path.join(repo, "services"), exist_ok=True)
+
+    _git_run(str(tmp_path), "init", "-q", repo)
+    _git_run(repo, "config", "user.email", "test@example.com")
+    _git_run(repo, "config", "user.name", "Test")
+
+    auth_file = os.path.join(repo, "services", "auth.py")
+    payment_file = os.path.join(repo, "services", "payment.py")
+
+    with open(auth_file, "w", encoding="utf-8") as f:
+        f.write("""class AuthService:
+    def authenticate(self, user: str) -> bool:
+        return user == "admin"
+""")
+
+    with open(payment_file, "w", encoding="utf-8") as f:
+        f.write("""import services.auth
+
+class PaymentService:
+    def __init__(self):
+        self.auth = services.auth.AuthService()
+
+    def process(self, amount: float) -> bool:
+        return amount > 0
+""")
+
+    _git_commit(repo, "initial")
+
+    project = Project(
+        name="IncrementalGraphRepo",
+        local_path=os.path.realpath(repo),
+        status="INITIALIZING",
+        default_branch="main",
+    )
+    test_session.add(project)
+    await test_session.commit()
+    await test_session.refresh(project)
+
+    scanner = RepositoryScanner()
+    res1 = await scanner.scan_project(test_session, project, incremental=False)
+
+    assert res1.status == "SUCCESS"
+    assert res1.files_scanned == 2
+    assert res1.graph_generation == 1
+
+    # Verify cross-file relationship exists
+    rels_stmt = select(Relationship).where(Relationship.project_id == project.id)
+    initial_rels = (await test_session.execute(rels_stmt)).scalars().all()
+    assert len(initial_rels) >= 1
+
+    # Check entities in payment.py and auth.py
+    ents_stmt = select(CodeEntity).where(CodeEntity.project_id == project.id)
+    ents = {e.name: e for e in (await test_session.execute(ents_stmt)).scalars().all()}
+    assert "AuthService" in ents
+    assert "PaymentService" in ents
+
+    # Modify ONLY services/auth.py
+    with open(auth_file, "w", encoding="utf-8") as f:
+        f.write("""class AuthService:
+    def authenticate(self, user: str) -> bool:
+        return bool(user)
+
+    def verify_token(self, token: str) -> bool:
+        return len(token) > 8
+""")
+
+    _git_commit(repo, "update auth only")
+
+    # Run incremental scan
+    res2 = await scanner.scan_project(test_session, project, incremental=True)
+
+    assert res2.status == "SUCCESS"
+    assert res2.files_scanned == 1  # Only auth.py scanned
+    assert res2.graph_generation == 2
+
+    # Inbound relationship from untouched PaymentService to AuthService must still exist!
+    rels_after = (await test_session.execute(rels_stmt)).scalars().all()
+    assert len(rels_after) >= 1
+
+    # Verify AuthService was updated with new method
+    ents_after = {e.name: e for e in (await test_session.execute(ents_stmt)).scalars().all()}
+    assert "verify_token" in ents_after
+    assert "PaymentService" in ents_after
+
+    # Rescanning without changes returns files_scanned=0 and preserves graph
+    res3 = await scanner.scan_project(test_session, project, incremental=True)
+    assert res3.status == "SUCCESS"
+    assert res3.files_scanned == 0
+    assert res3.graph_generation == 2

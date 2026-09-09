@@ -149,6 +149,7 @@ class ScanResponse(BaseModel):
     files_scanned: int
     entities_extracted: int
     relationships_extracted: int
+    graph_generation: int = 1
     duration_ms: float
     status: str
     errors: list[str] = Field(default_factory=list)
