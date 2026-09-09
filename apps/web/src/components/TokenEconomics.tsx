@@ -93,19 +93,21 @@ export const TokenEconomics: React.FC<TokenEconomicsProps> = ({ projectId }) => 
     },
   };
 
+  const [showEstimation, setShowEstimation] = useState(false);
   const profiles = liveData?.profiles || fallbackProfiles;
   const activeProfile = profiles[selectedBudget] || fallbackProfiles[selectedBudget];
 
-  const savingsPct = liveData?.savings_pct ?? 88.5;
-  const avgCortexTokens = liveData?.avg_context_tokens_cortex ?? 2850;
-  const avgBaseTokens = liveData?.avg_context_tokens_baseline ?? 24500;
-  const filesCortex = liveData?.files_explored_cortex ?? 1.2;
-  const filesBase = liveData?.files_explored_baseline ?? 14.6;
-  const toolsCortex = liveData?.tool_calls_cortex ?? 1.4;
-  const toolsBase = liveData?.tool_calls_baseline ?? 6.8;
-  const costCortex = liveData?.cost_per_1k_cortex ?? 4.20;
-  const costBase = liveData?.cost_per_1k_baseline ?? 36.75;
-  const costSaved = liveData?.cost_saved_per_1k ?? 32.55;
+  const hasLiveData = Boolean(liveData && liveData.savings_pct !== undefined);
+  const savingsPct = hasLiveData ? liveData.savings_pct : (showEstimation ? 88.5 : null);
+  const avgCortexTokens = hasLiveData ? liveData.avg_context_tokens_cortex : (showEstimation ? 2850 : null);
+  const avgBaseTokens = hasLiveData ? liveData.avg_context_tokens_baseline : (showEstimation ? 24500 : null);
+  const filesCortex = hasLiveData ? liveData.files_explored_cortex : (showEstimation ? 1.2 : null);
+  const filesBase = hasLiveData ? liveData.files_explored_baseline : (showEstimation ? 14.6 : null);
+  const toolsCortex = hasLiveData ? liveData.tool_calls_cortex : (showEstimation ? 1.4 : null);
+  const toolsBase = hasLiveData ? liveData.tool_calls_baseline : (showEstimation ? 6.8 : null);
+  const costCortex = hasLiveData ? liveData.cost_per_1k_cortex : (showEstimation ? 4.20 : null);
+  const costBase = hasLiveData ? liveData.cost_per_1k_baseline : (showEstimation ? 36.75 : null);
+  const costSaved = hasLiveData ? liveData.cost_saved_per_1k : (showEstimation ? 32.55 : null);
 
   return (
     <div className="space-y-6">
@@ -117,20 +119,48 @@ export const TokenEconomics: React.FC<TokenEconomicsProps> = ({ projectId }) => 
             Token Economics & Context Efficiency Scoreboard
           </h3>
           <p className="text-xs text-slate-400 mt-1 max-w-2xl">
-            CortexForge reduces context pollution by transforming raw repository discovery into a pre-digested, verified Project Cognitive Model. Agents hit high-confidence answers with up to 90% fewer tokens.
+            CortexForge reduces context pollution by transforming raw repository discovery into a pre-digested, verified Project Cognitive Model.
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {liveData && (
-            <span className="px-2 py-0.5 bg-indigo-950 border border-indigo-800 text-indigo-300 text-[11px] font-mono rounded">
-              Live Model
+          {hasLiveData ? (
+            <span className="px-2.5 py-1 bg-emerald-950/80 border border-emerald-800 text-emerald-300 text-xs font-mono font-bold rounded-lg flex items-center gap-1.5">
+              <TrendingDown className="w-3.5 h-3.5" /> {savingsPct}% Measured Savings
+            </span>
+          ) : showEstimation ? (
+            <span className="px-2.5 py-1 bg-amber-950/60 border border-amber-800/80 text-amber-300 text-xs font-mono rounded-lg flex items-center gap-1.5">
+              Reference Model (~88.5% Est.)
+            </span>
+          ) : (
+            <span className="px-2.5 py-1 bg-slate-800 border border-slate-700 text-slate-400 text-xs font-mono rounded-lg">
+              No Benchmark Data Yet
             </span>
           )}
-          <span className="px-3 py-1 bg-emerald-950/60 border border-emerald-800/80 text-emerald-400 text-xs font-mono font-bold rounded-lg flex items-center gap-1.5">
-            <TrendingDown className="w-3.5 h-3.5" /> {savingsPct}% Context Savings
-          </span>
         </div>
       </div>
+
+      {/* Notice when viewing offline estimation or empty state */}
+      {!hasLiveData && (
+        <div className={`p-4 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs font-mono ${
+          showEstimation
+            ? 'bg-amber-950/30 border-amber-800/60 text-amber-300'
+            : 'bg-slate-900/60 border-slate-800 text-slate-400'
+        }`}>
+          <div>
+            {showEstimation ? (
+              <span>⚠️ <strong>OFFLINE REFERENCE ESTIMATION:</strong> Displaying theoretical profile limits from <code>retrieval/composer.py</code>, not empirical measurements.</span>
+            ) : (
+              <span>ℹ️ <strong>EMPTY STATE:</strong> No benchmark runs recorded for this project yet. Run <code>cortex benchmark</code> to generate live empirical scorecards.</span>
+            )}
+          </div>
+          <button
+            onClick={() => setShowEstimation(!showEstimation)}
+            className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded border border-slate-700 whitespace-nowrap transition"
+          >
+            {showEstimation ? 'Switch to Real Data View' : 'Preview Reference Model'}
+          </button>
+        </div>
+      )}
 
       {/* Comparative Head-to-Head Cards */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
@@ -140,11 +170,17 @@ export const TokenEconomics: React.FC<TokenEconomicsProps> = ({ projectId }) => 
             <Cpu className="w-4 h-4 text-indigo-400" />
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="text-2xl font-bold font-mono text-emerald-400">{avgCortexTokens.toLocaleString()}</span>
-            <span className="text-xs font-mono text-slate-500 line-through">{avgBaseTokens.toLocaleString()}</span>
+            {avgCortexTokens !== null ? (
+              <>
+                <span className="text-2xl font-bold font-mono text-emerald-400">{avgCortexTokens.toLocaleString()}</span>
+                {avgBaseTokens && <span className="text-xs font-mono text-slate-500 line-through">{avgBaseTokens.toLocaleString()}</span>}
+              </>
+            ) : (
+              <span className="text-xl font-bold font-mono text-slate-500 italic">Not measured</span>
+            )}
           </div>
           <div className="text-[11px] text-slate-500 font-mono">
-            {savingsPct}% reduction per agent turn
+            {savingsPct !== null ? `${savingsPct}% reduction per agent turn` : 'Run benchmark to measure'}
           </div>
         </div>
 
@@ -154,11 +190,17 @@ export const TokenEconomics: React.FC<TokenEconomicsProps> = ({ projectId }) => 
             <FileCheck className="w-4 h-4 text-blue-400" />
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="text-2xl font-bold font-mono text-emerald-400">{filesCortex}</span>
-            <span className="text-xs font-mono text-slate-500 line-through">{filesBase}</span>
+            {filesCortex !== null ? (
+              <>
+                <span className="text-2xl font-bold font-mono text-emerald-400">{filesCortex}</span>
+                {filesBase && <span className="text-xs font-mono text-slate-500 line-through">{filesBase}</span>}
+              </>
+            ) : (
+              <span className="text-xl font-bold font-mono text-slate-500 italic">Not measured</span>
+            )}
           </div>
           <div className="text-[11px] text-slate-500 font-mono">
-            {liveData?.files_reduction_pct ?? 91.8}% fewer files re-read
+            {hasLiveData ? `${liveData.files_reduction_pct}% fewer files re-read` : (showEstimation ? '91.8% estimated reduction' : 'Run benchmark to measure')}
           </div>
         </div>
 
@@ -168,11 +210,17 @@ export const TokenEconomics: React.FC<TokenEconomicsProps> = ({ projectId }) => 
             <Zap className="w-4 h-4 text-amber-400" />
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="text-2xl font-bold font-mono text-emerald-400">{toolsCortex}</span>
-            <span className="text-xs font-mono text-slate-500 line-through">{toolsBase}</span>
+            {toolsCortex !== null ? (
+              <>
+                <span className="text-2xl font-bold font-mono text-emerald-400">{toolsCortex}</span>
+                {toolsBase && <span className="text-xs font-mono text-slate-500 line-through">{toolsBase}</span>}
+              </>
+            ) : (
+              <span className="text-xl font-bold font-mono text-slate-500 italic">Not measured</span>
+            )}
           </div>
           <div className="text-[11px] text-slate-500 font-mono">
-            {liveData?.tool_calls_reduction_pct ?? 79.4}% fewer exploratory calls
+            {hasLiveData ? `${liveData.tool_calls_reduction_pct}% fewer exploratory calls` : (showEstimation ? '79.4% estimated reduction' : 'Run benchmark to measure')}
           </div>
         </div>
 
@@ -182,11 +230,17 @@ export const TokenEconomics: React.FC<TokenEconomicsProps> = ({ projectId }) => 
             <DollarSign className="w-4 h-4 text-emerald-400" />
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="text-2xl font-bold font-mono text-emerald-400">${costCortex.toFixed(2)}</span>
-            <span className="text-xs font-mono text-slate-500 line-through">${costBase.toFixed(2)}</span>
+            {costCortex !== null ? (
+              <>
+                <span className="text-2xl font-bold font-mono text-emerald-400">${costCortex.toFixed(2)}</span>
+                {costBase && <span className="text-xs font-mono text-slate-500 line-through">${costBase.toFixed(2)}</span>}
+              </>
+            ) : (
+              <span className="text-xl font-bold font-mono text-slate-500 italic">Not measured</span>
+            )}
           </div>
           <div className="text-[11px] text-slate-500 font-mono">
-            ${costSaved.toFixed(2)} saved per 1k runs
+            {costSaved !== null ? `$${costSaved.toFixed(2)} saved per 1k runs` : 'Run benchmark to measure'}
           </div>
         </div>
       </div>
