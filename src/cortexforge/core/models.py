@@ -1369,3 +1369,64 @@ class SymbolLineage(Base):
         Index("idx_lineage_project_logical", "project_id", "logical_id"),
         Index("idx_lineage_project_qualified", "project_id", "qualified_name"),
     )
+
+
+class Job(Base):
+    """A durable background job (specification sections 38 and 39).
+
+    Jobs used to live in an in-process dictionary, so a restart mid-index left no
+    trace that indexing had been happening: the work was neither finished nor
+    recoverable, and nothing could tell the difference between "never started"
+    and "died halfway through". Persisting them makes both answerable.
+
+    Recovery works through leases rather than timestamps alone. A worker claims a
+    job by writing a lease that expires; if the worker dies, the lease lapses and
+    another worker can pick the job up. A job that simply took a long time keeps
+    renewing its lease and is not stolen.
+    """
+
+    __tablename__ = "jobs"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    project_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=True
+    )
+    job_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(50), default="PENDING", server_default="PENDING", nullable=False
+    )
+    # sha256 over (project, type, parameters). Submitting the same work twice
+    # while it is still outstanding returns the existing job rather than running
+    # it again (section 37).
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    parameters: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    progress: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    # Which stage the job reached, so a resumed job can continue rather than
+    # restart. A half-applied cognitive update is worse than an unstarted one.
+    checkpoint: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    # Identity of the worker currently holding this job, and when its claim
+    # expires. A lapsed lease is what makes a crashed job recoverable.
+    lease_owner: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_job_idempotency"),
+        Index("idx_job_status_type", "status", "job_type"),
+        Index("idx_job_project", "project_id"),
+        Index("idx_job_lease", "status", "lease_expires_at"),
+    )
