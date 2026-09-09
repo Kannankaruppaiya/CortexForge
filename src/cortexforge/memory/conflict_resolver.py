@@ -22,7 +22,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -125,13 +125,28 @@ class ConflictResolver:
         if cand_loaded:
             candidate_memory = cand_loaded
 
-        # Find active or conflicted memories in the same project and layer
+        # Conflict detection is scoped to one branch.
+        #
+        # Two branches are allowed to believe different things: they describe
+        # different code, and that is the point of a branch (section 19). A
+        # memory recorded on `feature` contradicting one on `main` is not a
+        # conflict to resolve here -- it is a divergence, and reconciling it is
+        # the merge's job (section 20). Resolving it at creation time would let
+        # work on one branch silently supersede knowledge on another that was
+        # never merged.
+        #
+        # Memories with no branch are project-wide and participate everywhere.
+        branch_scope = [Memory.branch.is_(None)]
+        if candidate_memory.branch:
+            branch_scope.append(Memory.branch == candidate_memory.branch)
+
         stmt = (
             select(Memory)
             .options(selectinload(Memory.evidences))
             .where(
                 Memory.project_id == project_id,
                 Memory.id != candidate_memory.id,
+                or_(*branch_scope),
                 Memory.status.in_([
                     MemoryState.ACTIVE.value,
                     MemoryState.UNVERIFIED.value,

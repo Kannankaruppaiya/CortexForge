@@ -53,10 +53,75 @@ class GitProvider:
         except Exception:
             return ""
 
+    def _run_git_status(self, args: list[str], timeout: int = 15) -> bool:
+        """Run a git command for its exit status rather than its output."""
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=self.repo_path,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+            )
+            return result.returncode == 0
+        except (subprocess.SubprocessError, OSError):
+            return False
+
     def get_head_commit(self) -> str | None:
         """Return full 40-character SHA of current HEAD."""
         out = self._run_git(["rev-parse", "HEAD"])
         return out if len(out) == 40 else None
+
+    def get_current_branch(self) -> str | None:
+        """The branch HEAD points at, or None in a detached-HEAD state."""
+        out = self._run_git(["rev-parse", "--abbrev-ref", "HEAD"])
+        return out if out and out != "HEAD" else None
+
+    def list_branches(self) -> list[str]:
+        """Local branch names."""
+        out = self._run_git(["for-each-ref", "--format=%(refname:short)", "refs/heads/"])
+        return [line.strip() for line in out.splitlines() if line.strip()]
+
+    def get_merge_base(self, ours: str, theirs: str) -> str | None:
+        """The commit two branches last shared.
+
+        This is what separates "we disagree" from "we diverged": knowledge
+        recorded before the merge base is common ground, and only what each side
+        learned *after* it can genuinely conflict (section 20).
+        """
+        out = self._run_git(["merge-base", ours, theirs])
+        return out if len(out) == 40 else None
+
+    def commits_between(self, base: str, head: str, limit: int = 200) -> list[str]:
+        """Commit SHAs reachable from ``head`` but not from ``base``."""
+        out = self._run_git(["rev-list", f"--max-count={limit}", f"{base}..{head}"])
+        return [line.strip() for line in out.splitlines() if len(line.strip()) == 40]
+
+    def is_ancestor(self, maybe_ancestor: str, descendant: str) -> bool:
+        """Whether one commit is an ancestor of another.
+
+        Used to tell a fast-forward from a real divergence, and to detect a
+        force-push: a branch head that is no longer a descendant of the commit
+        CortexForge last indexed means history was rewritten under it.
+        """
+        return self._run_git_status(
+            ["merge-base", "--is-ancestor", maybe_ancestor, descendant]
+        )
+
+    def commit_exists(self, commit_sha: str) -> bool:
+        """Whether a commit is still reachable in this repository.
+
+        Checked by exit status, not by output: `git cat-file -e` prints nothing
+        whether it succeeds or fails, so a wrapper that only inspects stdout
+        would report every commit as present -- including ones a force-push
+        removed, which is precisely the case this exists to detect.
+        """
+        return self._run_git_status(["cat-file", "-e", f"{commit_sha}^{{commit}}"])
+
+    def is_merge_commit(self, commit_sha: str) -> bool:
+        """Whether a commit has more than one parent."""
+        parents = self._run_git(["rev-list", "--parents", "-n", "1", commit_sha])
+        return len(parents.split()) > 2
 
     def get_recent_commits(self, limit: int = 10) -> list[GitCommit]:
         """Fetch list of recent commits with metadata."""
