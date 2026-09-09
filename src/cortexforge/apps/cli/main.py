@@ -654,8 +654,155 @@ def integrity(root: str, strict: bool) -> None:
         )
     console.print(table)
 
-    if strict:
+HOOK_START_MARKER = "# >>> CORTEXFORGE_HOOK_START >>>"
+HOOK_END_MARKER = "# <<< CORTEXFORGE_HOOK_END <<<"
+SUPPORTED_HOOKS = ("post-commit", "post-merge", "post-checkout")
+
+
+def _generate_hook_script(hook_name: str) -> str:
+    return f"""{HOOK_START_MARKER}
+# CortexForge automatic durable background job dispatch
+if command -v cortex >/dev/null 2>&1; then
+    cortex hooks handle --hook {hook_name} --path "$PWD" "$@" >/dev/null 2>&1 || true
+elif command -v python3 >/dev/null 2>&1; then
+    python3 -m cortexforge.apps.cli.main hooks handle --hook {hook_name} --path "$PWD" "$@" >/dev/null 2>&1 || true
+elif command -v python >/dev/null 2>&1; then
+    python -m cortexforge.apps.cli.main hooks handle --hook {hook_name} --path "$PWD" "$@" >/dev/null 2>&1 || true
+fi
+{HOOK_END_MARKER}
+"""
+
+
+@cli.group(help="Manage Git hooks for automatic CortexForge job dispatch.")
+def hooks() -> None:
+    pass
+
+
+@hooks.command("install", help="Install post-commit, post-merge, and post-checkout Git hooks.")
+@click.argument("path", default=".", type=click.Path(exists=True, file_okay=False))
+def install_hooks(path: str) -> None:
+    """Install git hooks into .git/hooks/ idempotently."""
+    canonical_path = os.path.realpath(path)
+    git_dir = os.path.join(canonical_path, ".git")
+    if not os.path.isdir(git_dir):
+        console.print(f"[bold red]Error:[/] '{canonical_path}' is not a Git repository (.git not found).")
         sys.exit(1)
+
+    hooks_dir = os.path.join(git_dir, "hooks")
+    os.makedirs(hooks_dir, exist_ok=True)
+
+    installed = []
+    for hook_name in SUPPORTED_HOOKS:
+        hook_path = os.path.join(hooks_dir, hook_name)
+        hook_content = _generate_hook_script(hook_name)
+
+        if os.path.exists(hook_path):
+            with open(hook_path, "r", encoding="utf-8") as f:
+                existing_text = f.read()
+            if HOOK_START_MARKER in existing_text:
+                installed.append(f"{hook_name} (already installed)")
+                continue
+            new_text = existing_text.rstrip() + "\n\n" + hook_content
+        else:
+            new_text = "#!/bin/sh\n\n" + hook_content
+
+        with open(hook_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(new_text)
+
+        try:
+            current_mode = os.stat(hook_path).st_mode
+            os.chmod(hook_path, current_mode | 0o755)
+        except OSError:
+            pass
+
+        installed.append(hook_name)
+
+    console.print(f"[bold green]CortexForge Git hooks installed:[/] {', '.join(installed)}")
+
+
+@hooks.command("uninstall", help="Remove CortexForge hooks from Git repository.")
+@click.argument("path", default=".", type=click.Path(exists=True, file_okay=False))
+def uninstall_hooks(path: str) -> None:
+    """Remove CortexForge git hooks idempotently."""
+    canonical_path = os.path.realpath(path)
+    git_dir = os.path.join(canonical_path, ".git")
+    if not os.path.isdir(git_dir):
+        console.print(f"[bold red]Error:[/] '{canonical_path}' is not a Git repository (.git not found).")
+        sys.exit(1)
+
+    hooks_dir = os.path.join(git_dir, "hooks")
+    removed = []
+
+    for hook_name in SUPPORTED_HOOKS:
+        hook_path = os.path.join(hooks_dir, hook_name)
+        if not os.path.exists(hook_path):
+            continue
+
+        with open(hook_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        if HOOK_START_MARKER not in content:
+            continue
+
+        start_idx = content.find(HOOK_START_MARKER)
+        end_idx = content.find(HOOK_END_MARKER) + len(HOOK_END_MARKER)
+        remaining = (content[:start_idx] + content[end_idx:]).strip()
+
+        if not remaining or remaining == "#!/bin/sh":
+            os.remove(hook_path)
+        else:
+            with open(hook_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(remaining + "\n")
+
+        removed.append(hook_name)
+
+    if removed:
+        console.print(f"[bold green]Removed CortexForge Git hooks:[/] {', '.join(removed)}")
+    else:
+        console.print("[dim]No CortexForge Git hooks found to remove.[/]")
+
+
+@hooks.command("handle", help="Enqueue background durable job when Git hook fires.")
+@click.option("--hook", required=True, help="Name of the hook (post-commit, post-merge, post-checkout)")
+@click.option("--path", default=".", help="Repository root path")
+def handle_hook(hook: str, path: str) -> None:
+    """Enqueue durable background scan job without blocking git execution."""
+    from cortexforge.jobs.durable import DurableJobStore
+
+    canonical_path = os.path.realpath(path)
+
+    async def _do_handle() -> None:
+        await init_db()
+        async with session_scope() as session:
+            stmt = select(Project).where(Project.local_path == canonical_path)
+            res = await session.execute(stmt)
+            project = res.scalars().first()
+            if not project:
+                return
+
+            store = DurableJobStore()
+            await store.submit(
+                session,
+                job_type="scan_project",
+                project_id=project.id,
+                parameters={"incremental": True, "hook": hook},
+            )
+            await session.commit()
+
+    try:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                pool.submit(asyncio.run, _do_handle()).result()
+        else:
+            asyncio.run(_do_handle())
+    except Exception as e:
+        sys.stderr.write(f"CortexForge hook dispatch warning: {e}\n")
 
 
 @cli.command(help="Start the FastAPI REST gateway server.")
