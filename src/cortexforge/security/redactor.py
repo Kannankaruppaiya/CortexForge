@@ -46,7 +46,7 @@ SECRET_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     (
         "GENERIC_PASSWORD",
         re.compile(
-            r"""(?i)(?:api_key|apikey|secret|password|passwd|auth_token|access_token)\s*[:=]\s*['"]([a-zA-Z0-9!@#$%^&*()_+\-=\[\]{}|;:,.<>?/~`]{8,})['"]""",
+            r"""(?i)(?:api_key|apikey|secret|password|passwd|auth_token|access_token|secret_key|secret_access_key)\s*[:=]\s*(?:['"]([^\s'"]{8,})['"]|([^\s'"]{8,}))""",
             re.ASCII,
         ),
     ),
@@ -73,10 +73,13 @@ class SecretRedactor:
             if name == "GENERIC_PASSWORD":
                 # Only the captured password is replaced, not the whole assignment,
                 # so the surrounding text stays readable.
-                redacted = pattern.sub(
-                    lambda m: m.group(0).replace(m.group(1), "[REDACTED_CREDENTIAL]"),
-                    redacted,
-                )
+                def _replace_generic(m: re.Match[str]) -> str:
+                    secret_val = m.group(1) or m.group(2)
+                    if secret_val:
+                        return m.group(0).replace(secret_val, "[REDACTED_CREDENTIAL]")
+                    return m.group(0)
+
+                redacted = pattern.sub(_replace_generic, redacted)
             elif name == "DB_CREDENTIALS":
                 # Keep the scheme and everything after the credentials: a memory
                 # that records "we connect to postgres on db.internal" is useful,
