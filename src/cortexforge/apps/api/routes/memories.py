@@ -10,7 +10,7 @@ from cortexforge.core.db import get_db_session
 from cortexforge.core.models import Project
 from cortexforge.core.schemas import MemoryCreate, MemoryRead
 from cortexforge.memory.consolidation import MemoryConsolidationEngine
-from cortexforge.memory.service import MemoryService
+from cortexforge.memory.service import ConcurrentModificationError, MemoryService
 from cortexforge.memory.verification import MemoryVerificationEngine
 
 router = APIRouter(tags=["memories"])
@@ -24,6 +24,7 @@ class MemoryUpdatePayload(BaseModel):
     change_reason: str
     title: str | None = None
     summary: str | None = None
+    expected_version: int | None = None
 
 
 class MemoryDeprecatePayload(BaseModel):
@@ -90,15 +91,20 @@ async def update_memory(
     payload: MemoryUpdatePayload,
     session: AsyncSession = Depends(get_db_session),
 ) -> MemoryRead:
-    """Update memory content with audit-trailed version increment."""
-    updated = await memory_service.update_memory(
-        session,
-        memory_id=memory_id,
-        content=payload.content,
-        change_reason=payload.change_reason,
-        title=payload.title,
-        summary=payload.summary,
-    )
+    """Update memory content with audit-trailed version increment and optimistic locking."""
+    try:
+        updated = await memory_service.update_memory(
+            session,
+            memory_id=memory_id,
+            content=payload.content,
+            change_reason=payload.change_reason,
+            title=payload.title,
+            summary=payload.summary,
+            expected_version=payload.expected_version,
+        )
+    except ConcurrentModificationError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+
     if not updated:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found")
     return MemoryRead.model_validate(updated)

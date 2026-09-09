@@ -47,6 +47,22 @@ def cosine_similarity(v1: list[float], v2: list[float]) -> float:
 
 # Memory types whose assertions are costly to get wrong, and therefore route
 # through review unless the user stated them directly (section 43).
+class MemoryServiceError(Exception):
+    """Base exception for memory service operations."""
+
+
+class ConcurrentModificationError(MemoryServiceError):
+    """Raised when an update specifies an expected_version that differs from current state."""
+
+    def __init__(self, memory_id: str, current_version: int, expected_version: int) -> None:
+        super().__init__(
+            f"Concurrent modification on memory '{memory_id}': expected version {expected_version}, but current version is {current_version}"
+        )
+        self.memory_id = memory_id
+        self.current_version = current_version
+        self.expected_version = expected_version
+
+
 _REVIEW_REQUIRED_TYPES: frozenset[str] = frozenset(
     {"CONSTRAINT", "ARCHITECTURE", "SECURITY"}
 )
@@ -307,11 +323,19 @@ class MemoryService:
         change_reason: str,
         title: str | None = None,
         summary: str | None = None,
+        expected_version: int | None = None,
     ) -> Memory | None:
-        """Mutate memory content and increment version audit trail."""
+        """Mutate memory content and increment version audit trail with optimistic locking."""
         memory = await self.get_memory(session, memory_id)
         if not memory:
             return None
+
+        if expected_version is not None and memory.version != expected_version:
+            raise ConcurrentModificationError(
+                memory_id=memory.id,
+                current_version=memory.version,
+                expected_version=expected_version,
+            )
 
         prev_version = memory.version
         memory.version += 1

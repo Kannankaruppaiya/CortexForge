@@ -17,7 +17,7 @@ from cortexforge.graph.service import GraphService
 from cortexforge.memory.claims import ClaimService
 from cortexforge.memory.consolidation import MemoryConsolidationEngine
 from cortexforge.memory.provenance import ProvenanceEngine
-from cortexforge.memory.service import MemoryService
+from cortexforge.memory.service import ConcurrentModificationError, MemoryService
 from cortexforge.memory.snapshots import CognitiveSnapshotEngine
 from cortexforge.memory.verification import MemoryVerificationEngine
 from cortexforge.retrieval.composer import ContextComposer
@@ -336,7 +336,7 @@ async def memory_create(
 
 @mcp_server.tool(
     name="memory_update",
-    description="Updates existing memory content, automatically incrementing version and recording change rationale in audit trail.",
+    description="Updates existing memory content with optimistic locking, automatically incrementing version and recording change rationale in audit trail.",
 )
 async def memory_update(
     memory_id: str,
@@ -344,21 +344,26 @@ async def memory_update(
     change_reason: str,
     title: str | None = None,
     summary: str | None = None,
+    expected_version: int | None = None,
 ) -> str:
-    """Update memory with audit trail."""
+    """Update memory with audit trail and optimistic locking."""
     await init_db()
     async with session_scope() as session:
-        updated = await memory_service.update_memory(
-            session,
-            memory_id=memory_id,
-            content=content,
-            change_reason=change_reason,
-            title=title,
-            summary=summary,
-        )
-        if not updated:
-            return f"Memory with ID '{memory_id}' not found."
-        return f"Successfully updated memory '{updated.title}' to version v{updated.version}."
+        try:
+            updated = await memory_service.update_memory(
+                session,
+                memory_id=memory_id,
+                content=content,
+                change_reason=change_reason,
+                title=title,
+                summary=summary,
+                expected_version=expected_version,
+            )
+            if not updated:
+                return f"Memory with ID '{memory_id}' not found."
+            return f"Successfully updated memory '{updated.title}' to version v{updated.version}."
+        except ConcurrentModificationError as e:
+            return f"Conflict Error: {e}"
 
 
 @mcp_server.tool(
