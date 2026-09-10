@@ -176,9 +176,11 @@ if _dist_dir.exists() and (_dist_dir / "index.html").exists():
     if _assets_dir.exists():
         app.mount("/assets", StaticFiles(directory=str(_assets_dir)), name="assets")
 
-    @app.get("/{full_path:path}", include_in_schema=False)
-    async def serve_spa(full_path: str) -> FileResponse:
-        """Serve built React single-page application and static assets."""
+
+@app.get("/{full_path:path}", include_in_schema=False)
+async def serve_spa(full_path: str) -> FileResponse:
+    """Serve built React single-page application and static assets."""
+    if _dist_dir.exists() and (_dist_dir / "index.html").exists():
         if full_path:
             try:
                 from cortexforge.security.path_safety import (
@@ -193,3 +195,7 @@ if _dist_dir.exists() and (_dist_dir / "index.html").exists():
             except (PathSecurityError, ValueError):
                 pass
         return FileResponse(_dist_dir / "index.html")
+
+    from fastapi import HTTPException
+
+    raise HTTPException(status_code=404, detail="Web dashboard assets not built.")

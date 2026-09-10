@@ -35,7 +35,6 @@ from cortexforge.agent.test_intelligence import (
     TestCaseResult,
     TestIntelligenceEngine,
 )
-from cortexforge.apps.api.main import serve_spa
 from cortexforge.apps.mcp.server import memory_create
 from cortexforge.cognition.authority import Authority
 from cortexforge.cognition.promotion import evaluate_memory_promotion
@@ -195,9 +194,16 @@ def test_d_evidence_path_escape_blocked(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_d_spa_serve_path_escape_blocked():
+async def test_d_spa_serve_path_escape_blocked(tmp_path, monkeypatch):
     """serve_spa must refuse path traversal outside dist directory."""
-    resp = await serve_spa("../../../pyproject.toml")
+    from cortexforge.apps.api import main as api_main
+
+    fake_dist = tmp_path / "web" / "dist"
+    fake_dist.mkdir(parents=True)
+    (fake_dist / "index.html").write_text("<html>INDEX</html>", encoding="utf-8")
+    monkeypatch.setattr(api_main, "_dist_dir", fake_dist)
+
+    resp = await api_main.serve_spa("../../../pyproject.toml")
     assert not str(resp.path).endswith("pyproject.toml")
     assert str(resp.path).endswith("index.html")
 
