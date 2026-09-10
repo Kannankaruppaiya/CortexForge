@@ -1,5 +1,6 @@
 """FastAPI application entrypoint for CortexForge Gateway."""
 
+import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -50,10 +51,26 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# CORS Configuration (§19): explicit origins, no wildcard credentials
+allowed_origins_env = os.environ.get("CORTEX_ALLOWED_ORIGINS", "").strip()
+if allowed_origins_env:
+    allowed_origins = [o.strip() for o in allowed_origins_env.split(",") if o.strip()]
+    allow_credentials = "*" not in allowed_origins
+else:
+    allowed_origins = [
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://localhost:8000",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:8000",
+    ]
+    allow_credentials = True
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=allowed_origins,
+    allow_credentials=allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -61,11 +78,8 @@ app.add_middleware(
 
 @app.middleware("http")
 async def tracing_middleware(request: Request, call_next):
-    """Ambient distributed tracing middleware with X-Trace-ID injection."""
-    trace_id = request.headers.get("x-trace-id") or request.headers.get("traceparent")
-    if trace_id and trace_id.count("-") == 3:
-        parts = trace_id.split("-")
-        trace_id = parts[1]
+    """Ambient distributed tracing middleware with validated trace context (§20)."""
+    import re
 
     from cortexforge.observability.tracing import (
         _CURRENT_TRACE_ID,
@@ -74,8 +88,35 @@ async def tracing_middleware(request: Request, call_next):
         start_async_span,
     )
 
+    raw_traceparent = request.headers.get("traceparent")
+    raw_trace_id = request.headers.get("x-trace-id")
+    trace_id: str | None = None
+
+    # Validate standard W3C traceparent (version-traceid-parentid-traceflags)
+    if raw_traceparent and re.match(
+        r"^00-[0-9a-fA-F]{32}-[0-9a-fA-F]{16}-[0-9a-fA-F]{2}$", raw_traceparent
+    ):
+        parts = raw_traceparent.split("-")
+        if parts[1] != "0" * 32:
+            trace_id = parts[1].lower()
+
+    # If no valid traceparent, validate x-trace-id for hexadecimal characters (16-64 chars)
+    if not trace_id and raw_trace_id:
+        cleaned = raw_trace_id.strip()
+        if re.match(r"^[0-9a-fA-F]{16,64}$", cleaned):
+            trace_id = cleaned.lower()
+
+    # Generate cryptographically secure trace ID if missing or untrusted
     if not trace_id:
         trace_id = generate_trace_id()
+
+    # Extract client IP respecting reverse proxies if valid
+    client_ip = "unknown"
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        client_ip = forwarded.split(",")[0].strip()
+    elif request.client and request.client.host:
+        client_ip = request.client.host
 
     _CURRENT_TRACE_ID.set(trace_id)
     set_correlation_context(trace_id=trace_id)
@@ -85,7 +126,7 @@ async def tracing_middleware(request: Request, call_next):
         {
             "http.method": request.method,
             "http.url": str(request.url.path),
-            "http.client_ip": request.client.host if request.client else "unknown",
+            "http.client_ip": client_ip,
         },
     ) as span:
         response = await call_next(request)
@@ -113,21 +154,52 @@ app.include_router(jobs.router, prefix="/api/v1")
 @app.get("/health", response_model=HealthResponse, tags=["health"])
 @app.get("/api/v1/health", response_model=HealthResponse, tags=["health"])
 async def health_check() -> HealthResponse:
-    """System health check endpoint."""
+    """System health check endpoint with active database verification (§15)."""
+    import asyncio
+
+    from sqlalchemy import text
+
+    from cortexforge.core.db import session_scope
+
+    database_connected = False
+    try:
+        async with asyncio.timeout(2.0):
+            async with session_scope() as session:
+                res = await session.execute(text("SELECT 1"))
+                database_connected = bool(res.scalar() == 1)
+    except Exception:
+        database_connected = False
+
+    status = "healthy" if database_connected else "degraded"
     return HealthResponse(
-        status="healthy",
-        database_connected=True,
+        status=status,
+        database_connected=database_connected,
         version="0.1.0",
         timestamp=datetime.now(UTC),
     )
 
 
+@app.get("/metrics", tags=["observability"])
 @app.get("/api/v1/metrics", tags=["observability"])
-async def get_metrics():
-    """Retrieve runtime performance telemetry and counters."""
+async def get_metrics(request: Request, format: str | None = None):
+    """Retrieve runtime performance telemetry and counters (§21)."""
+    from fastapi.responses import PlainTextResponse
+
     from cortexforge.observability.metrics import MetricsCollector
 
-    return MetricsCollector.get_instance().get_snapshot()
+    collector = MetricsCollector.get_instance()
+    accept = request.headers.get("accept", "")
+    if (
+        format == "prometheus"
+        or "text/plain" in accept
+        or request.url.path == "/metrics"
+    ):
+        return PlainTextResponse(
+            collector.to_prometheus_text(),
+            media_type="text/plain; version=0.0.4",
+        )
+
+    return collector.get_snapshot()
 
 
 @app.get("/api/v1/traces", tags=["observability"])

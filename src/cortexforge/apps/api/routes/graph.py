@@ -8,8 +8,13 @@ from cortexforge.core.db import get_db_session
 from cortexforge.core.models import Project
 from cortexforge.core.schemas import ChangeImpactRequest, ChangeImpactResponse
 from cortexforge.graph.service import GraphService
+from cortexforge.security.auth import RequireProjectAccess
 
-router = APIRouter(prefix="/projects", tags=["graph"])
+router = APIRouter(
+    prefix="/projects",
+    tags=["graph"],
+    dependencies=[Depends(RequireProjectAccess())],
+)
 graph_service = GraphService()
 change_propagator = SemanticChangePropagator(graph_service=graph_service)
 

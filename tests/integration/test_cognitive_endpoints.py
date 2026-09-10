@@ -91,6 +91,7 @@ async def test_cognitive_rest_endpoints(tmp_path):
         await session.flush()
 
         ev = MemoryEvidence(
+            project_id=project_id,
             memory_id=mem.id,
             source_type="code",
             file_path="apps/web/controllers.py",

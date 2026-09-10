@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -180,9 +180,19 @@ class DurableJobStore:
         """
         now = datetime.now(UTC)
 
+        # Filter unclaimable and unexpired running jobs directly in SQL to prevent queue starvation (§23)
         stmt = (
             select(Job)
-            .where(Job.status.in_(CLAIMABLE_STATUSES))
+            .where(
+                Job.attempt < Job.max_attempts,
+                or_(
+                    Job.status == STATUS_PENDING,
+                    and_(
+                        Job.status == STATUS_RUNNING,
+                        Job.lease_expires_at <= now,
+                    ),
+                ),
+            )
             .order_by(Job.created_at)
             .limit(CLAIM_SCAN_LIMIT)
         )
@@ -341,6 +351,20 @@ class DurableJobStore:
                 error[:200],
             )
 
+        await session.flush()
+        return job
+
+    async def cancel(self, session: AsyncSession, job_id: str) -> Job | None:
+        """Cancel an existing job, terminating future claims and clearing active lease (§24)."""
+        job = await session.get(Job, job_id)
+        if job is None:
+            return None
+        if job.status in (STATUS_COMPLETED, STATUS_FAILED):
+            return job
+        job.status = STATUS_CANCELLED
+        job.lease_owner = None
+        job.lease_expires_at = None
+        job.completed_at = datetime.now(UTC)
         await session.flush()
         return job
 

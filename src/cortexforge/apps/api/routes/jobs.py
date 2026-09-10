@@ -3,7 +3,7 @@
 import asyncio
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
 from cortexforge.core.db import session_scope
 from cortexforge.core.models import Job
@@ -14,6 +14,11 @@ from cortexforge.jobs.tasks import (
     consolidate_project_task,
     rebuild_project_task,
     scan_project_task,
+)
+from cortexforge.security.auth import (
+    Principal,
+    RequireProjectAccess,
+    get_current_principal,
 )
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -50,15 +55,30 @@ def _dispatch_runner_background() -> None:
 
 
 @router.get("", response_model=list[dict[str, Any]])
-async def list_jobs(project_id: str | None = None) -> list[dict[str, Any]]:
-    """List background jobs optionally filtered by project_id."""
+async def list_jobs(
+    project_id: str | None = None,
+    principal: Principal = Depends(get_current_principal),
+) -> list[dict[str, Any]]:
+    """List background jobs optionally filtered by project_id with authorization enforcement."""
+    if project_id:
+        RequireProjectAccess.check_access(principal, project_id)
     async with session_scope() as session:
         jobs = await job_store.list_jobs(session, project_id=project_id)
+        # Filter jobs by authorized projects if not admin and project_id not given
+        if not principal.is_admin and not project_id:
+            jobs = [
+                j
+                for j in jobs
+                if not j.project_id or j.project_id in principal.allowed_project_ids
+            ]
         return [_serialize_job(j) for j in jobs]
 
 
 @router.get("/{job_id}")
-async def get_job(job_id: str) -> dict[str, Any]:
+async def get_job(
+    job_id: str,
+    principal: Principal = Depends(get_current_principal),
+) -> dict[str, Any]:
     """Get status and result for a specific background job."""
     async with session_scope() as session:
         job = await session.get(Job, job_id)
@@ -67,10 +87,34 @@ async def get_job(job_id: str) -> dict[str, Any]:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Job '{job_id}' not found",
             )
+        if job.project_id:
+            RequireProjectAccess.check_access(principal, job.project_id)
         return _serialize_job(job)
 
 
-@router.post("/projects/{project_id}/rebuild")
+@router.post("/{job_id}/cancel")
+async def cancel_job(
+    job_id: str,
+    principal: Principal = Depends(get_current_principal),
+) -> dict[str, Any]:
+    """Cancel an active or pending background job (§24)."""
+    async with session_scope() as session:
+        job = await session.get(Job, job_id)
+        if not job:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Job '{job_id}' not found",
+            )
+        if job.project_id:
+            RequireProjectAccess.check_access(principal, job.project_id)
+        cancelled = await job_store.cancel(session, job_id)
+        return _serialize_job(cancelled or job)
+
+
+@router.post(
+    "/projects/{project_id}/rebuild",
+    dependencies=[Depends(RequireProjectAccess())],
+)
 async def trigger_rebuild_job(project_id: str) -> dict[str, Any]:
     """Trigger background clean rebuild and recovery of project cognitive model."""
     async with session_scope() as session:
@@ -84,8 +128,14 @@ async def trigger_rebuild_job(project_id: str) -> dict[str, Any]:
     return data
 
 
-@router.post("/projects/{project_id}/scan")
-async def trigger_scan_job(project_id: str, incremental: bool = True) -> dict[str, Any]:
+@router.post(
+    "/projects/{project_id}/scan",
+    dependencies=[Depends(RequireProjectAccess())],
+)
+async def trigger_scan_job(
+    project_id: str,
+    incremental: bool = True,
+) -> dict[str, Any]:
     """Trigger background AST scanner job."""
     async with session_scope() as session:
         job, _ = await job_store.submit(
@@ -99,7 +149,10 @@ async def trigger_scan_job(project_id: str, incremental: bool = True) -> dict[st
     return data
 
 
-@router.post("/projects/{project_id}/consolidate")
+@router.post(
+    "/projects/{project_id}/consolidate",
+    dependencies=[Depends(RequireProjectAccess())],
+)
 async def trigger_consolidation_job(project_id: str) -> dict[str, Any]:
     """Trigger background memory consolidation job."""
     async with session_scope() as session:

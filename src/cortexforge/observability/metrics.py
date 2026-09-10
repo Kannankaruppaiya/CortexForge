@@ -196,6 +196,40 @@ class MetricsCollector:
             cache_hit_rate_pct=round(hit_rate, 1),
         )
 
+    def to_prometheus_text(self) -> str:
+        """Render metrics in standard Prometheus exposition format."""
+        snap = self.get_snapshot()
+        lines = [
+            "# HELP cortexforge_uptime_seconds Process uptime in seconds",
+            "# TYPE cortexforge_uptime_seconds gauge",
+            f"cortexforge_uptime_seconds {snap.uptime_seconds}",
+            "# HELP cortexforge_http_requests_total Total HTTP requests handled",
+            "# TYPE cortexforge_http_requests_total counter",
+            f"cortexforge_http_requests_total {snap.total_requests}",
+            "# HELP cortexforge_request_latency_ms Average HTTP request latency in ms",
+            "# TYPE cortexforge_request_latency_ms gauge",
+            f"cortexforge_request_latency_ms {snap.avg_request_latency_ms}",
+            "# HELP cortexforge_retrievals_total Total memory retrievals",
+            "# TYPE cortexforge_retrievals_total counter",
+            f"cortexforge_retrievals_total {snap.total_retrievals}",
+            "# HELP cortexforge_retrieval_latency_ms Average retrieval latency in ms",
+            "# TYPE cortexforge_retrieval_latency_ms gauge",
+            f"cortexforge_retrieval_latency_ms {snap.avg_retrieval_latency_ms}",
+            "# HELP cortexforge_embeddings_total Total embedding calls",
+            "# TYPE cortexforge_embeddings_total counter",
+            f"cortexforge_embeddings_total {snap.total_embeddings}",
+            "# HELP cortexforge_indexing_ops_total Total indexing operations",
+            "# TYPE cortexforge_indexing_ops_total counter",
+            f"cortexforge_indexing_ops_total {snap.total_indexing_ops}",
+            "# HELP cortexforge_memory_writes_total Total memory writes",
+            "# TYPE cortexforge_memory_writes_total counter",
+            f"cortexforge_memory_writes_total {snap.memory_writes}",
+            "# HELP cortexforge_cache_hit_rate_pct Memory cache hit rate percentage",
+            "# TYPE cortexforge_cache_hit_rate_pct gauge",
+            f"cortexforge_cache_hit_rate_pct {snap.cache_hit_rate_pct}",
+        ]
+        return "\n".join(lines) + "\n"
+
     def safe_log_event(self, event_name: str, payload: dict[str, Any]) -> None:
         """Log structured telemetry event guaranteeing secret redaction."""
         serialized = json.dumps(payload, default=str)

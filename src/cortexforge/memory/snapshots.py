@@ -61,6 +61,17 @@ class CognitiveSnapshotEngine:
         workspace: str | None = None,
     ) -> CognitiveSnapshot:
         """Record what the project believes, in full, at ``commit_sha``."""
+        # Serialize concurrent snapshot operations per project via parent row lock
+        try:
+            await session.execute(
+                select(Project.id).where(Project.id == project_id).with_for_update()
+            )
+        except Exception as exc:
+            logger.debug(
+                "Parent row lock not acquired (dialect may not support FOR UPDATE): %s",
+                exc,
+            )
+
         memories = list(
             (
                 await session.execute(
@@ -182,16 +193,14 @@ class CognitiveSnapshotEngine:
             }
         )
 
-        generation = (
-            (
-                await session.execute(
-                    select(func.count(CognitiveSnapshot.id)).where(
-                        CognitiveSnapshot.project_id == project_id
-                    )
-                )
-            ).scalar()
-            or 0
-        ) + 1
+        max_gen = (
+            await session.execute(
+                select(
+                    func.coalesce(func.max(CognitiveSnapshot.cognitive_generation), 0)
+                ).where(CognitiveSnapshot.project_id == project_id)
+            )
+        ).scalar() or 0
+        generation = int(max_gen) + 1
 
         counts = {state: 0 for state in (m.status for m in memories)}
         for memory in memories:
@@ -398,6 +407,7 @@ class CognitiveSnapshotEngine:
             "project_id": project_id,
             "commit_sha": commit_sha,
             "replay_available": True,
+            "historical_reference_mode": "SNAPSHOT_REFERENCE",
             "task_text": task_text,
             "profile": profile,
             "snapshot_id": snapshot.id,

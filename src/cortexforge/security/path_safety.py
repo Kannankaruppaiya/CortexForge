@@ -24,22 +24,28 @@ class PathSecurity:
         if not raw_sub:
             raise PathSecurityError("Empty subpath provided.")
 
-        # Check if subpath is UNC network path
-        if raw_sub.startswith(("\\\\", "//")):
-            raise PathSecurityError(f"UNC network paths are prohibited: '{subpath}'")
+        # Check if subpath is UNC network path or Windows device/extended path
+        if raw_sub.startswith(("\\\\", "//", "\\??\\", "/??/")):
+            raise PathSecurityError(
+                f"UNC and extended device paths are prohibited: '{subpath}'"
+            )
 
         # Normalize backslashes for cross-platform traversal detection
         clean_sub = raw_sub.replace("\\", "/")
 
         # Check if subpath is absolute, root-anchored, or drive-anchored
-        sub_p = Path(clean_sub)
-        if (
-            sub_p.is_absolute()
+        is_abs_or_anchored = (
+            raw_sub.startswith(("/", "\\"))
             or clean_sub.startswith("/")
             or (len(clean_sub) > 1 and clean_sub[1] == ":")
-        ):
+            or Path(raw_sub).is_absolute()
+            or Path(clean_sub).is_absolute()
+        )
+
+        if is_abs_or_anchored:
             candidate = Path(raw_sub).resolve()
         else:
+            sub_p = Path(clean_sub)
             candidate = (canonical_root / sub_p).resolve()
 
         # Check containment within canonical project root

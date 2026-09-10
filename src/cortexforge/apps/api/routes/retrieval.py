@@ -14,8 +14,13 @@ from cortexforge.core.db import get_db_session
 from cortexforge.core.models import Project
 from cortexforge.retrieval.composer import ContextComposer
 from cortexforge.retrieval.engine import HybridRetrievalEngine, ScoredItem
+from cortexforge.security.auth import RequireProjectAccess
 
-router = APIRouter(prefix="/projects", tags=["retrieval"])
+router = APIRouter(
+    prefix="/projects",
+    tags=["retrieval"],
+    dependencies=[Depends(RequireProjectAccess())],
+)
 retrieval_engine = HybridRetrievalEngine()
 context_composer = ContextComposer(retrieval_engine=retrieval_engine)
 change_propagator = SemanticChangePropagator()

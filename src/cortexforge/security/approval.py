@@ -9,7 +9,7 @@ import hashlib
 import secrets
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cortexforge.core.models import HumanApprovalRecord
@@ -125,8 +125,19 @@ class ApprovalService:
         if record.payload_digest != expected_digest:
             return None, "Payload digest does not match approved memory content."
 
-        # Mark single-use token consumed
-        record.status = "CONSUMED"
-        record.consumed_at = now
+        # Mark single-use token consumed atomically via CAS to prevent concurrent replay
+        cas_stmt = (
+            update(HumanApprovalRecord)
+            .where(
+                HumanApprovalRecord.id == record.id,
+                HumanApprovalRecord.status == "APPROVED",
+            )
+            .values(status="CONSUMED", consumed_at=now)
+        )
+        res = await session.execute(cas_stmt)
+        if res.rowcount == 0:
+            return None, "Approval token was concurrently consumed."
+
         await session.commit()
+        await session.refresh(record)
         return record, None

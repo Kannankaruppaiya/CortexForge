@@ -12,6 +12,11 @@ from cortexforge.core.schemas import MemoryCreate, MemoryRead
 from cortexforge.memory.consolidation import MemoryConsolidationEngine
 from cortexforge.memory.service import ConcurrentModificationError, MemoryService
 from cortexforge.memory.verification import MemoryVerificationEngine
+from cortexforge.security.auth import (
+    Principal,
+    RequireProjectAccess,
+    get_current_principal,
+)
 
 router = APIRouter(tags=["memories"])
 memory_service = MemoryService()
@@ -41,6 +46,7 @@ async def create_memory(
     project_id: str,
     payload: MemoryCreate,
     session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(RequireProjectAccess("project_id")),
 ) -> MemoryRead:
     """Create a durable, evidence-grounded project memory."""
     project = await session.get(Project, project_id)
@@ -62,6 +68,7 @@ async def list_memories(
     limit: int = 50,
     offset: int = 0,
     session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(RequireProjectAccess("project_id")),
 ) -> list[MemoryRead]:
     """List project memories with multi-attribute filtering."""
     project = await session.get(Project, project_id)
@@ -84,13 +91,20 @@ async def list_memories(
 
 @router.get("/memories/{memory_id}", response_model=MemoryRead)
 async def get_memory(
-    memory_id: str, session: AsyncSession = Depends(get_db_session)
+    memory_id: str,
+    session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(get_current_principal),
 ) -> MemoryRead:
     """Retrieve full memory record with evidences and version history."""
     memory = await memory_service.get_memory(session, memory_id)
     if not memory:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found"
+        )
+    if not principal.can_access_project(memory.project_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied to project '{memory.project_id}' for this memory.",
         )
     return MemoryRead.model_validate(memory)
 
@@ -100,8 +114,20 @@ async def update_memory(
     memory_id: str,
     payload: MemoryUpdatePayload,
     session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(get_current_principal),
 ) -> MemoryRead:
     """Update memory content with audit-trailed version increment and optimistic locking."""
+    target_mem = await memory_service.get_memory(session, memory_id)
+    if not target_mem:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found"
+        )
+    if not principal.can_access_project(target_mem.project_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied to project '{target_mem.project_id}'.",
+        )
+
     try:
         updated = await memory_service.update_memory(
             session,
@@ -124,13 +150,20 @@ async def update_memory(
 
 @router.post("/memories/{memory_id}/verify")
 async def verify_memory(
-    memory_id: str, session: AsyncSession = Depends(get_db_session)
+    memory_id: str,
+    session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(get_current_principal),
 ) -> dict[str, Any]:
     """Trigger active verification of a memory against current source code."""
     memory = await memory_service.get_memory(session, memory_id)
     if not memory:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found"
+        )
+    if not principal.can_access_project(memory.project_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied to project '{memory.project_id}'.",
         )
 
     project = await session.get(Project, memory.project_id)
@@ -155,8 +188,20 @@ async def deprecate_memory(
     memory_id: str,
     payload: MemoryDeprecatePayload,
     session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(get_current_principal),
 ) -> MemoryRead:
     """Deprecate a memory with explicit supersession or invalidation reason."""
+    target_mem = await memory_service.get_memory(session, memory_id)
+    if not target_mem:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found"
+        )
+    if not principal.can_access_project(target_mem.project_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied to project '{target_mem.project_id}'.",
+        )
+
     deprecated = await memory_service.deprecate_memory(
         session,
         memory_id=memory_id,
@@ -172,7 +217,9 @@ async def deprecate_memory(
 
 @router.post("/projects/{project_id}/consolidate")
 async def consolidate_memories(
-    project_id: str, session: AsyncSession = Depends(get_db_session)
+    project_id: str,
+    session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(RequireProjectAccess("project_id")),
 ) -> dict[str, Any]:
     """Trigger memory consolidation loop."""
     project = await session.get(Project, project_id)

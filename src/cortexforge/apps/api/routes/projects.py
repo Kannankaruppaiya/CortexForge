@@ -20,6 +20,12 @@ from cortexforge.evaluation.runner import EvaluationRunner
 from cortexforge.graph.service import GraphService
 from cortexforge.retrieval.composer import ContextComposer
 from cortexforge.retrieval.engine import HybridRetrievalEngine
+from cortexforge.security.auth import (
+    Principal,
+    RequireProjectAccess,
+    get_current_principal,
+    verify_workspace_path_allowed,
+)
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 scanner = RepositoryScanner()
@@ -37,10 +43,13 @@ evaluation_runner = EvaluationRunner(
 
 @router.post("", response_model=ProjectRead, status_code=status.HTTP_201_CREATED)
 async def create_project(
-    payload: ProjectCreate, session: AsyncSession = Depends(get_db_session)
+    payload: ProjectCreate,
+    session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(get_current_principal),
 ) -> ProjectRead:
     """Register a new repository with CortexForge."""
-    canonical_path = os.path.realpath(payload.local_path)
+    # Enforce workspace allowlist security boundary (Blocker 2)
+    canonical_path = verify_workspace_path_allowed(payload.local_path)
     if not os.path.exists(canonical_path):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -73,6 +82,7 @@ async def create_project(
 @router.get("", response_model=list[ProjectRead])
 async def list_projects(
     session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(get_current_principal),
 ) -> list[ProjectRead]:
     """List all registered projects."""
     stmt = select(Project).order_by(Project.created_at.desc())
@@ -81,6 +91,8 @@ async def list_projects(
     results: list[ProjectRead] = []
 
     for p in projects:
+        if not principal.can_access_project(p.id):
+            continue
         # Count entities & memories
         entity_count = await session.scalar(
             select(func.count(CodeEntity.id)).where(CodeEntity.project_id == p.id)
@@ -98,7 +110,9 @@ async def list_projects(
 
 @router.get("/{project_id}", response_model=ProjectRead)
 async def get_project(
-    project_id: str, session: AsyncSession = Depends(get_db_session)
+    project_id: str,
+    session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(RequireProjectAccess("project_id")),
 ) -> ProjectRead:
     """Retrieve details for a registered project."""
     project = await session.get(Project, project_id)
@@ -121,7 +135,9 @@ async def get_project(
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_project(
-    project_id: str, session: AsyncSession = Depends(get_db_session)
+    project_id: str,
+    session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(RequireProjectAccess("project_id")),
 ) -> None:
     """Unregister and remove a project and all associated entities."""
     project = await session.get(Project, project_id)
@@ -138,6 +154,7 @@ async def scan_project(
     project_id: str,
     payload: ScanRequest | None = None,
     session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(RequireProjectAccess("project_id")),
 ) -> ScanResponse:
     """Trigger AST scan of the project repository."""
     project = await session.get(Project, project_id)
@@ -159,6 +176,7 @@ async def get_project_architecture(
     project_id: str,
     depth: int = 2,
     session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(RequireProjectAccess("project_id")),
 ) -> ArchitectureResponse:
     """Retrieve synthesized structural architecture of the project."""
     arch = await graph_service.get_project_architecture(
@@ -173,7 +191,9 @@ async def get_project_architecture(
 
 @router.post("/{project_id}/benchmark")
 async def run_project_benchmark(
-    project_id: str, session: AsyncSession = Depends(get_db_session)
+    project_id: str,
+    session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(RequireProjectAccess("project_id")),
 ) -> list[dict]:
     """Run real empirical benchmark suite on project."""
     project = await session.get(Project, project_id)
@@ -381,13 +401,21 @@ async def get_project_economics(
     )
 
     return {
+        "is_modelled_estimate": True,
+        "estimation_methodology": (
+            "Modelled simulation estimate based on token character heuristics, assumed "
+            "model price ($0.003 / 1k tokens), and typical agent context retrieval profiles. "
+            "Not measured live agent execution."
+        ),
         "savings_pct": savings_pct,
         "avg_context_tokens_cortex": cortex_avg_tokens,
         "avg_context_tokens_baseline": baseline_avg_tokens,
         "tokens_reduction_pct": savings_pct,
+        "modelled_files_explored_cortex": files_explored_cortex,
         "files_explored_cortex": files_explored_cortex,
         "files_explored_baseline": files_explored_base,
         "files_reduction_pct": files_reduction_pct,
+        "modelled_tool_calls_cortex": tool_calls_cortex,
         "tool_calls_cortex": tool_calls_cortex,
         "tool_calls_baseline": tool_calls_base,
         "tool_calls_reduction_pct": tool_calls_reduction_pct,

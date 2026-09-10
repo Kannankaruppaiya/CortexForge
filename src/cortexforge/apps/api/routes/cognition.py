@@ -36,6 +36,11 @@ from cortexforge.memory.lifecycle import (
 )
 from cortexforge.observability.audit import AuditAction, read_audit, record_audit
 from cortexforge.retrieval.usefulness import RetrievalUsefulnessTracker
+from cortexforge.security.auth import (
+    Principal,
+    RequireProjectAccess,
+    get_current_principal,
+)
 from cortexforge.verification.engine import ClaimVerificationEngine
 
 logger = logging.getLogger(__name__)
@@ -87,7 +92,10 @@ def _claim_payload(claim: Claim) -> dict[str, Any]:
     }
 
 
-@router.get("/projects/{project_id}/claims")
+@router.get(
+    "/projects/{project_id}/claims",
+    dependencies=[Depends(RequireProjectAccess())],
+)
 async def list_claims(
     project_id: str,
     claim_status: str | None = Query(None, alias="status"),
@@ -111,9 +119,18 @@ async def list_claims(
 
 @router.get("/memories/{memory_id}/claims")
 async def list_memory_claims(
-    memory_id: str, session: AsyncSession = Depends(get_db_session)
+    memory_id: str,
+    principal: Principal = Depends(get_current_principal),
+    session: AsyncSession = Depends(get_db_session),
 ) -> list[dict[str, Any]]:
     """The individually evaluable statements inside one memory."""
+    memory = await session.get(Memory, memory_id)
+    if not memory:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found"
+        )
+    RequireProjectAccess.check_access(principal, memory.project_id)
+
     res = await session.execute(
         select(Claim)
         .options(selectinload(Claim.evidence_links))
@@ -123,7 +140,10 @@ async def list_memory_claims(
     return [_claim_payload(claim) for claim in res.scalars().all()]
 
 
-@router.post("/projects/{project_id}/verify")
+@router.post(
+    "/projects/{project_id}/verify",
+    dependencies=[Depends(RequireProjectAccess())],
+)
 async def verify_project_claims(
     project_id: str,
     commit_sha: str | None = None,
@@ -163,7 +183,10 @@ async def verify_project_claims(
     }
 
 
-@router.get("/projects/{project_id}/verification-runs")
+@router.get(
+    "/projects/{project_id}/verification-runs",
+    dependencies=[Depends(RequireProjectAccess())],
+)
 async def list_verification_runs(
     project_id: str,
     limit: int = Query(20, le=200),
@@ -201,9 +224,17 @@ async def list_verification_runs(
 async def list_claim_results(
     claim_id: str,
     limit: int = Query(20, le=200),
+    principal: Principal = Depends(get_current_principal),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[dict[str, Any]]:
     """Every recorded verdict on one claim, with the policy and reason behind it."""
+    claim = await session.get(Claim, claim_id)
+    if not claim:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Claim not found"
+        )
+    RequireProjectAccess.check_access(principal, claim.project_id)
+
     res = await session.execute(
         select(VerificationResult)
         .where(VerificationResult.claim_id == claim_id)
@@ -228,7 +259,10 @@ async def list_claim_results(
     ]
 
 
-@router.get("/projects/{project_id}/decisions")
+@router.get(
+    "/projects/{project_id}/decisions",
+    dependencies=[Depends(RequireProjectAccess())],
+)
 async def list_decisions(
     project_id: str,
     memory_id: str | None = None,
@@ -270,7 +304,10 @@ async def list_decisions(
     ]
 
 
-@router.get("/projects/{project_id}/pending-approvals")
+@router.get(
+    "/projects/{project_id}/pending-approvals",
+    dependencies=[Depends(RequireProjectAccess())],
+)
 async def list_pending_approvals(
     project_id: str, session: AsyncSession = Depends(get_db_session)
 ) -> list[dict[str, Any]]:
@@ -318,6 +355,7 @@ async def approve_memory(
         ..., description="Who is approving; recorded in the audit log"
     ),
     reason: str = "",
+    principal: Principal = Depends(get_current_principal),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     """Approve a proposed memory, activating it under the approver's authority."""
@@ -326,6 +364,7 @@ async def approve_memory(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found"
         )
+    RequireProjectAccess.check_access(principal, memory.project_id)
 
     previous_status = memory.status
 
@@ -378,6 +417,7 @@ async def reject_memory(
         ..., description="Who is rejecting; recorded in the audit log"
     ),
     reason: str = Query(..., description="Why this proposal was rejected"),
+    principal: Principal = Depends(get_current_principal),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     """Reject a proposed memory. Rejection is terminal and always carries a reason."""
@@ -386,6 +426,7 @@ async def reject_memory(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found"
         )
+    RequireProjectAccess.check_access(principal, memory.project_id)
 
     previous_status = memory.status
     try:
@@ -417,7 +458,10 @@ async def reject_memory(
     return {"id": memory.id, "status": memory.status}
 
 
-@router.get("/projects/{project_id}/successes")
+@router.get(
+    "/projects/{project_id}/successes",
+    dependencies=[Depends(RequireProjectAccess())],
+)
 async def list_successes(
     project_id: str,
     limit: int = Query(50, le=200),
@@ -446,7 +490,10 @@ async def list_successes(
     ]
 
 
-@router.get("/projects/{project_id}/retrieval-quality")
+@router.get(
+    "/projects/{project_id}/retrieval-quality",
+    dependencies=[Depends(RequireProjectAccess())],
+)
 async def retrieval_quality(
     project_id: str, session: AsyncSession = Depends(get_db_session)
 ) -> dict[str, Any]:
@@ -473,7 +520,10 @@ async def retrieval_quality(
     }
 
 
-@router.get("/projects/{project_id}/audit")
+@router.get(
+    "/projects/{project_id}/audit",
+    dependencies=[Depends(RequireProjectAccess())],
+)
 async def project_audit_log(
     project_id: str,
     resource_type: str | None = None,

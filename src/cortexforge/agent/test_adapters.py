@@ -408,17 +408,54 @@ class TestExecutionPipeline:
         task_id: str | None = None,
         change_set_id: str | None = None,
     ) -> tuple[TestRun, list[TestCaseResult], TestIntelligenceReport]:
-        """Execute test command, dynamically parse output, and persist test intelligence."""
+        """Execute test command under security sandbox policy, parse output, and persist test intelligence (§27)."""
+        import os
+
+        from cortexforge.security.auth import verify_workspace_path_allowed
+
+        # Check execution policy (§27)
+        allow_exec = (
+            os.environ.get("CORTEX_ALLOW_COMMAND_EXECUTION", "1").strip().lower()
+        )
+        if allow_exec in ("0", "false", "no", "disabled"):
+            raise PermissionError(
+                "Subprocess test execution is disabled by server policy (CORTEX_ALLOW_COMMAND_EXECUTION)."
+            )
+
+        # Enforce workspace filesystem confinement on working directory
+        canonical_cwd = os.path.realpath(cwd)
+        verify_workspace_path_allowed(canonical_cwd)
+
         cmd_str = command if isinstance(command, str) else " ".join(command)
+
+        # Prohibit dangerous shell metacharacter injection (§27)
+        dangerous_patterns = [";", "&&", "||", "|", "`", "$(", "\n", "\r"]
+        # Allow benign flags/args but reject shell chaining if semicolons or pipes are present
+        for pat in dangerous_patterns:
+            if pat in cmd_str:
+                raise ValueError(
+                    f"Command execution rejected: disallowed shell chaining operator '{pat}' in test command."
+                )
 
         start_time = time.monotonic()
         proc = await asyncio.create_subprocess_shell(
             cmd_str,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
+            cwd=canonical_cwd,
         )
-        stdout_bytes, stderr_bytes = await proc.communicate()
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(), timeout=120.0
+            )
+        except TimeoutError:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            stdout_bytes, stderr_bytes = await proc.communicate()
+            raise TimeoutError("Test command execution exceeded 120s timeout limit.")
+
         duration_ms = (time.monotonic() - start_time) * 1000.0
 
         raw_stdout = stdout_bytes.decode("utf-8", errors="replace")

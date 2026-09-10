@@ -72,7 +72,13 @@ def set_engine(new_engine: AsyncEngine) -> None:
 
 
 async def init_db() -> None:
-    """Create all tables defined in Base.metadata."""
+    """Initialize database schema.
+
+    In production (CORTEX_ENV=production), Alembic migrations are the authoritative
+    schema manager invoked prior to startup, avoiding unmanaged create_all calls (§16).
+    """
+    if os.environ.get("CORTEX_ENV") == "production":
+        return
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 

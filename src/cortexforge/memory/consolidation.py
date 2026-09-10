@@ -410,6 +410,7 @@ class MemoryConsolidationEngine:
                 inherited.add(key)
                 session.add(
                     MemoryEvidence(
+                        project_id=lesson.project_id,
                         memory_id=lesson.id,
                         source_type=evidence.source_type,
                         evidence_type=evidence.evidence_type,

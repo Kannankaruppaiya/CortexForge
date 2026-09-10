@@ -16,6 +16,7 @@ from cortexforge.cognition.authority import (
 from cortexforge.cognition.epistemics import EpistemicState, EvidenceType
 from cortexforge.cognition.promotion import evaluate_memory_promotion
 from cortexforge.core.models import (
+    CodeEntity,
     Memory,
     MemoryEvidence,
     MemoryRelation,
@@ -296,7 +297,15 @@ class MemoryService:
                 )
                 ev_rel = getattr(ev, "relation", "SUPPORTS")
 
+                if ev.symbol_id:
+                    sym = await session.get(CodeEntity, ev.symbol_id)
+                    if sym and sym.project_id != project_id:
+                        raise ValueError(
+                            f"Cross-project symbol reference rejected: symbol {ev.symbol_id} belongs to project {sym.project_id}, not {project_id}"
+                        )
+
                 ev_obj = MemoryEvidence(
+                    project_id=project_id,
                     memory_id=memory.id,
                     source_type=ev.source_type,
                     evidence_type=ev_type,
@@ -340,13 +349,17 @@ class MemoryService:
         await session.refresh(memory)
         return memory
 
-    async def get_memory(self, session: AsyncSession, memory_id: str) -> Memory | None:
-        """Fetch memory with evidences and versions loaded."""
+    async def get_memory(
+        self, session: AsyncSession, memory_id: str, project_id: str | None = None
+    ) -> Memory | None:
+        """Fetch memory with evidences and versions loaded, optionally project-scoped."""
         stmt = (
             select(Memory)
             .options(selectinload(Memory.evidences), selectinload(Memory.versions))
             .where(Memory.id == memory_id)
         )
+        if project_id:
+            stmt = stmt.where(Memory.project_id == project_id)
         res = await session.execute(stmt)
         return res.scalars().first()
 
@@ -373,12 +386,19 @@ class MemoryService:
             )
 
         prev_version = memory.version
+        prev_state = memory.status
         memory.version += 1
-        memory.content = sanitize_text(content)
+        sanitized_content = sanitize_text(content)
+        memory.content = sanitized_content
         if title:
             memory.title = sanitize_text(title)
         if summary:
             memory.summary = sanitize_text(summary)
+
+        # Epistemic invalidation: any semantic content change invalidates prior verification (§7)
+        if memory.status in (MemoryState.ACTIVE.value, "VERIFIED"):
+            memory.status = MemoryState.UNVERIFIED.value
+            memory.last_verified_at = None
 
         # Recompute embedding
         embed_res = await self.embedding_provider.embed_text(
@@ -391,10 +411,17 @@ class MemoryService:
             memory_id=memory.id,
             version=memory.version,
             previous_version=prev_version,
-            content=content,
+            old_state=prev_state,
+            new_state=memory.status,
+            content=sanitized_content,
             change_reason=change_reason,
         )
         session.add(version_record)
+        await session.flush()
+
+        # Re-run claim synchronization for newly updated content
+        await self.claim_service.sync_memory_claims(session, memory)
+
         await session.commit()
         await session.refresh(memory)
         return memory

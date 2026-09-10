@@ -84,6 +84,7 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
     },
     # Fully active, verified, durable memory
     MemoryState.ACTIVE.value: {
+        MemoryState.UNVERIFIED.value,  # When content is mutated and prior verification is invalidated
         MemoryState.STALE.value,  # When grounded symbol/code is modified
         MemoryState.CONFLICTED.value,  # When contradictory evidence/memory is found
         MemoryState.SUPERSEDED.value,  # When higher-authority replacement is established

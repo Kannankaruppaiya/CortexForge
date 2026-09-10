@@ -38,12 +38,28 @@ class GitProvider:
     def __init__(self, repo_path: str) -> None:
         self.repo_path = os.path.realpath(repo_path)
 
+    @staticmethod
+    def _hardened_git_env() -> dict[str, str]:
+        return {
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "PATH": os.environ.get("PATH", ""),
+            "SYSTEMROOT": os.environ.get("SYSTEMROOT", ""),
+            "COMSPEC": os.environ.get("COMSPEC", ""),
+            "TMP": os.environ.get("TMP", ""),
+            "TEMP": os.environ.get("TEMP", ""),
+        }
+
     def _run_git(self, args: list[str], timeout: int = 15) -> str:
-        """Execute git command safely with parameterized arguments."""
+        """Execute git command safely with parameterized arguments and hardened configuration."""
         try:
+            cmd = ["git", "-c", "core.hooksPath=", "-c", "safe.directory=*"] + args
             res = subprocess.run(
-                ["git"] + args,
+                cmd,
                 cwd=self.repo_path,
+                env=self._hardened_git_env(),
                 capture_output=True,
                 text=True,
                 check=True,
@@ -54,11 +70,13 @@ class GitProvider:
             return ""
 
     def _run_git_status(self, args: list[str], timeout: int = 15) -> bool:
-        """Run a git command for its exit status rather than its output."""
+        """Run a git command for its exit status rather than its output with hardened configuration."""
         try:
+            cmd = ["git", "-c", "core.hooksPath=", "-c", "safe.directory=*"] + args
             result = subprocess.run(
-                ["git", *args],
+                cmd,
                 cwd=self.repo_path,
+                env=self._hardened_git_env(),
                 capture_output=True,
                 timeout=timeout,
                 check=False,
@@ -209,9 +227,19 @@ class GitProvider:
         """Safely fetch historical file content at a specific commit SHA using git show."""
         normalized_path = file_path.replace("\\", "/")
         try:
+            cmd = [
+                "git",
+                "-c",
+                "core.hooksPath=",
+                "-c",
+                "safe.directory=*",
+                "show",
+                f"{commit_sha}:{normalized_path}",
+            ]
             res = subprocess.run(
-                ["git", "show", f"{commit_sha}:{normalized_path}"],
+                cmd,
                 cwd=self.repo_path,
+                env=self._hardened_git_env(),
                 capture_output=True,
                 check=True,
                 timeout=15,

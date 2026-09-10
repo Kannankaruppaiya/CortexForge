@@ -25,6 +25,10 @@ STAGES_KEY = "completed_stages"
 CheckpointWriter = Callable[[dict[str, Any], float], Awaitable[None]]
 
 
+class JobCancelledError(Exception):
+    """Raised when a job has been cancelled by an operator during execution (§24)."""
+
+
 @dataclass
 class JobContext:
     """What a background task is given while it runs."""
@@ -42,6 +46,7 @@ class JobContext:
     #: Set by the durable runner. Absent when a task is run directly, in which
     #: case checkpoints are kept in memory and simply have no effect on recovery.
     writer: CheckpointWriter | None = None
+    cancel_checker: Callable[[], Awaitable[bool]] | None = None
 
     def __post_init__(self) -> None:
         self._state: dict[str, Any] = dict(self.resumed_from or {})
@@ -66,6 +71,11 @@ class JobContext:
         """A value a previous attempt recorded, for resuming mid-stage."""
         return (self.resumed_from or {}).get(key, default)
 
+    async def check_cancelled(self) -> None:
+        """Check if job was cancelled and immediately abort execution if so (§24)."""
+        if self.cancel_checker is not None and await self.cancel_checker():
+            raise JobCancelledError(f"Job {self.job_id} was cancelled.")
+
     async def checkpoint(
         self, stage: str, progress: float | None = None, **detail: Any
     ) -> None:
@@ -76,6 +86,7 @@ class JobContext:
         the safe direction to fail in: repeating idempotent work costs time,
         whereas skipping work that was never committed loses it.
         """
+        await self.check_cancelled()
         stages = self._state.setdefault(STAGES_KEY, [])
         if stage not in stages:
             stages.append(stage)

@@ -114,6 +114,13 @@ class JobRunner:
 
         async def _checkpoint_writer(state: dict[str, Any], progress: float) -> None:
             async with self._scoped_session() as session:
+                # Check cancellation before persisting checkpoint (§24)
+                current_job = await session.get(Job, job_id)
+                if current_job and current_job.status == "CANCELLED":
+                    from cortexforge.jobs.context import JobCancelledError
+
+                    raise JobCancelledError(f"Job {job_id} was cancelled.")
+
                 await self.store.checkpoint(
                     session,
                     job_id,
@@ -121,6 +128,11 @@ class JobRunner:
                     checkpoint=state,
                     progress=progress,
                 )
+
+        async def _cancel_checker() -> bool:
+            async with self._scoped_session() as session:
+                current_job = await session.get(Job, job_id)
+                return bool(current_job and current_job.status == "CANCELLED")
 
         context = JobContext(
             job_id=job_id,
@@ -131,6 +143,7 @@ class JobRunner:
             attempt=claimed.job.attempt,
             progress=claimed.job.progress,
             writer=_checkpoint_writer,
+            cancel_checker=_cancel_checker,
         )
 
         stop_event = asyncio.Event()
@@ -152,6 +165,18 @@ class JobRunner:
         except Exception as exc:
             stop_event.set()
             await asyncio.gather(heartbeat_task, return_exceptions=True)
+            from cortexforge.jobs.context import JobCancelledError
+
+            if isinstance(exc, JobCancelledError):
+                logger.info(
+                    "Job %s was cancelled during execution; halted gracefully (§24)",
+                    job_id,
+                )
+                async with self._scoped_session() as session:
+                    cancelled_job = await session.get(Job, job_id)
+                    if cancelled_job is not None:
+                        return cancelled_job
+
             logger.exception("Handler raised error executing job %s", job_id)
             async with self._scoped_session() as session:
                 failed_job = await self.store.fail(
@@ -192,3 +217,21 @@ class JobRunner:
             return None
 
         return await self.execute_job(claimed)
+
+    async def run_loop(
+        self,
+        job_types: list[str] | None = None,
+        poll_interval_seconds: float = 1.0,
+        stop_event: asyncio.Event | None = None,
+    ) -> None:
+        """Continuously claim and execute available jobs until stopped (§22)."""
+        stop_sig = stop_event or asyncio.Event()
+        while not stop_sig.is_set():
+            job = await self.run_once(job_types=job_types)
+            if job is None:
+                try:
+                    await asyncio.wait_for(
+                        stop_sig.wait(), timeout=poll_interval_seconds
+                    )
+                except TimeoutError:
+                    pass

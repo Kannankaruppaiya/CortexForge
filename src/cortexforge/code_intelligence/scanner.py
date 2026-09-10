@@ -2,7 +2,6 @@
 
 import hashlib
 import os
-import subprocess
 import time
 
 from sqlalchemy import delete, func, select
@@ -24,20 +23,17 @@ from cortexforge.core.models import (
 )
 from cortexforge.core.schemas import ScanResponse
 
+# Hard resource limits to prevent denial-of-service from hostile repositories (§25)
+MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB per file
+MAX_TOTAL_SCAN_BYTES = 100 * 1024 * 1024  # 100 MB total per scan
+MAX_SCAN_DURATION_SECONDS = 120.0  # 2 minute timeout
+MAX_ALLOWED_FILES = 20_000
+
 
 def get_git_head_commit(root_path: str) -> str | None:
-    """Safely get current git HEAD commit SHA without shell injection."""
+    """Safely get current git HEAD commit SHA using hardened GitProvider."""
     try:
-        res = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=root_path,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=5,
-        )
-        sha = res.stdout.strip()
-        return sha if len(sha) == 40 else None
+        return GitProvider(root_path).get_head_commit()
     except Exception:
         return None
 
@@ -101,6 +97,8 @@ class RepositoryScanner:
         """Traverse directory tree and collect parseable source files."""
         matched_files: list[str] = []
         canonical_root = os.path.realpath(root_path)
+        effective_max = min(max_files or MAX_ALLOWED_FILES, MAX_ALLOWED_FILES)
+        accumulated_bytes = 0
 
         for dirpath, dirnames, filenames in os.walk(canonical_root):
             # Prune ignored directories in-place
@@ -116,14 +114,26 @@ class RepositoryScanner:
                     continue
 
                 full_path = os.path.join(dirpath, fname)
+                try:
+                    fsize = os.path.getsize(full_path)
+                except OSError:
+                    continue
+
+                # Hard size limits: skip oversized files (>5MB) and break if total bytes exceeded (>100MB)
+                if fsize > MAX_FILE_SIZE_BYTES:
+                    continue
+                if accumulated_bytes + fsize > MAX_TOTAL_SCAN_BYTES:
+                    return matched_files
+                accumulated_bytes += fsize
+
                 # Store path relative to canonical_root for consistency across platforms
                 rel_path = os.path.relpath(full_path, canonical_root).replace("\\", "/")
-                matched_files.append((full_path, rel_path))
+                matched_files.append(rel_path)
 
-                if max_files and len(matched_files) >= max_files:
-                    return [rel for _, rel in matched_files]
+                if len(matched_files) >= effective_max:
+                    return matched_files
 
-        return [rel for _, rel in matched_files]
+        return matched_files
 
     async def _index_config_artifacts(
         self,
@@ -350,6 +360,17 @@ class RepositoryScanner:
             except Exception as e:
                 errors.append(f"Failed to read file {rel_path}: {e}")
                 continue
+
+            # Skip binary files disguised as source (§25)
+            if b"\x00" in content[:8192]:
+                continue
+
+            # Check scan timeout
+            if time.perf_counter() - start_time > MAX_SCAN_DURATION_SECONDS:
+                errors.append(
+                    "Scan terminated early: maximum scan duration (120s) exceeded."
+                )
+                break
 
             parse_result: ParseResult = self.provider.parse_source(rel_path, content)
             if parse_result.error:

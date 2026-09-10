@@ -302,7 +302,27 @@ class EvaluationRunner:
                     target in path or path.endswith(target)
                     for target in task.target_files
                 )
-            ] or repository_files[:2]
+            ]
+            if task.target_files and not matched_targets:
+                # Target files declared but not present in this project's scanned files (§12)
+                # Mark task as NOT_APPLICABLE rather than silently substituting unrelated files
+                scorecards.append(
+                    ComprehensiveScorecard(
+                        task_id=task.id,
+                        task_name=f"{task.name} (NOT APPLICABLE - targets not in repository)",
+                        metadata=metadata,
+                        results={},
+                        token_reduction_pct=0.0,
+                        exploration_reduction_pct=0.0,
+                        measurement_notes=[
+                            (
+                                f"Target files {task.target_files} were not found in repository. "
+                                "Task marked NOT_APPLICABLE (will not substitute unrelated files)."
+                            )
+                        ],
+                    )
+                )
+                continue
 
             results: dict[str, ModeEvaluationResult] = {}
             notes: list[str] = []
@@ -581,9 +601,9 @@ class EvaluationRunner:
             )
 
         relevant_ids = set(task.relevant_memory_ids)
-        basis = "curated relevance set"
+        basis = "curated ground truth relevance dataset"
         if not relevant_ids:
-            basis = "keyword and target-file overlap"
+            basis = "keyword/file topical overlap heuristic (not curated ground-truth relevance)"
             relevant_ids = {
                 memory.id
                 for memory in memories

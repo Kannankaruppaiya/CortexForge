@@ -142,6 +142,7 @@ async def test_regression_graph_relevance_rejects_substring_matching(
     await test_session.flush()
 
     ev = MemoryEvidence(
+        project_id=proj.id,
         memory_id=mem.id,
         file_path="src/identity.py",
         source_type="code",

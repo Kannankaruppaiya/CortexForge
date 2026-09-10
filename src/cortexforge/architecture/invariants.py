@@ -10,8 +10,9 @@ Adheres strictly to Specification Section 8:
 
 import fnmatch
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cortexforge.core.models import (
@@ -78,15 +79,22 @@ class ArchitectureInvariantEngine:
         all_entities = list((await session.execute(all_entities_stmt)).scalars().all())
         entity_map = {e.id: e for e in all_entities}
 
+        now = datetime.now(UTC)
+        rule_ids = [r.id for r in rules]
+        existing_open: dict[tuple[str, str, str], RuleViolation] = {}
         if persist_violations:
-            # Clear old violations for this commit / evaluation
-            await session.execute(
-                delete(RuleViolation).where(
-                    RuleViolation.rule_id.in_([r.id for r in rules])
-                )
+            open_stmt = select(RuleViolation).where(
+                RuleViolation.rule_id.in_(rule_ids),
+                RuleViolation.resolved_at.is_(None),
             )
+            open_res = await session.execute(open_stmt)
+            existing_open = {
+                (v.rule_id, v.source_entity_id, v.target_entity_id): v
+                for v in open_res.scalars().all()
+            }
 
         detected_violations: list[dict[str, str]] = []
+        detected_keys: set[tuple[str, str, str]] = set()
         has_critical = False
 
         for rule in rules:
@@ -114,14 +122,16 @@ class ArchitectureInvariantEngine:
                             f"({src.file_path}) has forbidden '{rel.relationship_type}' relationship "
                             f"to '{tgt.qualified_name}' ({tgt.file_path}) violating rule '{rule.rule_name}'."
                         )
-                        violation = RuleViolation(
-                            rule_id=rule.id,
-                            source_entity_id=src.id,
-                            target_entity_id=tgt.id,
-                            commit_sha=commit_sha,
-                            violation_details=details,
-                        )
-                        if persist_violations:
+                        v_key = (rule.id, src.id, tgt.id)
+                        detected_keys.add(v_key)
+                        if v_key not in existing_open and persist_violations:
+                            violation = RuleViolation(
+                                rule_id=rule.id,
+                                source_entity_id=src.id,
+                                target_entity_id=tgt.id,
+                                commit_sha=commit_sha,
+                                violation_details=details,
+                            )
                             session.add(violation)
 
                         detected_violations.append(
@@ -159,14 +169,16 @@ class ArchitectureInvariantEngine:
                                 f"but was accessed via '{rel.relationship_type}' by '{src.qualified_name}' ({src.file_path}) "
                                 f"violating rule '{rule.rule_name}'."
                             )
-                            violation = RuleViolation(
-                                rule_id=rule.id,
-                                source_entity_id=src.id,
-                                target_entity_id=tgt.id,
-                                commit_sha=commit_sha,
-                                violation_details=details,
-                            )
-                            if persist_violations:
+                            v_key = (rule.id, src.id, tgt.id)
+                            detected_keys.add(v_key)
+                            if v_key not in existing_open and persist_violations:
+                                violation = RuleViolation(
+                                    rule_id=rule.id,
+                                    source_entity_id=src.id,
+                                    target_entity_id=tgt.id,
+                                    commit_sha=commit_sha,
+                                    violation_details=details,
+                                )
                                 session.add(violation)
 
                             detected_violations.append(
@@ -213,14 +225,16 @@ class ArchitectureInvariantEngine:
                             f"({src.file_path}) {modality} have a relationship to a target matching "
                             f"'{tgt_pat}', but none was found violating rule '{rule.rule_name}'."
                         )
-                        violation = RuleViolation(
-                            rule_id=rule.id,
-                            source_entity_id=src.id,
-                            target_entity_id=src.id,
-                            commit_sha=commit_sha,
-                            violation_details=details,
-                        )
-                        if persist_violations:
+                        v_key = (rule.id, src.id, src.id)
+                        detected_keys.add(v_key)
+                        if v_key not in existing_open and persist_violations:
+                            violation = RuleViolation(
+                                rule_id=rule.id,
+                                source_entity_id=src.id,
+                                target_entity_id=src.id,
+                                commit_sha=commit_sha,
+                                violation_details=details,
+                            )
                             session.add(violation)
 
                         detected_violations.append(
@@ -258,14 +272,16 @@ class ArchitectureInvariantEngine:
                             f"({src.file_path}) has discouraged '{rel.relationship_type}' relationship "
                             f"to '{tgt.qualified_name}' ({tgt.file_path}) for rule '{rule.rule_name}'."
                         )
-                        violation = RuleViolation(
-                            rule_id=rule.id,
-                            source_entity_id=src.id,
-                            target_entity_id=tgt.id,
-                            commit_sha=commit_sha,
-                            violation_details=details,
-                        )
-                        if persist_violations:
+                        v_key = (rule.id, src.id, tgt.id)
+                        detected_keys.add(v_key)
+                        if v_key not in existing_open and persist_violations:
+                            violation = RuleViolation(
+                                rule_id=rule.id,
+                                source_entity_id=src.id,
+                                target_entity_id=tgt.id,
+                                commit_sha=commit_sha,
+                                violation_details=details,
+                            )
                             session.add(violation)
 
                         detected_violations.append(
@@ -279,7 +295,11 @@ class ArchitectureInvariantEngine:
                             }
                         )
 
-        if persist_violations and detected_violations:
+        if persist_violations:
+            # Mark violations that were resolved at this evaluation (§30)
+            for k, old_v in existing_open.items():
+                if k not in detected_keys:
+                    old_v.resolved_at = now
             await session.commit()
 
         return ArchitectureEvaluationResult(
@@ -293,6 +313,7 @@ class ArchitectureInvariantEngine:
         session: AsyncSession,
         project_id: str,
         commit_sha: str | None = None,
+        active_only: bool = True,
     ) -> list[RuleViolation]:
         """Evaluate rules and return list of persisted RuleViolation records."""
         await self.evaluate_rules(
@@ -303,5 +324,7 @@ class ArchitectureInvariantEngine:
             .join(ArchitectureRule, RuleViolation.rule_id == ArchitectureRule.id)
             .where(ArchitectureRule.project_id == project_id)
         )
+        if active_only:
+            stmt = stmt.where(RuleViolation.resolved_at.is_(None))
         res = await session.execute(stmt)
         return list(res.scalars().all())

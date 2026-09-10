@@ -12,6 +12,7 @@ from cortexforge.core.db import get_db_session
 from cortexforge.core.models import (
     ArchitectureRule,
     FailureEpisode,
+    Memory,
     Project,
     TestRun,
 )
@@ -28,8 +29,13 @@ from cortexforge.evaluation.mutations import MutationBenchmarkHarness
 from cortexforge.graph.service import GraphService
 from cortexforge.memory.provenance import ProvenanceEngine
 from cortexforge.memory.snapshots import CognitiveSnapshotEngine
+from cortexforge.security.auth import (
+    Principal,
+    RequireProjectAccess,
+    get_current_principal,
+)
 
-router = APIRouter(tags=["cognition"])
+router = APIRouter(tags=["cognition"], dependencies=[Depends(RequireProjectAccess())])
 
 invariant_engine = ArchitectureInvariantEngine()
 provenance_engine = ProvenanceEngine()
@@ -124,9 +130,18 @@ async def check_architecture_violations(
 
 @router.get("/memories/{memory_id}/provenance", response_model=ProvenanceTraceRead)
 async def get_memory_provenance(
-    memory_id: str, session: AsyncSession = Depends(get_db_session)
+    memory_id: str,
+    principal: Principal = Depends(get_current_principal),
+    session: AsyncSession = Depends(get_db_session),
 ) -> ProvenanceTraceRead:
     """Answer 'Why does CortexForge believe this?' by tracing full causal provenance."""
+    mem = await session.get(Memory, memory_id)
+    if not mem:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found"
+        )
+    RequireProjectAccess.check_access(principal, mem.project_id)
+
     trace = await provenance_engine.trace_memory(session, memory_id=memory_id)
     if not trace:
         raise HTTPException(
