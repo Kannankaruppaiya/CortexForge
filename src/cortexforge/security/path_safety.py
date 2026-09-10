@@ -24,14 +24,21 @@ class PathSecurity:
         if not raw_sub:
             raise PathSecurityError("Empty subpath provided.")
 
-        # Check if subpath is absolute, UNC, root-anchored, or drive-anchored
-        sub_p = Path(raw_sub)
+        # Check if subpath is UNC network path
+        if raw_sub.startswith(("\\\\", "//")):
+            raise PathSecurityError(f"UNC network paths are prohibited: '{subpath}'")
+
+        # Normalize backslashes for cross-platform traversal detection
+        clean_sub = raw_sub.replace("\\", "/")
+
+        # Check if subpath is absolute, root-anchored, or drive-anchored
+        sub_p = Path(clean_sub)
         if (
             sub_p.is_absolute()
-            or raw_sub.startswith(("/", "\\\\", "\\"))
-            or (len(raw_sub) > 1 and raw_sub[1] == ":")
+            or clean_sub.startswith("/")
+            or (len(clean_sub) > 1 and clean_sub[1] == ":")
         ):
-            candidate = sub_p.resolve()
+            candidate = Path(raw_sub).resolve()
         else:
             candidate = (canonical_root / sub_p).resolve()
 

@@ -1,5 +1,7 @@
 """Tests for dynamic test execution adapters without synthetic injection."""
 
+import sys
+
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -123,7 +125,7 @@ async def test_execution_pipeline_real_command(test_session: AsyncSession, tmp_p
     run, results, report = await pipeline.execute_and_record(
         session=test_session,
         project_id=proj.id,
-        command="uv run pytest tests/unit/test_capability_registry.py -v",
+        command=f'"{sys.executable}" -m pytest tests/unit/test_capability_registry.py -v',
         cwd=".",
     )
 
