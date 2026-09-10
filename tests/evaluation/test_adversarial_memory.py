@@ -146,7 +146,10 @@ async def test_stale_memory_is_not_returned_as_current_truth(
 
     await RepositoryScanner().scan_project(test_session, project, incremental=False)
     await SemanticChangePropagator().propagate_changes(
-        test_session, project.id, modified_files=["services/billing.py"], mark_stale=True
+        test_session,
+        project.id,
+        modified_files=["services/billing.py"],
+        mark_stale=True,
     )
 
     await test_session.refresh(memory)
@@ -192,7 +195,11 @@ async def test_duplicate_memories_converge_on_one_claim(
         )
 
     claims = (
-        (await test_session.execute(select(Claim).where(Claim.project_id == project.id)))
+        (
+            await test_session.execute(
+                select(Claim).where(Claim.project_id == project.id)
+            )
+        )
         .scalars()
         .all()
     )

@@ -115,7 +115,9 @@ async def git_repo(tmp_path):
     _git(repo, "config", "user.email", "test@example.com")
     _git(repo, "config", "user.name", "Test")
 
-    with open(os.path.join(repo, "services", "auth.py"), "w", encoding="utf-8") as handle:
+    with open(
+        os.path.join(repo, "services", "auth.py"), "w", encoding="utf-8"
+    ) as handle:
         handle.write(AUTH_V1)
 
     commit = _commit(repo, "initial")
@@ -133,7 +135,9 @@ async def test_full_cognitive_loop(git_repo, test_session: AsyncSession):
     await test_session.commit()
     await test_session.refresh(project)
 
-    scan = await RepositoryScanner().scan_project(test_session, project, incremental=False)
+    scan = await RepositoryScanner().scan_project(
+        test_session, project, incremental=False
+    )
     assert scan.entities_extracted > 0
     assert project.last_indexed_commit == commit_a
 
@@ -191,7 +195,9 @@ async def test_full_cognitive_loop(git_repo, test_session: AsyncSession):
 
     # --- 3. Each memory decomposed into evaluable claims -----------------
     claim_service = ClaimService()
-    issue_claims = await claim_service.get_claims_for_memory(test_session, issue_memory.id)
+    issue_claims = await claim_service.get_claims_for_memory(
+        test_session, issue_memory.id
+    )
     assert issue_claims, "a memory must be decomposed into verifiable propositions"
     assert all(claim.evidence_links for claim in issue_claims), (
         "each claim must inherit the memory's grounding"
@@ -211,7 +217,9 @@ async def test_full_cognitive_loop(git_repo, test_session: AsyncSession):
     )
 
     # --- 5. The agent changes code: a rename, committed ------------------
-    with open(os.path.join(repo, "services", "auth.py"), "w", encoding="utf-8") as handle:
+    with open(
+        os.path.join(repo, "services", "auth.py"), "w", encoding="utf-8"
+    ) as handle:
         handle.write(AUTH_V2_RENAMED)
     commit_b = _commit(repo, "rename issue_token to mint_token")
 
@@ -383,7 +391,9 @@ async def test_full_cognitive_loop(git_repo, test_session: AsyncSession):
         )
 
     # --- 11. A symbol is genuinely removed -------------------------------
-    with open(os.path.join(repo, "services", "auth.py"), "w", encoding="utf-8") as handle:
+    with open(
+        os.path.join(repo, "services", "auth.py"), "w", encoding="utf-8"
+    ) as handle:
         handle.write(AUTH_V3_REMOVED)
     commit_c = _commit(repo, "remove revoke_token")
 
@@ -402,7 +412,9 @@ async def test_full_cognitive_loop(git_repo, test_session: AsyncSession):
         f"{removal_impact.decisions}"
     )
     invalidations = [
-        d for d in removal_impact.decisions if d["decision"] == DecisionCode.INVALIDATE.value
+        d
+        for d in removal_impact.decisions
+        if d["decision"] == DecisionCode.INVALIDATE.value
     ]
     assert invalidations
     assert invalidations[0]["reason_code"] == "SYMBOL_REMOVED"
@@ -412,7 +424,9 @@ async def test_full_cognitive_loop(git_repo, test_session: AsyncSession):
         test_session, project_id=project.id, commit_sha=commit_c
     )
     assert snapshot.state_hash
-    assert snapshot.memory_versions, "a snapshot must record which memories, not how many"
+    assert snapshot.memory_versions, (
+        "a snapshot must record which memories, not how many"
+    )
     assert snapshot.claim_states
 
     invalidated_in_snapshot = [
@@ -474,7 +488,9 @@ async def test_full_cognitive_loop(git_repo, test_session: AsyncSession):
         claim.status == ClaimStatus.UNKNOWN.value
         and claim.last_outcome == VerificationOutcome.UNKNOWN.value
         for claim in ungrounded_claims
-    ), "a claim with no checkable evidence must resolve to UNKNOWN, not to true or false"
+    ), (
+        "a claim with no checkable evidence must resolve to UNKNOWN, not to true or false"
+    )
 
     # An unknown claim must not silently demote its memory: not knowing is not
     # the same as having found something wrong.

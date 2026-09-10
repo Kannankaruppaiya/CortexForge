@@ -1,6 +1,5 @@
 """Path traversal defense and filesystem isolation for CortexForge."""
 
-import os
 from pathlib import Path
 
 
@@ -15,29 +14,39 @@ class PathSecurity:
     def safe_resolve(root_dir: str | Path, subpath: str | Path) -> str:
         """Resolve a candidate subpath and verify it does not escape root_dir.
 
-        Raises PathSecurityError if the resolved path is outside root_dir.
+        Raises PathSecurityError if the resolved path is outside root_dir, is
+        a symlink pointing outside root_dir, or resolves to root_dir itself.
         Returns canonical absolute path.
         """
-        canonical_root = os.path.realpath(str(root_dir))
-        
-        # Prevent absolute paths from escaping root when joined
-        raw_sub = str(subpath).strip()
-        if os.path.isabs(raw_sub):
-            # If absolute, it must already reside inside canonical_root
-            candidate = os.path.realpath(raw_sub)
-        else:
-            # Strip leading slashes to prevent root-resetting in os.path.join
-            clean_sub = raw_sub.lstrip("/\\")
-            candidate = os.path.realpath(os.path.join(canonical_root, clean_sub))
+        canonical_root = Path(root_dir).resolve()
 
-        # Check containment
-        common = os.path.commonpath([canonical_root, candidate])
-        if common != canonical_root:
+        raw_sub = str(subpath).strip()
+        if not raw_sub:
+            raise PathSecurityError("Empty subpath provided.")
+
+        # Check if subpath is absolute, UNC, root-anchored, or drive-anchored
+        sub_p = Path(raw_sub)
+        if (
+            sub_p.is_absolute()
+            or raw_sub.startswith(("/", "\\\\", "\\"))
+            or (len(raw_sub) > 1 and raw_sub[1] == ":")
+        ):
+            candidate = sub_p.resolve()
+        else:
+            candidate = (canonical_root / sub_p).resolve()
+
+        # Check containment within canonical project root
+        try:
+            is_contained = candidate.is_relative_to(canonical_root)
+        except (ValueError, AttributeError):
+            is_contained = False
+
+        if not is_contained or candidate == canonical_root:
             raise PathSecurityError(
                 f"Path traversal detected: '{subpath}' escapes root directory '{root_dir}'"
             )
 
-        return candidate
+        return str(candidate)
 
     @staticmethod
     def is_safe_subpath(root_dir: str | Path, subpath: str | Path) -> bool:

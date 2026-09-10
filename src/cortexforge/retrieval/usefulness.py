@@ -167,7 +167,9 @@ class RetrievalUsefulnessTracker:
         metrics.mean_context_tokens = round(
             sum(e.context_tokens for e in events) / len(events), 1
         )
-        metrics.mean_latency_ms = round(sum(e.latency_ms for e in events) / len(events), 2)
+        metrics.mean_latency_ms = round(
+            sum(e.latency_ms for e in events) / len(events), 2
+        )
 
         if total_returned:
             metrics.stale_hit_rate = round(
@@ -195,11 +197,15 @@ class RetrievalUsefulnessTracker:
                     recall_values.append(len(used & returned) / len(used))
 
             if precision_values:
-                metrics.precision = round(sum(precision_values) / len(precision_values), 4)
+                metrics.precision = round(
+                    sum(precision_values) / len(precision_values), 4
+                )
             if recall_values:
                 metrics.recall = round(sum(recall_values) / len(recall_values), 4)
             if redundancy_values:
-                metrics.redundancy = round(sum(redundancy_values) / len(redundancy_values), 4)
+                metrics.redundancy = round(
+                    sum(redundancy_values) / len(redundancy_values), 4
+                )
         else:
             metrics.notes.append(
                 f"{len(events)} retrieval event(s) recorded, but none reports which "

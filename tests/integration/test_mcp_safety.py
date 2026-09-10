@@ -45,7 +45,6 @@ async def test_mcp_agent_memory_without_evidence_creates_candidate(tmp_path):
         summary="Envoy requirement",
         memory_type="ARCHITECTURE",
         project_id_or_path=str(repo),
-        trusted_user_confirmed=False,
     )
 
     assert "[CANDIDATE_CREATED]" in res
@@ -59,7 +58,9 @@ async def test_mcp_agent_memory_without_evidence_creates_candidate(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_mcp_agent_memory_with_fictitious_evidence_requires_verification(tmp_path):
+async def test_mcp_agent_memory_with_fictitious_evidence_requires_verification(
+    tmp_path,
+):
     """Agent asserting knowledge with non-existent file produces VERIFICATION_REQUIRED."""
     repo = tmp_path / "repo2"
     repo.mkdir()
@@ -78,7 +79,6 @@ async def test_mcp_agent_memory_with_fictitious_evidence_requires_verification(t
         evidence_line_start=10,
         evidence_line_end=20,
         project_id_or_path=str(repo),
-        trusted_user_confirmed=False,
     )
 
     assert "[VERIFICATION_REQUIRED]" in res
@@ -91,7 +91,9 @@ async def test_mcp_agent_memory_with_genuine_code_verifies_active(tmp_path):
     repo = tmp_path / "repo3"
     repo.mkdir()
     code_file = repo / "auth.py"
-    code_content = "def authenticate_user(token):\n    return token.startswith('secret')\n"
+    code_content = (
+        "def authenticate_user(token):\n    return token.startswith('secret')\n"
+    )
     code_file.write_text(code_content, encoding="utf-8")
 
     async with session_scope() as session:
@@ -108,8 +110,87 @@ async def test_mcp_agent_memory_with_genuine_code_verifies_active(tmp_path):
         evidence_line_start=1,
         evidence_line_end=2,
         project_id_or_path=str(repo),
-        trusted_user_confirmed=False,
     )
 
     assert "[VERIFIED_ACTIVE]" in res
     assert "Status: `ACTIVE`" in res
+
+
+@pytest.mark.asyncio
+async def test_mcp_human_approval_token_flow(tmp_path):
+    """Demonstrates safe human confirmation via server-managed token."""
+    from cortexforge.apps.mcp.server import memory_request_human_approval
+    from cortexforge.security.approval import ApprovalService
+
+    repo = tmp_path / "repo_approval"
+    repo.mkdir()
+
+    async with session_scope() as session:
+        proj = Project(name="ApprovalRepo", local_path=str(repo))
+        session.add(proj)
+        await session.commit()
+        project_id = proj.id
+
+    title = "Production Database Freeze"
+    content = "No migrations allowed during Q4 peak period."
+    m_type = "CONSTRAINT"
+
+    # 1. External MCP client attempts to forge approval token
+    res_forged = await memory_create(
+        title=title,
+        content=content,
+        summary="DB Freeze",
+        memory_type=m_type,
+        approval_token="forged-token-xyz",
+        project_id_or_path=str(repo),
+    )
+    assert "Error: Invalid or unapproved human confirmation token" in res_forged
+
+    # 2. External agent requests approval
+    res_req = await memory_request_human_approval(
+        title=title,
+        content=content,
+        memory_type=m_type,
+        project_id_or_path=str(repo),
+    )
+    assert "Created pending human approval request" in res_req
+    # Extract token
+    import re
+
+    tok_match = re.search(r"Token: `([^`]+)`", res_req)
+    assert tok_match is not None
+    token = tok_match.group(1)
+
+    # 3. Trusted human approves via server boundary
+    async with session_scope() as session:
+        approved_rec = await ApprovalService.approve_request(
+            session, token=token, approved_by="admin@company.com"
+        )
+        assert approved_rec is not None
+        await session.commit()
+
+    # 4. Agent now calls memory_create with the approved token
+    res_valid = await memory_create(
+        title=title,
+        content=content,
+        summary="DB Freeze",
+        memory_type=m_type,
+        approval_token=token,
+        project_id_or_path=str(repo),
+    )
+    assert "Successfully created memory" in res_valid
+
+    # Verify memory has USER_CONFIRMED authority
+    async with session_scope() as session:
+        from sqlalchemy import select
+
+        from cortexforge.core.models import Memory
+
+        mem = (
+            await session.execute(
+                select(Memory).where(
+                    Memory.project_id == project_id, Memory.title == title
+                )
+            )
+        ).scalar_one()
+        assert mem.authority == "USER_CONFIRMED"

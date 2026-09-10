@@ -149,7 +149,9 @@ def test_openapi_paths_and_operations_become_addressable():
 
 def test_migration_operations_become_addressable():
     """A schema claim should be reachable from the migration that made it true."""
-    artifact = ConfigIntelligenceProvider().parse("migrations/versions/a.py", MIGRATION.encode())
+    artifact = ConfigIntelligenceProvider().parse(
+        "migrations/versions/a.py", MIGRATION.encode()
+    )
 
     assert artifact is not None
     assert artifact.evidence_type == EvidenceType.SCHEMA.value

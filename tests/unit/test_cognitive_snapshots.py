@@ -16,9 +16,13 @@ async def test_cognitive_snapshot_and_deterministic_replay():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+    factory = async_sessionmaker(
+        bind=engine, class_=AsyncSession, expire_on_commit=False
+    )
     async with factory() as session:
-        project = Project(name="SnapshotTestProj", local_path="/tmp/fake_snap", status="READY")
+        project = Project(
+            name="SnapshotTestProj", local_path="/tmp/fake_snap", status="READY"
+        )
         session.add(project)
         await session.commit()
         await session.refresh(project)

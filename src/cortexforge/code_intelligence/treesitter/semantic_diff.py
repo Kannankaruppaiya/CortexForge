@@ -126,12 +126,19 @@ class ASTSemanticDiffer:
             if before_content and after_content and self.parser.can_parse(file_path):
                 parsed_before = self.parser.parse_source(old_path, before_content)
                 parsed_after = self.parser.parse_source(file_path, after_content)
-                b_syms = {s.name: s for s in parsed_before.symbols if s.entity_type != "file"}
+                b_syms = {
+                    s.name: s for s in parsed_before.symbols if s.entity_type != "file"
+                }
                 for asym in parsed_after.symbols:
                     if asym.entity_type != "file":
                         bsym = b_syms.get(asym.name) or next(
-                            (s for s in parsed_before.symbols if s.content_hash == asym.content_hash and s.entity_type != "file"),
-                            None
+                            (
+                                s
+                                for s in parsed_before.symbols
+                                if s.content_hash == asym.content_hash
+                                and s.entity_type != "file"
+                            ),
+                            None,
                         )
                         if bsym:
                             changes.append(
@@ -148,7 +155,11 @@ class ASTSemanticDiffer:
                                     after_signature=asym.signature,
                                     before_line_range=(bsym.start_line, bsym.end_line),
                                     after_line_range=(asym.start_line, asym.end_line),
-                                    details={"old_path": old_path, "old_name": bsym.name, "old_qualified_name": bsym.qualified_name},
+                                    details={
+                                        "old_path": old_path,
+                                        "old_name": bsym.name,
+                                        "old_qualified_name": bsym.qualified_name,
+                                    },
                                 )
                             )
                 return changes
@@ -223,7 +234,11 @@ class ASTSemanticDiffer:
                 file_path.lower().endswith(ext)
                 for ext in (".json", ".yaml", ".yml", ".toml", ".ini", ".env", ".cfg")
             )
-            c_type = SemanticChangeType.CONFIG_CHANGED if is_config else SemanticChangeType.BODY_CHANGED
+            c_type = (
+                SemanticChangeType.CONFIG_CHANGED
+                if is_config
+                else SemanticChangeType.BODY_CHANGED
+            )
             changes.append(
                 SemanticChange(
                     commit_sha=commit_sha,
@@ -241,7 +256,9 @@ class ASTSemanticDiffer:
 
         # Index symbols excluding root file pseudo-symbol
         before_syms: dict[str, ParsedSymbol] = {
-            s.qualified_name: s for s in parsed_before.symbols if s.entity_type != "file"
+            s.qualified_name: s
+            for s in parsed_before.symbols
+            if s.entity_type != "file"
         }
         after_syms: dict[str, ParsedSymbol] = {
             s.qualified_name: s for s in parsed_after.symbols if s.entity_type != "file"
@@ -265,7 +282,10 @@ class ASTSemanticDiffer:
                     if (
                         bqname not in after_syms
                         and bsym.entity_type == asym.entity_type
-                        and (bsym.content_hash == asym.content_hash or are_symbols_lineage_match(bsym, asym))
+                        and (
+                            bsym.content_hash == asym.content_hash
+                            or are_symbols_lineage_match(bsym, asym)
+                        )
                     ):
                         renamed_from = bsym
                         break
@@ -283,7 +303,10 @@ class ASTSemanticDiffer:
                             after_fingerprint=asym.content_hash,
                             before_signature=renamed_from.signature,
                             after_signature=asym.signature,
-                            before_line_range=(renamed_from.start_line, renamed_from.end_line),
+                            before_line_range=(
+                                renamed_from.start_line,
+                                renamed_from.end_line,
+                            ),
                             after_line_range=(asym.start_line, asym.end_line),
                             details={"renamed_from": renamed_from.qualified_name},
                         )
@@ -388,7 +411,10 @@ class ASTSemanticDiffer:
                         symbol_name=asym.name,
                         qualified_name=asym.qualified_name,
                         entity_type="class",
-                        details={"before_bases": list(b_bases), "after_bases": list(a_bases)},
+                        details={
+                            "before_bases": list(b_bases),
+                            "after_bases": list(a_bases),
+                        },
                     )
                 )
 
@@ -397,7 +423,10 @@ class ASTSemanticDiffer:
             a_decorators = set(asym.metadata.get("decorators", []))
             if b_decorators != a_decorators:
                 is_route_decor = any(
-                    "get" in d.lower() or "post" in d.lower() or "put" in d.lower() or "delete" in d.lower()
+                    "get" in d.lower()
+                    or "post" in d.lower()
+                    or "put" in d.lower()
+                    or "delete" in d.lower()
                     for d in b_decorators | a_decorators
                 )
                 if is_route_decor:
@@ -409,13 +438,22 @@ class ASTSemanticDiffer:
                             symbol_name=asym.name,
                             qualified_name=asym.qualified_name,
                             entity_type=asym.entity_type,
-                            details={"before_decorators": list(b_decorators), "after_decorators": list(a_decorators)},
+                            details={
+                                "before_decorators": list(b_decorators),
+                                "after_decorators": list(a_decorators),
+                            },
                         )
                     )
 
             # 5. Relationship Changes (calls, imports from this symbol)
-            brels = {(r.relationship_type, r.target_qualified_name) for r in before_rels_by_src.get(qname, [])}
-            arels = {(r.relationship_type, r.target_qualified_name) for r in after_rels_by_src.get(qname, [])}
+            brels = {
+                (r.relationship_type, r.target_qualified_name)
+                for r in before_rels_by_src.get(qname, [])
+            }
+            arels = {
+                (r.relationship_type, r.target_qualified_name)
+                for r in after_rels_by_src.get(qname, [])
+            }
             if brels != arels:
                 diff_rels = [f"{t}:{n}" for (t, n) in (arels ^ brels)]
                 changes.append(

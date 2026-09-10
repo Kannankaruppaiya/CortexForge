@@ -144,7 +144,9 @@ class BranchReconciliationEngine:
         ours_commits = set(git.commits_between(merge_base, ours))
         theirs_commits = set(git.commits_between(merge_base, theirs))
 
-        ours_memories = await self._branch_memories(session, project_id, ours, ours_commits)
+        ours_memories = await self._branch_memories(
+            session, project_id, ours, ours_commits
+        )
         theirs_memories = await self._branch_memories(
             session, project_id, theirs, theirs_commits
         )
@@ -211,7 +213,10 @@ class BranchReconciliationEngine:
         the project once believed this is still part of its history.
         """
         report = BranchReconciliationReport(
-            project_id=project_id, event=EVENT_BRANCH_DELETED, ours=merged_into, theirs=branch
+            project_id=project_id,
+            event=EVENT_BRANCH_DELETED,
+            ours=merged_into,
+            theirs=branch,
         )
 
         memories = await self._branch_memories(session, project_id, branch, set())
@@ -297,7 +302,9 @@ class BranchReconciliationEngine:
 
         indexed = project.last_indexed_commit
         if not indexed:
-            report.notes.append("The project has never been indexed; nothing to compare.")
+            report.notes.append(
+                "The project has never been indexed; nothing to compare."
+            )
             return report
 
         git = GitProvider(project.local_path)
@@ -338,7 +345,9 @@ class BranchReconciliationEngine:
                 if version is not None:
                     session.add(version)
             except InvalidStateTransitionError as exc:
-                logger.info("Could not stale %s after history rewrite: %s", memory.id, exc)
+                logger.info(
+                    "Could not stale %s after history rewrite: %s", memory.id, exc
+                )
                 decision = DecisionCode.UNKNOWN.value
 
             report.outcomes.append(
@@ -409,8 +418,10 @@ class BranchReconciliationEngine:
     ) -> tuple[Memory, str] | None:
         """The first memory on the other side that genuinely contradicts this one."""
         for other in others:
-            is_contradiction, reason = self.conflict_resolver.detect_contradiction_heuristics(
-                other.content, candidate.content
+            is_contradiction, reason = (
+                self.conflict_resolver.detect_contradiction_heuristics(
+                    other.content, candidate.content
+                )
             )
             if is_contradiction:
                 return other, reason
@@ -456,7 +467,9 @@ class BranchReconciliationEngine:
 
         # 2. Authority, then evidence. Both are branch-independent: where a
         #    statement was made says nothing about how much it should be trusted.
-        ours_authority = authority_from_source(ours_memory.authority or ours_memory.source_type)
+        ours_authority = authority_from_source(
+            ours_memory.authority or ours_memory.source_type
+        )
         theirs_authority = authority_from_source(
             theirs_memory.authority or theirs_memory.source_type
         )
@@ -498,7 +511,10 @@ class BranchReconciliationEngine:
             f"and neither lineage, authority nor evidence settles it: {resolution}. "
             "Both are held as conflicted for a human to resolve."
         )
-        for memory, branch in ((ours_memory, ours_branch), (theirs_memory, theirs_branch)):
+        for memory, branch in (
+            (ours_memory, ours_branch),
+            (theirs_memory, theirs_branch),
+        ):
             if apply_transitions:
                 try:
                     version = MemoryLifecycleManager.transition(

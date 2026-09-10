@@ -64,13 +64,13 @@ class JobRunner:
             async with session_scope() as session:
                 yield session
 
-    async def _heartbeat_loop(
-        self, job_id: str, stop_event: asyncio.Event
-    ) -> None:
+    async def _heartbeat_loop(self, job_id: str, stop_event: asyncio.Event) -> None:
         """Periodically renew lease ownership while the job execution is active."""
         while not stop_event.is_set():
             try:
-                await asyncio.wait_for(stop_event.wait(), timeout=self.heartbeat_interval)
+                await asyncio.wait_for(
+                    stop_event.wait(), timeout=self.heartbeat_interval
+                )
                 break
             except TimeoutError:
                 pass
@@ -112,9 +112,7 @@ class JobRunner:
                     raise RuntimeError(f"Could not record failure for job {job_id}")
                 return failed_job
 
-        async def _checkpoint_writer(
-            state: dict[str, Any], progress: float
-        ) -> None:
+        async def _checkpoint_writer(state: dict[str, Any], progress: float) -> None:
             async with self._scoped_session() as session:
                 await self.store.checkpoint(
                     session,
@@ -136,9 +134,7 @@ class JobRunner:
         )
 
         stop_event = asyncio.Event()
-        heartbeat_task = asyncio.create_task(
-            self._heartbeat_loop(job_id, stop_event)
-        )
+        heartbeat_task = asyncio.create_task(self._heartbeat_loop(job_id, stop_event))
 
         from cortexforge.observability.tracing import start_async_span
 
@@ -166,7 +162,9 @@ class JobRunner:
                     retry=True,
                 )
                 if failed_job is None:
-                    raise RuntimeError(f"Could not record failure for job {job_id}") from exc
+                    raise RuntimeError(
+                        f"Could not record failure for job {job_id}"
+                    ) from exc
                 return failed_job
         else:
             stop_event.set()
@@ -182,9 +180,7 @@ class JobRunner:
                     raise RuntimeError(f"Could not record completion for job {job_id}")
                 return completed_job
 
-    async def run_once(
-        self, job_types: list[str] | None = None
-    ) -> Job | None:
+    async def run_once(self, job_types: list[str] | None = None) -> Job | None:
         """Claim and execute the oldest available job, if any."""
         claimed: ClaimedJob | None = None
         async with self._scoped_session() as session:

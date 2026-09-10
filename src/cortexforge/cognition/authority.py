@@ -148,7 +148,9 @@ def resolve_authority_conflict(
 
     if rank_a != rank_b:
         winner = "a" if rank_a > rank_b else "b"
-        hi, lo = (a_authority, b_authority) if winner == "a" else (b_authority, a_authority)
+        hi, lo = (
+            (a_authority, b_authority) if winner == "a" else (b_authority, a_authority)
+        )
         return winner, f"authority {_name(hi)} outranks {_name(lo)}"
 
     delta = a_confidence - b_confidence
@@ -161,7 +163,10 @@ def resolve_authority_conflict(
         return winner, detail
 
     if a_recency_wins:
-        return "a", f"equal authority {_name(a_authority)} and comparable confidence; newer statement preferred"
+        return (
+            "a",
+            f"equal authority {_name(a_authority)} and comparable confidence; newer statement preferred",
+        )
 
     detail = (
         f"equal authority {_name(a_authority)} and comparable confidence "

@@ -25,9 +25,11 @@ NON_MOCKABLE_ENVIRONMENTS = frozenset({"production", "prod", "staging"})
 
 def current_environment() -> str:
     """The deployment environment, defaulting to development."""
-    return os.environ.get(
-        "CORTEX_ENV", os.environ.get("ENVIRONMENT", "development")
-    ).strip().lower()
+    return (
+        os.environ.get("CORTEX_ENV", os.environ.get("ENVIRONMENT", "development"))
+        .strip()
+        .lower()
+    )
 
 
 @dataclass
@@ -98,7 +100,9 @@ class MockLLMProvider(LLMProvider):
         chosen_model = model or self.default_model
 
         # Heuristic response for memory consolidation
-        if "consolidate" in prompt.lower() or (system_prompt and "consolidate" in system_prompt.lower()):
+        if "consolidate" in prompt.lower() or (
+            system_prompt and "consolidate" in system_prompt.lower()
+        ):
             content = """# Consolidated Architectural Rules
 - Database connections must be pooled and initialized inside application lifespan.
 - All public REST endpoints must validate input models through Pydantic v2 schemas.
@@ -131,7 +135,9 @@ CONTENT: The authentication layer enforces stateless JWT verification with redis
 class OpenAIProvider(LLMProvider):
     """OpenAI API provider."""
 
-    def __init__(self, api_key: str | None = None, default_model: str | None = None) -> None:
+    def __init__(
+        self, api_key: str | None = None, default_model: str | None = None
+    ) -> None:
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         # CORTEX_LLM_MODEL is documented in .env.example, so it must actually
         # select the model rather than being decoration.
@@ -219,7 +225,9 @@ def get_llm_provider(provider_type: str | None = None) -> LLMProvider:
     let deterministic canned text flow into consolidation and become durable
     project knowledge (section 24).
     """
-    ptype = (provider_type or os.environ.get("CORTEX_LLM_PROVIDER", "mock")).strip().lower()
+    ptype = (
+        (provider_type or os.environ.get("CORTEX_LLM_PROVIDER", "mock")).strip().lower()
+    )
     environment = current_environment()
 
     if ptype == "openai":

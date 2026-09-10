@@ -64,33 +64,35 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
     },
     # Awaiting human or review approval before it can be believed (section 43).
     MemoryState.REVIEW_REQUIRED.value: {
-        MemoryState.ACTIVE.value,       # Approved by a reviewer or the user
-        MemoryState.UNVERIFIED.value,   # Sent back for evidence gathering
+        MemoryState.ACTIVE.value,  # Approved by a reviewer or the user
+        MemoryState.UNVERIFIED.value,  # Sent back for evidence gathering
+        MemoryState.STALE.value,  # Rewritten or vanished commit / ground
         MemoryState.CONFLICTED.value,
+        MemoryState.SUPERSEDED.value,  # Replaced by newer statement or decision
         MemoryState.INVALIDATED.value,  # Rejected
         MemoryState.ARCHIVED.value,
     },
     # Memory created without verified code/test evidence grounding
     MemoryState.UNVERIFIED.value: {
-        MemoryState.ACTIVE.value,       # Upon evidence verification
+        MemoryState.ACTIVE.value,  # Upon evidence verification
         MemoryState.REVIEW_REQUIRED.value,
         MemoryState.STALE.value,
         MemoryState.CONFLICTED.value,
-        MemoryState.SUPERSEDED.value,   # A newer statement can replace it unread
+        MemoryState.SUPERSEDED.value,  # A newer statement can replace it unread
         MemoryState.INVALIDATED.value,
         MemoryState.ARCHIVED.value,
     },
     # Fully active, verified, durable memory
     MemoryState.ACTIVE.value: {
-        MemoryState.STALE.value,       # When grounded symbol/code is modified
+        MemoryState.STALE.value,  # When grounded symbol/code is modified
         MemoryState.CONFLICTED.value,  # When contradictory evidence/memory is found
         MemoryState.SUPERSEDED.value,  # When higher-authority replacement is established
-        MemoryState.INVALIDATED.value, # When grounded symbol/code is completely deleted
-        MemoryState.ARCHIVED.value,    # When explicitly decommissioned
+        MemoryState.INVALIDATED.value,  # When grounded symbol/code is completely deleted
+        MemoryState.ARCHIVED.value,  # When explicitly decommissioned
     },
     # Stale memory awaiting reverification or invalidation
     MemoryState.STALE.value: {
-        MemoryState.ACTIVE.value,       # Re-verified against updated code
+        MemoryState.ACTIVE.value,  # Re-verified against updated code
         MemoryState.CONFLICTED.value,
         MemoryState.SUPERSEDED.value,
         MemoryState.INVALIDATED.value,  # Symbol deleted or assertion disproven
@@ -98,8 +100,8 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
     },
     # Contradicted memory under dispute
     MemoryState.CONFLICTED.value: {
-        MemoryState.ACTIVE.value,       # Resolved in favor of this memory
-        MemoryState.SUPERSEDED.value,   # Resolved in favor of new memory
+        MemoryState.ACTIVE.value,  # Resolved in favor of this memory
+        MemoryState.SUPERSEDED.value,  # Resolved in favor of new memory
         MemoryState.INVALIDATED.value,
         MemoryState.ARCHIVED.value,
     },

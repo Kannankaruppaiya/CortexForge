@@ -33,7 +33,9 @@ async def async_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+    factory = async_sessionmaker(
+        bind=engine, class_=AsyncSession, expire_on_commit=False
+    )
     yield factory
     await engine.dispose()
 
@@ -91,7 +93,9 @@ async def test_lease_takeover_after_worker_crash(async_db):
     store = DurableJobStore(lease_seconds=10)
 
     async with async_db() as session:
-        job, _ = await store.submit(session, job_type="HEAVY_TASK", project_id="proj_crash")
+        job, _ = await store.submit(
+            session, job_type="HEAVY_TASK", project_id="proj_crash"
+        )
         claim1 = await store.claim_next(session, worker_id="crashed_worker")
         assert claim1 is not None
 
@@ -132,7 +136,9 @@ async def test_checkpoint_resumption_skips_completed_stages(async_db):
     runner.register("STAGED", staged_handler)
 
     async with async_db() as session:
-        job, _ = await store.submit(session, job_type="STAGED", project_id="proj_stages")
+        job, _ = await store.submit(
+            session, job_type="STAGED", project_id="proj_stages"
+        )
         claim = await store.claim_next(session, worker_id=runner.worker_id)
         assert claim is not None
 
@@ -204,7 +210,9 @@ async def test_unknown_job_type_fails_non_retriable(async_db):
     runner = JobRunner(store=store, worker_id="w_test", session_factory=async_db)
 
     async with async_db() as session:
-        _job, _ = await store.submit(session, job_type="NONEXISTENT_TYPE", project_id="proj_unk")
+        _job, _ = await store.submit(
+            session, job_type="NONEXISTENT_TYPE", project_id="proj_unk"
+        )
         claim = await store.claim_next(session, worker_id=runner.worker_id)
         assert claim is not None
         await session.commit()
@@ -220,10 +228,14 @@ async def test_generation_cache_invalidates_stale_generation():
     cache = GenerationCache(default_ttl_seconds=10)
 
     # Store value for Project A generation 1
-    cache.set(project_id="proj_A", generation=1, subkey="architecture", value={"modules": 5})
+    cache.set(
+        project_id="proj_A", generation=1, subkey="architecture", value={"modules": 5}
+    )
 
     # Retrieve matching generation
-    assert cache.get("proj_A", current_generation=1, subkey="architecture") == {"modules": 5}
+    assert cache.get("proj_A", current_generation=1, subkey="architecture") == {
+        "modules": 5
+    }
 
     # Retrieve with generation 2 (stale generation rejected and evicted)
     assert cache.get("proj_A", current_generation=2, subkey="architecture") is None

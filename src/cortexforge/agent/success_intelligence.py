@@ -90,7 +90,9 @@ class SuccessIntelligence:
                 found.commit_sha = commit_sha
             return found, False
 
-        embedding = await self.embeddings.embed_text(f"{title}\n{task_context}\n{approach}")
+        embedding = await self.embeddings.embed_text(
+            f"{title}\n{task_context}\n{approach}"
+        )
 
         episode = SuccessEpisode(
             project_id=project_id,
@@ -192,13 +194,19 @@ class SuccessIntelligence:
             shared = query_token_set & set(episode_tokens)
             lexical = len(shared) / max(1, len(query_token_set | set(episode_tokens)))
             if len(shared) >= 2:
-                reasons.append(f"shared task vocabulary: {', '.join(sorted(shared)[:4])}")
+                reasons.append(
+                    f"shared task vocabulary: {', '.join(sorted(shared)[:4])}"
+                )
 
-            episode_files = {str(f).replace("\\", "/") for f in (episode.affected_files or [])}
+            episode_files = {
+                str(f).replace("\\", "/") for f in (episode.affected_files or [])
+            }
             overlap = target_set & episode_files
             file_score = len(overlap) / max(1, len(target_set)) if target_set else 0.0
             if overlap:
-                reasons.append(f"touched the same files: {', '.join(sorted(overlap)[:3])}")
+                reasons.append(
+                    f"touched the same files: {', '.join(sorted(overlap)[:3])}"
+                )
 
             signature_match = 0.0
             if failure_signature and episode.failure_episode_id:

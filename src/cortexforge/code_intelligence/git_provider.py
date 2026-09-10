@@ -79,7 +79,9 @@ class GitProvider:
 
     def list_branches(self) -> list[str]:
         """Local branch names."""
-        out = self._run_git(["for-each-ref", "--format=%(refname:short)", "refs/heads/"])
+        out = self._run_git(
+            ["for-each-ref", "--format=%(refname:short)", "refs/heads/"]
+        )
         return [line.strip() for line in out.splitlines() if line.strip()]
 
     def get_merge_base(self, ours: str, theirs: str) -> str | None:
@@ -126,7 +128,9 @@ class GitProvider:
     def get_recent_commits(self, limit: int = 10) -> list[GitCommit]:
         """Fetch list of recent commits with metadata."""
         format_str = "%H|%an|%ad|%s"
-        out = self._run_git(["log", f"-n{limit}", f"--pretty=format:{format_str}", "--date=iso"])
+        out = self._run_git(
+            ["log", f"-n{limit}", f"--pretty=format:{format_str}", "--date=iso"]
+        )
         if not out:
             return []
 
@@ -160,7 +164,9 @@ class GitProvider:
                 if " -> " in path:
                     old_p, new_p = path.split(" -> ", 1)
                     diff_files.append(
-                        GitDiffFile(file_path=new_p.strip(), status="R", old_path=old_p.strip())
+                        GitDiffFile(
+                            file_path=new_p.strip(), status="R", old_path=old_p.strip()
+                        )
                     )
                 else:
                     diff_files.append(GitDiffFile(file_path=path, status=st or "M"))
@@ -197,7 +203,9 @@ class GitProvider:
         args.extend(["--", file_path.replace("\\", "/")])
         return self._run_git(args)
 
-    def get_file_content_at_commit(self, commit_sha: str, file_path: str) -> bytes | None:
+    def get_file_content_at_commit(
+        self, commit_sha: str, file_path: str
+    ) -> bytes | None:
         """Safely fetch historical file content at a specific commit SHA using git show."""
         normalized_path = file_path.replace("\\", "/")
         try:
@@ -213,7 +221,10 @@ class GitProvider:
             return None
 
     def get_diff_hunks(
-        self, file_path: str, base_commit: str | None = None, target_commit: str = "HEAD"
+        self,
+        file_path: str,
+        base_commit: str | None = None,
+        target_commit: str = "HEAD",
     ) -> list[GitDiffHunk]:
         """Parse unified diff hunks with line numbers for a specific file."""
         import re
@@ -228,7 +239,9 @@ class GitProvider:
             return []
 
         hunks: list[GitDiffHunk] = []
-        hunk_regex = re.compile(r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@(.*)$")
+        hunk_regex = re.compile(
+            r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@(.*)$"
+        )
 
         for line in out.split("\n"):
             m = hunk_regex.match(line)

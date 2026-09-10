@@ -91,7 +91,11 @@ class CapabilityRegistry:
                 category="code_intelligence",
                 status=CapabilityStatus.IMPLEMENTED,
                 implementation_files=["src/cortexforge/code_intelligence/scanner.py"],
-                entry_points=["CLI: cortex scan", "MCP: repo_scan", "API: POST /projects/{id}/scan"],
+                entry_points=[
+                    "CLI: cortex scan",
+                    "MCP: repo_scan",
+                    "API: POST /projects/{id}/scan",
+                ],
                 tests=["tests/integration/test_scanner_and_graph.py"],
                 limitations="Supports Python, JavaScript, TypeScript, Java, and Go.",
             ),
@@ -102,7 +106,9 @@ class CapabilityRegistry:
                 status=CapabilityStatus.IMPLEMENTED,
                 implementation_files=["src/cortexforge/code_intelligence/scanner.py"],
                 entry_points=["RepositoryScanner.scan_project(incremental=True)"],
-                tests=["tests/integration/test_scanner_and_graph.py::test_incremental_relationship_graph_preservation"],
+                tests=[
+                    "tests/integration/test_scanner_and_graph.py::test_incremental_relationship_graph_preservation"
+                ],
                 limitations="Preserves untouched files and inbound cross-file relationships transactionally.",
             ),
             CapabilityEntry(
@@ -110,7 +116,9 @@ class CapabilityRegistry:
                 name="AST Semantic Diff & Symbol Analysis",
                 category="code_intelligence",
                 status=CapabilityStatus.IMPLEMENTED,
-                implementation_files=["src/cortexforge/code_intelligence/treesitter/semantic_diff.py"],
+                implementation_files=[
+                    "src/cortexforge/code_intelligence/treesitter/semantic_diff.py"
+                ],
                 entry_points=["SemanticDiffAnalyzer.diff_code()"],
                 tests=["tests/unit/test_semantic_diff.py"],
             ),
@@ -126,7 +134,6 @@ class CapabilityRegistry:
                 entry_points=["are_symbols_lineage_match()", "SymbolLineage ORM"],
                 tests=["tests/unit/test_lineage_and_invariants.py"],
             ),
-
             # 2. Memory & Propositions
             CapabilityEntry(
                 capability_id="claim_proposition_model",
@@ -137,8 +144,15 @@ class CapabilityRegistry:
                     "src/cortexforge/core/models.py",
                     "src/cortexforge/memory/claims.py",
                 ],
-                entry_points=["ClaimService", "API: /projects/{id}/claims", "MCP: memory_get_claims"],
-                tests=["tests/unit/test_claim_service.py", "tests/integration/test_claim_truth_pipeline.py"],
+                entry_points=[
+                    "ClaimService",
+                    "API: /projects/{id}/claims",
+                    "MCP: memory_get_claims",
+                ],
+                tests=[
+                    "tests/unit/test_claim_service.py",
+                    "tests/integration/test_claim_truth_pipeline.py",
+                ],
             ),
             CapabilityEntry(
                 capability_id="evidence_authority_lattice",
@@ -150,7 +164,10 @@ class CapabilityRegistry:
                     "src/cortexforge/security/trust.py",
                     "src/cortexforge/memory/claims.py",
                 ],
-                entry_points=["ClaimService.add_evidence", "Authority ordering in ClaimConflictResolver"],
+                entry_points=[
+                    "ClaimService.add_evidence",
+                    "Authority ordering in ClaimConflictResolver",
+                ],
                 tests=["tests/integration/test_claim_truth_pipeline.py"],
                 limitations="Runtime and test verification dominate code verification and agent observation.",
             ),
@@ -163,7 +180,10 @@ class CapabilityRegistry:
                     "src/cortexforge/core/models.py",
                     "src/cortexforge/verification/engine.py",
                 ],
-                entry_points=["ClaimVerificationEngine.verify_claim", "API: /claims/{id}/verify"],
+                entry_points=[
+                    "ClaimVerificationEngine.verify_claim",
+                    "API: /claims/{id}/verify",
+                ],
                 tests=["tests/unit/test_verification_engine.py"],
                 limitations="Repeated runs against identical evidence hashes do not inflate confidence.",
             ),
@@ -177,8 +197,14 @@ class CapabilityRegistry:
                     "src/cortexforge/memory/service.py",
                     "src/cortexforge/retrieval/vector_store.py",
                 ],
-                entry_points=["list_memories(at_commit, as_of_time)", "VectorStore.search(at_commit, as_of_time)"],
-                tests=["tests/evaluation/test_temporal_truth.py", "tests/unit/test_temporal_cognition.py"],
+                entry_points=[
+                    "list_memories(at_commit, as_of_time)",
+                    "VectorStore.search(at_commit, as_of_time)",
+                ],
+                tests=[
+                    "tests/evaluation/test_temporal_truth.py",
+                    "tests/unit/test_temporal_cognition.py",
+                ],
             ),
             CapabilityEntry(
                 capability_id="branch_workspace_cognition",
@@ -204,7 +230,10 @@ class CapabilityRegistry:
                     "src/cortexforge/apps/api/routes/memories.py",
                     "src/cortexforge/apps/mcp/server.py",
                 ],
-                entry_points=["MemoryService.update_memory(expected_version)", "HTTP 409 Conflict"],
+                entry_points=[
+                    "MemoryService.update_memory(expected_version)",
+                    "HTTP 409 Conflict",
+                ],
                 tests=["tests/integration/test_concurrency.py"],
             ),
             CapabilityEntry(
@@ -217,7 +246,6 @@ class CapabilityRegistry:
                 tests=["tests/integration/test_mcp_safety.py"],
                 limitations="Agent-supplied memories require verified code grounding or remain unverified candidates.",
             ),
-
             # 3. Retrieval
             CapabilityEntry(
                 capability_id="pgvector_search",
@@ -247,7 +275,6 @@ class CapabilityRegistry:
                 entry_points=["ContextComposer.build_context -> why_selected payload"],
                 tests=["tests/unit/test_context_composer.py"],
             ),
-
             # 4. Observability & Safety
             CapabilityEntry(
                 capability_id="secret_redaction",
@@ -256,7 +283,10 @@ class CapabilityRegistry:
                 status=CapabilityStatus.IMPLEMENTED,
                 implementation_files=["src/cortexforge/security/redactor.py"],
                 entry_points=["SecretRedactor.redact_secrets()"],
-                tests=["tests/unit/test_security_redactor.py", "tests/unit/test_tracing.py"],
+                tests=[
+                    "tests/unit/test_security_redactor.py",
+                    "tests/unit/test_tracing.py",
+                ],
             ),
             CapabilityEntry(
                 capability_id="opentelemetry_tracing",
@@ -264,7 +294,12 @@ class CapabilityRegistry:
                 category="observability",
                 status=CapabilityStatus.IMPLEMENTED,
                 implementation_files=["src/cortexforge/observability/tracing.py"],
-                entry_points=["start_span", "start_async_span", "API: /api/v1/traces", "Header: X-Trace-ID"],
+                entry_points=[
+                    "start_span",
+                    "start_async_span",
+                    "API: /api/v1/traces",
+                    "Header: X-Trace-ID",
+                ],
                 tests=["tests/unit/test_tracing.py"],
             ),
             CapabilityEntry(
@@ -297,7 +332,9 @@ class CapabilityRegistry:
                 status=CapabilityStatus.IMPLEMENTED,
                 implementation_files=["src/cortexforge/architecture/invariants.py"],
                 entry_points=["ArchitectureInvariantEngine.evaluate_invariants()"],
-                tests=["tests/unit/test_lineage_and_invariants.py::test_architecture_modalities"],
+                tests=[
+                    "tests/unit/test_lineage_and_invariants.py::test_architecture_modalities"
+                ],
                 limitations="Enforces MUST, MUST_NOT, SHOULD, ONLY_IF, and REQUIRES modalities with evidence.",
             ),
             CapabilityEntry(

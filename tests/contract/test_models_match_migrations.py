@@ -81,7 +81,9 @@ def test_every_model_column_exists_in_migrations(migrated_inspector):
     for table_name, table in Base.metadata.tables.items():
         if table_name not in set(migrated_inspector.get_table_names()):
             continue  # reported by the table-level test
-        migrated_columns = {c["name"] for c in migrated_inspector.get_columns(table_name)}
+        migrated_columns = {
+            c["name"] for c in migrated_inspector.get_columns(table_name)
+        }
         missing = sorted({c.name for c in table.columns} - migrated_columns)
         if missing:
             drift[table_name] = missing
@@ -112,7 +114,9 @@ def test_no_orphan_columns_in_migrations(migrated_inspector):
             continue
         model_columns = {c.name for c in table.columns}
         model_columns |= INTENTIONALLY_UNMAPPED.get(table_name, set())
-        migrated_columns = {c["name"] for c in migrated_inspector.get_columns(table_name)}
+        migrated_columns = {
+            c["name"] for c in migrated_inspector.get_columns(table_name)
+        }
         orphans = sorted(migrated_columns - model_columns)
         if orphans:
             drift[table_name] = orphans
@@ -142,8 +146,12 @@ def test_unique_constraints_that_enforce_idempotency_are_migrated(migrated_inspe
     }
 
     for table_name, constraint_name in required.items():
-        names = {c["name"] for c in migrated_inspector.get_unique_constraints(table_name)}
-        names |= {i["name"] for i in migrated_inspector.get_indexes(table_name) if i["unique"]}
+        names = {
+            c["name"] for c in migrated_inspector.get_unique_constraints(table_name)
+        }
+        names |= {
+            i["name"] for i in migrated_inspector.get_indexes(table_name) if i["unique"]
+        }
         assert constraint_name in names, (
             f"{table_name} is missing the {constraint_name} constraint in the migrated "
             "schema, so duplicate rows would be accepted by the database."

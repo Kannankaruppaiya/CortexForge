@@ -40,7 +40,9 @@ def test_implemented_capabilities_have_files_and_tests():
     """Verify every IMPLEMENTED capability records truthful implementation files and tests."""
     reg = CapabilityRegistry.get_instance()
     for cap in reg.list_capabilities(status=CapabilityStatus.IMPLEMENTED):
-        assert len(cap.implementation_files) > 0, f"{cap.capability_id} missing implementation_files"
+        assert len(cap.implementation_files) > 0, (
+            f"{cap.capability_id} missing implementation_files"
+        )
         assert len(cap.tests) > 0, f"{cap.capability_id} missing tests"
 
 

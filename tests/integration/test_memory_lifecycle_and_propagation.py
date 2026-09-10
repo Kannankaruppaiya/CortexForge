@@ -111,7 +111,9 @@ async def test_memory_crud_and_versioning(memory_test_repo, mem_session: AsyncSe
 
 
 @pytest.mark.asyncio
-async def test_memory_verification_and_change_propagation(memory_test_repo, mem_session: AsyncSession):
+async def test_memory_verification_and_change_propagation(
+    memory_test_repo, mem_session: AsyncSession
+):
     """Test verification engine and semantic change propagation."""
     project = Project(
         name="PropTestProject",
@@ -243,7 +245,9 @@ async def test_memory_consolidation(memory_test_repo, mem_session: AsyncSession)
         await mem_session.refresh(episode)
         assert episode.status != "ARCHIVED"
 
-    lessons = await mem_service.list_memories(mem_session, project.id, memory_type="LESSON")
+    lessons = await mem_service.list_memories(
+        mem_session, project.id, memory_type="LESSON"
+    )
     assert len(lessons) >= 1
     assert lessons[0].status == "REVIEW_REQUIRED"
     assert lessons[0].authority == "LLM_GENERATED"

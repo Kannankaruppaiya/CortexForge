@@ -67,10 +67,14 @@ class ArchitectureInvariantEngine:
         # Relationships and entities are fetched separately and joined in memory:
         # a single self-joined query would need two aliases of code_entities, and
         # the two-query form keeps the entity map reusable across every rule.
-        all_rels_stmt = select(Relationship).where(Relationship.project_id == project_id)
+        all_rels_stmt = select(Relationship).where(
+            Relationship.project_id == project_id
+        )
         all_rels = list((await session.execute(all_rels_stmt)).scalars().all())
 
-        all_entities_stmt = select(CodeEntity).where(CodeEntity.project_id == project_id)
+        all_entities_stmt = select(CodeEntity).where(
+            CodeEntity.project_id == project_id
+        )
         all_entities = list((await session.execute(all_entities_stmt)).scalars().all())
         entity_map = {e.id: e for e in all_entities}
 
@@ -97,14 +101,12 @@ class ArchitectureInvariantEngine:
                     if not src or not tgt:
                         continue
 
-                    src_matches = (
-                        self._matches_pattern(src_pat, src.qualified_name)
-                        or self._matches_pattern(src_pat, src.file_path)
-                    )
-                    tgt_matches = (
-                        self._matches_pattern(tgt_pat, tgt.qualified_name)
-                        or self._matches_pattern(tgt_pat, tgt.file_path)
-                    )
+                    src_matches = self._matches_pattern(
+                        src_pat, src.qualified_name
+                    ) or self._matches_pattern(src_pat, src.file_path)
+                    tgt_matches = self._matches_pattern(
+                        tgt_pat, tgt.qualified_name
+                    ) or self._matches_pattern(tgt_pat, tgt.file_path)
 
                     if src_matches and tgt_matches:
                         details = (
@@ -122,14 +124,16 @@ class ArchitectureInvariantEngine:
                         if persist_violations:
                             session.add(violation)
 
-                        detected_violations.append({
-                            "rule_id": rule.id,
-                            "rule_name": rule.rule_name,
-                            "severity": rule.severity,
-                            "source": src.qualified_name,
-                            "target": tgt.qualified_name,
-                            "details": details,
-                        })
+                        detected_violations.append(
+                            {
+                                "rule_id": rule.id,
+                                "rule_name": rule.rule_name,
+                                "severity": rule.severity,
+                                "source": src.qualified_name,
+                                "target": tgt.qualified_name,
+                                "details": details,
+                            }
+                        )
 
                         if rule.severity.upper() in ("ERROR", "CRITICAL"):
                             has_critical = True
@@ -141,15 +145,13 @@ class ArchitectureInvariantEngine:
                     if not src or not tgt:
                         continue
 
-                    tgt_matches = (
-                        self._matches_pattern(tgt_pat, tgt.qualified_name)
-                        or self._matches_pattern(tgt_pat, tgt.file_path)
-                    )
+                    tgt_matches = self._matches_pattern(
+                        tgt_pat, tgt.qualified_name
+                    ) or self._matches_pattern(tgt_pat, tgt.file_path)
                     if tgt_matches:
-                        src_matches = (
-                            self._matches_pattern(src_pat, src.qualified_name)
-                            or self._matches_pattern(src_pat, src.file_path)
-                        )
+                        src_matches = self._matches_pattern(
+                            src_pat, src.qualified_name
+                        ) or self._matches_pattern(src_pat, src.file_path)
                         if not src_matches:
                             details = (
                                 f"Architecture violation [{rule.severity}] [ONLY_IF]: '{tgt.qualified_name}' "
@@ -167,21 +169,24 @@ class ArchitectureInvariantEngine:
                             if persist_violations:
                                 session.add(violation)
 
-                            detected_violations.append({
-                                "rule_id": rule.id,
-                                "rule_name": rule.rule_name,
-                                "severity": rule.severity,
-                                "source": src.qualified_name,
-                                "target": tgt.qualified_name,
-                                "details": details,
-                            })
+                            detected_violations.append(
+                                {
+                                    "rule_id": rule.id,
+                                    "rule_name": rule.rule_name,
+                                    "severity": rule.severity,
+                                    "source": src.qualified_name,
+                                    "target": tgt.qualified_name,
+                                    "details": details,
+                                }
+                            )
 
                             if rule.severity.upper() in ("ERROR", "CRITICAL"):
                                 has_critical = True
 
             elif modality in ("MUST", "REQUIRES"):
                 matching_sources = [
-                    e for e in all_entities
+                    e
+                    for e in all_entities
                     if self._matches_pattern(src_pat, e.qualified_name)
                     or self._matches_pattern(src_pat, e.file_path)
                 ]
@@ -191,8 +196,13 @@ class ArchitectureInvariantEngine:
                         (
                             entity_map.get(r.target_entity_id) is not None
                             and (
-                                self._matches_pattern(tgt_pat, entity_map[r.target_entity_id].qualified_name)
-                                or self._matches_pattern(tgt_pat, entity_map[r.target_entity_id].file_path)
+                                self._matches_pattern(
+                                    tgt_pat,
+                                    entity_map[r.target_entity_id].qualified_name,
+                                )
+                                or self._matches_pattern(
+                                    tgt_pat, entity_map[r.target_entity_id].file_path
+                                )
                             )
                         )
                         for r in out_rels
@@ -213,14 +223,16 @@ class ArchitectureInvariantEngine:
                         if persist_violations:
                             session.add(violation)
 
-                        detected_violations.append({
-                            "rule_id": rule.id,
-                            "rule_name": rule.rule_name,
-                            "severity": rule.severity,
-                            "source": src.qualified_name,
-                            "target": "<NONE>",
-                            "details": details,
-                        })
+                        detected_violations.append(
+                            {
+                                "rule_id": rule.id,
+                                "rule_name": rule.rule_name,
+                                "severity": rule.severity,
+                                "source": src.qualified_name,
+                                "target": "<NONE>",
+                                "details": details,
+                            }
+                        )
 
                         if rule.severity.upper() in ("ERROR", "CRITICAL"):
                             has_critical = True
@@ -232,14 +244,12 @@ class ArchitectureInvariantEngine:
                     if not src or not tgt:
                         continue
 
-                    src_matches = (
-                        self._matches_pattern(src_pat, src.qualified_name)
-                        or self._matches_pattern(src_pat, src.file_path)
-                    )
-                    tgt_matches = (
-                        self._matches_pattern(tgt_pat, tgt.qualified_name)
-                        or self._matches_pattern(tgt_pat, tgt.file_path)
-                    )
+                    src_matches = self._matches_pattern(
+                        src_pat, src.qualified_name
+                    ) or self._matches_pattern(src_pat, src.file_path)
+                    tgt_matches = self._matches_pattern(
+                        tgt_pat, tgt.qualified_name
+                    ) or self._matches_pattern(tgt_pat, tgt.file_path)
 
                     if src_matches and tgt_matches:
                         severity = "WARNING"
@@ -258,14 +268,16 @@ class ArchitectureInvariantEngine:
                         if persist_violations:
                             session.add(violation)
 
-                        detected_violations.append({
-                            "rule_id": rule.id,
-                            "rule_name": rule.rule_name,
-                            "severity": severity,
-                            "source": src.qualified_name,
-                            "target": tgt.qualified_name,
-                            "details": details,
-                        })
+                        detected_violations.append(
+                            {
+                                "rule_id": rule.id,
+                                "rule_name": rule.rule_name,
+                                "severity": severity,
+                                "source": src.qualified_name,
+                                "target": tgt.qualified_name,
+                                "details": details,
+                            }
+                        )
 
         if persist_violations and detected_violations:
             await session.commit()
@@ -283,7 +295,9 @@ class ArchitectureInvariantEngine:
         commit_sha: str | None = None,
     ) -> list[RuleViolation]:
         """Evaluate rules and return list of persisted RuleViolation records."""
-        await self.evaluate_rules(session, project_id, commit_sha=commit_sha, persist_violations=True)
+        await self.evaluate_rules(
+            session, project_id, commit_sha=commit_sha, persist_violations=True
+        )
         stmt = (
             select(RuleViolation)
             .join(ArchitectureRule, RuleViolation.rule_id == ArchitectureRule.id)
@@ -291,4 +305,3 @@ class ArchitectureInvariantEngine:
         )
         res = await session.execute(stmt)
         return list(res.scalars().all())
-

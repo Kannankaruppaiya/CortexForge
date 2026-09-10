@@ -138,10 +138,10 @@ class TestIntelligenceEngine:
         report = TestIntelligenceReport(test_run_id=run.id, commit_sha=run.commit_sha)
 
         for result in results:
-            history = await self._history(session, run.project_id, result.test_name, run.id)
-            report.verdicts.append(
-                self._attribute(result, history, changed_symbols)
+            history = await self._history(
+                session, run.project_id, result.test_name, run.id
             )
+            report.verdicts.append(self._attribute(result, history, changed_symbols))
 
         return report
 
@@ -157,7 +157,9 @@ class TestIntelligenceEngine:
         changes = list(
             (
                 await session.execute(
-                    select(SymbolChange).where(SymbolChange.change_set_id == change_set_id)
+                    select(SymbolChange).where(
+                        SymbolChange.change_set_id == change_set_id
+                    )
                 )
             )
             .scalars()
@@ -222,7 +224,9 @@ class TestIntelligenceEngine:
                 )
             else:
                 base.attribution = TestAttribution.UNRELATED.value
-                base.reason = "The test passed and was already passing; nothing to attribute."
+                base.reason = (
+                    "The test passed and was already passing; nothing to attribute."
+                )
             return base
 
         if result.status != "FAILED":
@@ -287,11 +291,10 @@ class TestIntelligenceEngine:
             )
             return base
 
-        base.attribution = TestAttribution.INTRODUCED_BY.value
+        base.attribution = TestAttribution.UNKNOWN.value
         base.reason = (
-            "This test passed on the previous run and fails now. No change set was "
-            "supplied to narrow the cause, so the change under test is the only "
-            "candidate."
+            "This test passed on the previous run and fails now, but no changeset or "
+            "causal evidence was supplied. In the absence of evidence, causality cannot be inferred."
         )
         return base
 
@@ -302,7 +305,9 @@ class TestIntelligenceEngine:
             return set()
 
         referenced: set[str] = set()
-        for value in list(result.affected_files or []) + list(result.affected_symbols or []):
+        for value in list(result.affected_files or []) + list(
+            result.affected_symbols or []
+        ):
             referenced.add(str(value))
 
         # The stack trace names the code the failure travelled through, which is

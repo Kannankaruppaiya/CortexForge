@@ -35,7 +35,116 @@ from dataclasses import dataclass, field
 
 # Tokens carrying no propositional content.
 _STOP_WORDS: frozenset[str] = frozenset(
-    ["a", "an", "the", "this", "that", "these", "those", "is", "are", "was", "were", "be", "been", "being", "am", "of", "to", "in", "on", "at", "by", "for", "with", "from", "into", "over", "under", "about", "as", "it", "its", "and", "or", "but", "so", "then", "than", "there", "here", "we", "you", "they", "he", "she", "i", "our", "your", "their", "must", "should", "shall", "will", "would", "can", "could", "may", "might", "do", "does", "did", "done", "via", "which", "who", "whom", "whose", "what", "when", "where", "why", "how", "all", "any", "some", "each", "every", "no", "not", "only", "also", "just", "very", "more", "most", "much", "many", "if", "else", "while", "during", "between", "within", "without", "after", "before", "now", "new", "old", "project", "code", "system", "application", "service", "module", "file", "line", "thing", "stuff"]
+    [
+        "a",
+        "an",
+        "the",
+        "this",
+        "that",
+        "these",
+        "those",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "am",
+        "of",
+        "to",
+        "in",
+        "on",
+        "at",
+        "by",
+        "for",
+        "with",
+        "from",
+        "into",
+        "over",
+        "under",
+        "about",
+        "as",
+        "it",
+        "its",
+        "and",
+        "or",
+        "but",
+        "so",
+        "then",
+        "than",
+        "there",
+        "here",
+        "we",
+        "you",
+        "they",
+        "he",
+        "she",
+        "i",
+        "our",
+        "your",
+        "their",
+        "must",
+        "should",
+        "shall",
+        "will",
+        "would",
+        "can",
+        "could",
+        "may",
+        "might",
+        "do",
+        "does",
+        "did",
+        "done",
+        "via",
+        "which",
+        "who",
+        "whom",
+        "whose",
+        "what",
+        "when",
+        "where",
+        "why",
+        "how",
+        "all",
+        "any",
+        "some",
+        "each",
+        "every",
+        "no",
+        "not",
+        "only",
+        "also",
+        "just",
+        "very",
+        "more",
+        "most",
+        "much",
+        "many",
+        "if",
+        "else",
+        "while",
+        "during",
+        "between",
+        "within",
+        "without",
+        "after",
+        "before",
+        "now",
+        "new",
+        "old",
+        "project",
+        "code",
+        "system",
+        "application",
+        "service",
+        "module",
+        "file",
+        "line",
+        "thing",
+        "stuff",
+    ]
 )
 
 # Surface-form folding: distinct spellings of one concept map to one token.
@@ -107,7 +216,27 @@ _PHRASE_FOLDS: list[tuple[re.Pattern[str], str]] = [
 # Words that look plural but are not; depluralising them produces nonsense
 # ("redis" -> "redi", "https" -> "http").
 _NOT_PLURAL: frozenset[str] = frozenset(
-    ["redis", "https", "tls", "dns", "cors", "jenkins", "kubernetes", "aws", "sas", "gis", "status", "bus", "class", "access", "process", "success", "address", "analysis", "basis"]
+    [
+        "redis",
+        "https",
+        "tls",
+        "dns",
+        "cors",
+        "jenkins",
+        "kubernetes",
+        "aws",
+        "sas",
+        "gis",
+        "status",
+        "bus",
+        "class",
+        "access",
+        "process",
+        "success",
+        "address",
+        "analysis",
+        "basis",
+    ]
 )
 
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
@@ -189,7 +318,12 @@ def compute_claim_key(
     which is what makes deduplication a database invariant rather than a heuristic.
     """
     material = " ".join(
-        [project_id or "", (scope or "PROJECT").upper(), scope_ref or "", canonical_text or ""]
+        [
+            project_id or "",
+            (scope or "PROJECT").upper(),
+            scope_ref or "",
+            canonical_text or "",
+        ]
     )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
@@ -212,7 +346,9 @@ def _split_propositions(text: str) -> list[str]:
     return fragments
 
 
-_COPULA = frozenset({"is", "are", "was", "were", "use", "has", "have", "must", "should"})
+_COPULA = frozenset(
+    {"is", "are", "was", "were", "use", "has", "have", "must", "should"}
+)
 
 
 def _derive_subject_predicate(text: str) -> tuple[str | None, str | None]:

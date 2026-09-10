@@ -36,7 +36,11 @@ from cortexforge.core.models import (
     VerificationRun,
 )
 from cortexforge.memory.lifecycle import MemoryState
-from cortexforge.retrieval.composer import ContextComposer
+from cortexforge.retrieval.composer import (
+    PROFILE_BUDGETS,
+    ContextComposer,
+    enforce_token_budget,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +88,9 @@ class CognitiveSnapshotEngine:
         rules = list(
             (
                 await session.execute(
-                    select(ArchitectureRule).where(ArchitectureRule.project_id == project_id)
+                    select(ArchitectureRule).where(
+                        ArchitectureRule.project_id == project_id
+                    )
                 )
             )
             .scalars()
@@ -145,13 +151,17 @@ class CognitiveSnapshotEngine:
         ]
 
         latest_run = (
-            await session.execute(
-                select(VerificationRun)
-                .where(VerificationRun.project_id == project_id)
-                .order_by(VerificationRun.started_at.desc())
-                .limit(1)
+            (
+                await session.execute(
+                    select(VerificationRun)
+                    .where(VerificationRun.project_id == project_id)
+                    .order_by(VerificationRun.started_at.desc())
+                    .limit(1)
+                )
             )
-        ).scalars().first()
+            .scalars()
+            .first()
+        )
 
         verification_state = (
             {
@@ -166,7 +176,10 @@ class CognitiveSnapshotEngine:
                 "not_applicable": latest_run.not_applicable_count,
             }
             if latest_run is not None
-            else {"run_id": None, "note": "no verification has been run for this project"}
+            else {
+                "run_id": None,
+                "note": "no verification has been run for this project",
+            }
         )
 
         generation = (
@@ -204,7 +217,9 @@ class CognitiveSnapshotEngine:
             architecture_rule_versions=rule_versions,
             verification_state=verification_state,
             policy_versions={p.name: p.version for p in policies},
-            state_hash=cls.compute_state_hash(memory_versions, claim_states, rule_versions),
+            state_hash=cls.compute_state_hash(
+                memory_versions, claim_states, rule_versions
+            ),
             created_at=datetime.now(UTC),
         )
         session.add(snapshot)
@@ -323,18 +338,78 @@ class CognitiveSnapshotEngine:
         unresolved_claims = [
             entry
             for entry in (snapshot.claim_states or [])
-            if entry.get("status") in (ClaimStatus.UNKNOWN.value, ClaimStatus.CONFLICTED.value)
+            if entry.get("status")
+            in (ClaimStatus.UNKNOWN.value, ClaimStatus.CONFLICTED.value)
         ]
+
+        # Deterministically score and select candidate memories based on task_text and profile
+        task_tokens = set(task_text.lower().split())
+        scored_candidates = []
+        for mem in believed:
+            title_tokens = set(mem.get("title", "").lower().split())
+            overlap = len(task_tokens & title_tokens)
+            conf = float(mem.get("confidence", 1.0))
+            score = overlap * 10.0 + conf
+            scored_candidates.append((score, mem))
+
+        # Sort descending by score, tie-break on memory_id for pure determinism
+        scored_candidates.sort(key=lambda x: (-x[0], str(x[1].get("memory_id", ""))))
+
+        budget = PROFILE_BUDGETS.get(profile.lower(), 3500)
+        lines = [
+            f"# Replay Cognitive State: Commit {commit_sha[:8]}",
+            f"- **Project**: `{project.name}`",
+            f"- **Task**: {task_text}",
+            f"- **Profile**: {profile.lower()} (Budget: {budget} tokens)",
+            f"- **Snapshot State Hash**: `{snapshot.state_hash}`",
+            "",
+            "## Believed Architectural Knowledge (As Of Revision)",
+        ]
+
+        selected_memories = []
+        for score, mem in scored_candidates:
+            selected_memories.append(mem)
+            lines.append(
+                f"- **[{mem.get('memory_type', 'FACT')}] {mem.get('title', '')}** (Layer: {mem.get('layer', 'L1')}, Conf: {mem.get('confidence', 1.0):.2f})"
+            )
+            # Stop adding to markdown if conservative word count reaches budget
+            if sum(len(line.split()) for line in lines) * 1.3 > budget:
+                break
+
+        lines.append("")
+        lines.append("<!-- END REPLAY CONTEXT -->")
+        raw_markdown = "\n".join(lines)
+        composed_markdown, _ = enforce_token_budget(raw_markdown, budget)
+
+        # Compute deterministic replay hash
+        replay_fingerprint = {
+            "snapshot_state_hash": snapshot.state_hash,
+            "commit_sha": commit_sha,
+            "task_text": task_text.strip(),
+            "profile": profile.lower(),
+            "selected_ids": [m["memory_id"] for m in selected_memories],
+            "composed_markdown": composed_markdown,
+        }
+        replay_hash = hashlib.sha256(
+            json.dumps(replay_fingerprint, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
 
         return {
             "project_id": project_id,
             "commit_sha": commit_sha,
             "replay_available": True,
+            "task_text": task_text,
+            "profile": profile,
             "snapshot_id": snapshot.id,
             "snapshot_generation": snapshot.cognitive_generation,
             "state_hash": snapshot.state_hash,
+            "deterministic_replay_hash": replay_hash,
+            "composed_context_markdown": composed_markdown,
+            "candidate_memories": believed,
+            "selected_memories": selected_memories,
             "retrieval_version": snapshot.retrieval_version,
             "embedding_version": snapshot.embedding_version,
+            "parser_version": "treesitter-1.0",
             "policy_versions": snapshot.policy_versions,
             "active_memories_count": snapshot.active_memories_count,
             "believed_memories": believed,

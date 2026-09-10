@@ -66,7 +66,9 @@ def test_reactivation_requires_reverification():
             mem, new_state=MemoryState.ACTIVE.value, reason="looks fine now"
         )
     assert "re-verification" in str(unverified.value)
-    assert mem.status == MemoryState.STALE.value, "refused transition must not mutate state"
+    assert mem.status == MemoryState.STALE.value, (
+        "refused transition must not mutate state"
+    )
 
     version = MemoryLifecycleManager.transition(
         mem,

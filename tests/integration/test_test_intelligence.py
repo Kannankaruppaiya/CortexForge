@@ -103,9 +103,14 @@ async def test_a_newly_failing_test_touching_changed_code_blames_the_change(
     test_session: AsyncSession, project
 ):
     """Passing before, failing now, and it exercises what changed: INTRODUCED_BY."""
-    await _record_run(test_session, project, {"test_checkout": "PASSED"}, minutes_ago=10)
+    await _record_run(
+        test_session, project, {"test_checkout": "PASSED"}, minutes_ago=10
+    )
     change_set = await _change_set(
-        test_session, project, "services.checkout.calculate_total", "services/checkout.py"
+        test_session,
+        project,
+        "services.checkout.calculate_total",
+        "services/checkout.py",
     )
     run = await _record_run(
         test_session,
@@ -153,7 +158,10 @@ async def test_a_flaky_test_is_discounted_rather_than_believed(
         ["FAILED", "PASSED", "FAILED", "PASSED", "FAILED", "PASSED"]
     ):
         await _record_run(
-            test_session, project, {"test_flaky_network": status}, minutes_ago=60 - index * 5
+            test_session,
+            project,
+            {"test_flaky_network": status},
+            minutes_ago=60 - index * 5,
         )
 
     run = await _record_run(test_session, project, {"test_flaky_network": "FAILED"})
@@ -179,7 +187,10 @@ async def test_a_consistently_failing_test_is_not_called_flaky(
     """
     for index in range(5):
         await _record_run(
-            test_session, project, {"test_always_broken": "FAILED"}, minutes_ago=60 - index * 5
+            test_session,
+            project,
+            {"test_always_broken": "FAILED"},
+            minutes_ago=60 - index * 5,
         )
 
     run = await _record_run(test_session, project, {"test_always_broken": "FAILED"})
@@ -194,7 +205,9 @@ async def test_a_newly_passing_test_credits_the_change(
     test_session: AsyncSession, project
 ):
     """Failing before, passing now: FIXED_BY."""
-    await _record_run(test_session, project, {"test_regression": "FAILED"}, minutes_ago=10)
+    await _record_run(
+        test_session, project, {"test_regression": "FAILED"}, minutes_ago=10
+    )
     run = await _record_run(test_session, project, {"test_regression": "PASSED"})
 
     report = await TestIntelligenceEngine().attribute_run(test_session, run.id)
@@ -232,7 +245,9 @@ async def test_an_indirect_failure_is_reported_as_a_regression(
     Both count against the change; the difference is what a person reading the
     report is told about where to look.
     """
-    await _record_run(test_session, project, {"test_reporting": "PASSED"}, minutes_ago=10)
+    await _record_run(
+        test_session, project, {"test_reporting": "PASSED"}, minutes_ago=10
+    )
     change_set = await _change_set(
         test_session, project, "services.auth.verify", "services/auth.py"
     )
@@ -282,7 +297,9 @@ async def test_a_run_separates_real_signal_from_noise(
     report = await TestIntelligenceEngine().attribute_run(
         test_session, run.id, change_set_id=change_set.id
     )
-    attributions = {verdict.test_name: verdict.attribution for verdict in report.verdicts}
+    attributions = {
+        verdict.test_name: verdict.attribution for verdict in report.verdicts
+    }
 
     assert attributions["test_flaky"] == TestAttribution.FLAKY.value
     assert attributions["test_stable"] == TestAttribution.INTRODUCED_BY.value

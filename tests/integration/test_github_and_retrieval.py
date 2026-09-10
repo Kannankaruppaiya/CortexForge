@@ -48,7 +48,12 @@ async def test_github_webhook_ping_and_hmac(sample_repo, test_session: AsyncSess
         assert resp_invalid.status_code == 401
 
         # 2. Valid signature should return pong
-        valid_sig = "sha256=" + hmac.new(secret.encode("utf-8"), payload_bytes, hashlib.sha256).hexdigest()
+        valid_sig = (
+            "sha256="
+            + hmac.new(
+                secret.encode("utf-8"), payload_bytes, hashlib.sha256
+            ).hexdigest()
+        )
         resp_valid = await client.post(
             "/api/v1/github/webhooks",
             content=payload_bytes,
@@ -143,7 +148,9 @@ async def test_hybrid_retrieval_and_mmr(sample_repo, test_session: AsyncSession)
             summary="Stateless JWT decision",
             importance=0.9,
             evidence=[
-                MemoryEvidenceCreate(source_type="file", file_path="services/auth.py", confidence=1.0)
+                MemoryEvidenceCreate(
+                    source_type="file", file_path="services/auth.py", confidence=1.0
+                )
             ],
         ),
     )
@@ -158,7 +165,9 @@ async def test_hybrid_retrieval_and_mmr(sample_repo, test_session: AsyncSession)
             summary="Refresh token concurrency bug",
             importance=0.8,
             evidence=[
-                MemoryEvidenceCreate(source_type="file", file_path="services/auth.py", confidence=0.95)
+                MemoryEvidenceCreate(
+                    source_type="file", file_path="services/auth.py", confidence=0.95
+                )
             ],
         ),
     )
@@ -190,4 +199,3 @@ async def test_hybrid_retrieval_and_mmr(sample_repo, test_session: AsyncSession)
     assert "CORTEXFORGE VERIFIED PROJECT CONTEXT" in context_md
     assert "RetrievalTestRepo" in context_md
     assert "JWT" in context_md or "Token" in context_md
-

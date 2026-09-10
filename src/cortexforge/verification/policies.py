@@ -177,7 +177,10 @@ def resolve_policies_for_claim(
             if policy.applies_to_epistemic_state.upper() == epistemic:
                 matched.append(policy)
             continue
-        if policy.applies_to_evidence_type and policy.applies_to_evidence_type.upper() in evidence_types:
+        if (
+            policy.applies_to_evidence_type
+            and policy.applies_to_evidence_type.upper() in evidence_types
+        ):
             matched.append(policy)
 
     if matched:

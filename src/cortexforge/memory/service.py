@@ -11,12 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from cortexforge.cognition.authority import (
-    Authority,
     authority_from_source,
-    authority_rank,
-    is_proposal_only,
 )
 from cortexforge.cognition.epistemics import EpistemicState, EvidenceType
+from cortexforge.cognition.promotion import evaluate_memory_promotion
 from cortexforge.core.models import (
     Memory,
     MemoryEvidence,
@@ -30,7 +28,8 @@ from cortexforge.memory.claims import ClaimService
 from cortexforge.memory.confidence import ConfidenceScorer
 from cortexforge.memory.conflict_resolver import ConflictResolver
 from cortexforge.memory.lifecycle import MemoryLifecycleManager, MemoryState
-from cortexforge.security.redactor import sanitize_text
+from cortexforge.security.path_safety import PathSecurity, PathSecurityError
+from cortexforge.security.redactor import SecretRedactor, sanitize_text
 
 
 def cosine_similarity(v1: list[float], v2: list[float]) -> float:
@@ -54,7 +53,9 @@ class MemoryServiceError(Exception):
 class ConcurrentModificationError(MemoryServiceError):
     """Raised when an update specifies an expected_version that differs from current state."""
 
-    def __init__(self, memory_id: str, current_version: int, expected_version: int) -> None:
+    def __init__(
+        self, memory_id: str, current_version: int, expected_version: int
+    ) -> None:
         super().__init__(
             f"Concurrent modification on memory '{memory_id}': expected version {expected_version}, but current version is {current_version}"
         )
@@ -122,22 +123,14 @@ class MemoryService:
         sanitized_summary = sanitize_text(payload.summary)
 
         # Generate embedding for sanitized memory content
-        embed_res = await self.embedding_provider.embed_text(f"{sanitized_title}\n{sanitized_content}")
+        embed_res = await self.embedding_provider.embed_text(
+            f"{sanitized_title}\n{sanitized_content}"
+        )
 
         # Resolve the source onto the authority hierarchy once, here, so that every
         # downstream decision (confidence, conflict arbitration, activation) reads
         # one value rather than re-interpreting a free-form source string.
         authority = authority_from_source(payload.authority or payload.source_type)
-
-        # Confidence is always derived, never taken on trust from the caller. A
-        # client that asks for confidence 1.0 does not get it: the score comes from
-        # the authority and evidence actually presented (section 8).
-        conf_res = ConfidenceScorer.score(
-            authority=authority,
-            evidence=payload.evidence,
-            status="ACTIVE",
-        )
-        confidence = conf_res.score
 
         # Explicit cognitive layer
         layer = (payload.layer or "L1").upper()
@@ -158,19 +151,22 @@ class MemoryService:
         # 3. Otherwise: grounded claims are believed and subsequently verified;
         #    ungrounded ones are recorded as UNVERIFIED rather than presented as
         #    established.
-        is_high_impact = payload.memory_type.upper() in _REVIEW_REQUIRED_TYPES
-        speaks_for_itself = authority_rank(authority) >= authority_rank(
-            Authority.USER_CONFIRMED
+        project = await session.get(Project, project_id)
+        promotion_decision = evaluate_memory_promotion(
+            payload=payload, project=project, authority=authority
         )
+        status = promotion_decision.initial_status
+        effective_authority = promotion_decision.authority
 
-        if is_proposal_only(authority):
-            status = MemoryState.CANDIDATE.value
-        elif is_high_impact and not payload.evidence and not speaks_for_itself:
-            status = MemoryState.REVIEW_REQUIRED.value
-        elif payload.evidence:
-            status = MemoryState.ACTIVE.value
-        else:
-            status = MemoryState.UNVERIFIED.value
+        # Confidence is always derived, never taken on trust from the caller. A
+        # client that asks for confidence 1.0 does not get it: the score comes from
+        # the authority and evidence actually presented (section 8).
+        conf_res = ConfidenceScorer.score(
+            authority=effective_authority,
+            evidence=promotion_decision.verified_evidence,
+            status=status,
+        )
+        confidence = conf_res.score
 
         memory = Memory(
             project_id=project_id,
@@ -185,7 +181,11 @@ class MemoryService:
                 **conf_res.components,
                 "explanation": conf_res.explanation,
             },
-            authority=authority.value,
+            authority=(
+                effective_authority.value
+                if hasattr(effective_authority, "value")
+                else str(effective_authority)
+            ),
             epistemic_state=_EPISTEMIC_FOR_TYPE.get(
                 payload.memory_type.upper(), EpistemicState.OBSERVATION.value
             ),
@@ -195,7 +195,8 @@ class MemoryService:
             scope=(payload.scope or "PROJECT").upper(),
             branch=payload.branch,
             workspace=payload.workspace,
-            is_working_tree=getattr(payload, "is_working_tree", False) or (payload.source_commit == "WORKING_TREE"),
+            is_working_tree=getattr(payload, "is_working_tree", False)
+            or (payload.source_commit == "WORKING_TREE"),
             source_reference=payload.source_reference,
             source_commit=payload.source_commit,
             valid_from_commit=payload.valid_from_commit or payload.source_commit,
@@ -210,7 +211,7 @@ class MemoryService:
             embedding={"vector": embed_res.vector},
             embedding_model=embed_res.model,
             embedding_version=embed_res.version,
-            last_verified_at=datetime.now(UTC),
+            last_verified_at=promotion_decision.verified_at,
         )
         session.add(memory)
         await session.flush()
@@ -231,16 +232,29 @@ class MemoryService:
             for ev in payload.evidence:
                 ev_hash = ev.evidence_hash
                 if not ev_hash and ev.file_path and project and project.local_path:
-                    abs_p = os.path.join(project.local_path, ev.file_path.replace("/", os.sep))
-                    if os.path.exists(abs_p):
+                    try:
+                        abs_p = PathSecurity.safe_resolve(
+                            project.local_path, ev.file_path
+                        )
+                    except (PathSecurityError, ValueError):
+                        abs_p = None
+
+                    if abs_p and os.path.exists(abs_p) and os.path.isfile(abs_p):
                         try:
-                            with open(abs_p, "r", encoding="utf-8", errors="ignore") as f:
+                            with open(
+                                abs_p, "r", encoding="utf-8", errors="ignore"
+                            ) as f:
                                 lines = f.readlines()
                             if ev.line_start is not None:
                                 s_idx = max(0, ev.line_start - 1)
-                                e_idx = ev.line_end if ev.line_end is not None else ev.line_start
+                                e_idx = (
+                                    ev.line_end
+                                    if ev.line_end is not None
+                                    else ev.line_start
+                                )
                                 snip = (
-                                    "" if ev.line_start > len(lines)
+                                    ""
+                                    if ev.line_start > len(lines)
                                     else "".join(lines[s_idx:e_idx])
                                 )
                             else:
@@ -259,15 +273,27 @@ class MemoryService:
                             ev_hash = None
                 if not ev_hash:
                     # Universal locator fingerprint for non-file or unresolved evidence (Item 2)
-                    loc_id = ev.file_path or getattr(ev, "uri", None) or ev.source_id or ev.commit_sha or str(getattr(ev, "detail", {})) or "unresolved"
+                    loc_id = (
+                        ev.file_path
+                        or getattr(ev, "uri", None)
+                        or ev.source_id
+                        or ev.commit_sha
+                        or str(getattr(ev, "detail", {}))
+                        or "unresolved"
+                    )
                     ev_hash = hashlib.sha256(
                         f"unresolved:{loc_id}:{ev.line_start or 0}".encode()
                     ).hexdigest()
 
-                ev_type = getattr(ev, "evidence_type", None) or _EVIDENCE_TYPE_FOR_SOURCE.get(
+                ev_type = getattr(
+                    ev, "evidence_type", None
+                ) or _EVIDENCE_TYPE_FOR_SOURCE.get(
                     (ev.source_type or "").lower(), EvidenceType.CODE.value
                 )
-                ev_auth = getattr(ev, "authority", None) or authority_from_source(ev.source_type).value
+                ev_auth = (
+                    getattr(ev, "authority", None)
+                    or authority_from_source(ev.source_type).value
+                )
                 ev_rel = getattr(ev, "relation", "SUPPORTS")
 
                 ev_obj = MemoryEvidence(
@@ -279,7 +305,9 @@ class MemoryService:
                     source_id=ev.source_id,
                     file_path=ev.file_path,
                     uri=getattr(ev, "uri", None),
-                    detail=getattr(ev, "detail", {}) or {},
+                    detail=SecretRedactor.sanitize_structure(
+                        getattr(ev, "detail", {}) or {}
+                    ),
                     symbol_id=ev.symbol_id,
                     commit_sha=ev.commit_sha,
                     line_start=ev.line_start,
@@ -353,7 +381,9 @@ class MemoryService:
             memory.summary = sanitize_text(summary)
 
         # Recompute embedding
-        embed_res = await self.embedding_provider.embed_text(f"{memory.title}\n{memory.content}")
+        embed_res = await self.embedding_provider.embed_text(
+            f"{memory.title}\n{memory.content}"
+        )
         memory.embedding = {"vector": embed_res.vector}
         memory.updated_at = datetime.now(UTC)
 
@@ -394,7 +424,17 @@ class MemoryService:
             session.add(ver)
 
         if superseded_by_id:
+            source_mem = await self.get_memory(session, superseded_by_id)
+            if not source_mem:
+                raise ValueError(
+                    f"Superseding memory {superseded_by_id} does not exist."
+                )
+            if source_mem.project_id != memory.project_id:
+                raise ValueError(
+                    f"Cross-project memory relation rejected: source {source_mem.project_id} != target {memory.project_id}"
+                )
             rel = MemoryRelation(
+                project_id=memory.project_id,
                 source_memory_id=superseded_by_id,
                 target_memory_id=memory.id,
                 relation_type="supersedes",
@@ -452,21 +492,37 @@ class MemoryService:
 
         if as_of_time:
             stmt = stmt.where(
-                or_(Memory.valid_from_time.is_(None), Memory.valid_from_time <= as_of_time),
+                or_(
+                    Memory.valid_from_time.is_(None),
+                    Memory.valid_from_time <= as_of_time,
+                ),
                 or_(Memory.valid_to_time.is_(None), Memory.valid_to_time > as_of_time),
             )
         elif status == "ACTIVE":
             stmt = stmt.where(
-                or_(Memory.valid_to_time.is_(None), Memory.valid_to_time > datetime.now(UTC))
+                or_(
+                    Memory.valid_to_time.is_(None),
+                    Memory.valid_to_time > datetime.now(UTC),
+                )
             )
 
         if at_commit:
             stmt = stmt.where(
-                or_(Memory.valid_from_commit.is_(None), Memory.valid_from_commit == at_commit),
-                or_(Memory.valid_to_commit.is_(None), Memory.valid_to_commit != at_commit),
+                or_(
+                    Memory.valid_from_commit.is_(None),
+                    Memory.valid_from_commit == at_commit,
+                ),
+                or_(
+                    Memory.valid_to_commit.is_(None),
+                    Memory.valid_to_commit != at_commit,
+                ),
             )
 
-        stmt = stmt.order_by(Memory.importance.desc(), Memory.created_at.desc()).offset(offset).limit(limit)
+        stmt = (
+            stmt.order_by(Memory.importance.desc(), Memory.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+        )
         res = await session.execute(stmt)
         return list(res.scalars().all())
 
@@ -490,12 +546,18 @@ class MemoryService:
             .where(
                 Memory.project_id == project_id,
                 Memory.status.in_(["ACTIVE", "UNVERIFIED", "STALE"]),
-                or_(Memory.valid_to_time.is_(None), Memory.valid_to_time > effective_time),
+                or_(
+                    Memory.valid_to_time.is_(None),
+                    Memory.valid_to_time > effective_time,
+                ),
             )
         )
         if as_of_time:
             stmt = stmt.where(
-                or_(Memory.valid_from_time.is_(None), Memory.valid_from_time <= as_of_time)
+                or_(
+                    Memory.valid_from_time.is_(None),
+                    Memory.valid_from_time <= as_of_time,
+                )
             )
         if memory_type:
             stmt = stmt.where(Memory.memory_type == memory_type.upper())
@@ -516,26 +578,38 @@ class MemoryService:
             lex_score = overlap / max(1, len(q_terms))
 
             combined_score = (0.65 * sim) + (0.35 * lex_score)
-            scored.append({
-                "memory": mem,
-                "similarity": round(sim, 4),
-                "combined_score": round(combined_score, 4),
-            })
+            scored.append(
+                {
+                    "memory": mem,
+                    "similarity": round(sim, 4),
+                    "combined_score": round(combined_score, 4),
+                }
+            )
 
         scored.sort(key=lambda x: x["combined_score"], reverse=True)
         return scored[:limit]
 
-    async def get_decisions(self, session: AsyncSession, project_id: str) -> list[Memory]:
+    async def get_decisions(
+        self, session: AsyncSession, project_id: str
+    ) -> list[Memory]:
         """Fetch all active architectural decisions."""
-        return await self.list_memories(session, project_id, memory_type="DECISION", status="ACTIVE")
+        return await self.list_memories(
+            session, project_id, memory_type="DECISION", status="ACTIVE"
+        )
 
-    async def get_failures(self, session: AsyncSession, project_id: str) -> list[Memory]:
+    async def get_failures(
+        self, session: AsyncSession, project_id: str
+    ) -> list[Memory]:
         """Fetch historical failures and anti-patterns."""
         return await self.list_memories(session, project_id, memory_type="FAILURE")
 
-    async def get_constraints(self, session: AsyncSession, project_id: str) -> list[Memory]:
+    async def get_constraints(
+        self, session: AsyncSession, project_id: str
+    ) -> list[Memory]:
         """Fetch operational and architectural constraints."""
-        return await self.list_memories(session, project_id, memory_type="CONSTRAINT", status="ACTIVE")
+        return await self.list_memories(
+            session, project_id, memory_type="CONSTRAINT", status="ACTIVE"
+        )
 
     async def resolve_project_conflicts(
         self, session: AsyncSession, project_id: str
@@ -545,7 +619,9 @@ class MemoryService:
             select(Memory)
             .where(
                 Memory.project_id == project_id,
-                Memory.status.in_([MemoryState.ACTIVE.value, MemoryState.UNVERIFIED.value]),
+                Memory.status.in_(
+                    [MemoryState.ACTIVE.value, MemoryState.UNVERIFIED.value]
+                ),
             )
             .order_by(Memory.created_at.asc())
         )

@@ -65,7 +65,9 @@ class BM25Scorer:
 
             tf = term_counts.get(term, 0)
             # Length normalization denominator
-            denom = tf + self.k1 * (1.0 - self.b + self.b * (doc_len / max(1e-6, self.avgdl)))
+            denom = tf + self.k1 * (
+                1.0 - self.b + self.b * (doc_len / max(1e-6, self.avgdl))
+            )
             term_score = idf * (tf * (self.k1 + 1.0)) / max(1e-6, denom)
             score += term_score
 

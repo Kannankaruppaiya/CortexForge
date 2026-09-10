@@ -42,7 +42,9 @@ class AuthService:
         return user == "admin"
 """)
 
-    with open(os.path.join(tmp_dir, "services", "payment.py"), "w", encoding="utf-8") as f:
+    with open(
+        os.path.join(tmp_dir, "services", "payment.py"), "w", encoding="utf-8"
+    ) as f:
         f.write("""
 import services.auth
 
@@ -92,7 +94,9 @@ async def test_session():
 
 
 @pytest.mark.asyncio
-async def test_scanner_and_architecture_synthesis(sample_repo, test_session: AsyncSession):
+async def test_scanner_and_architecture_synthesis(
+    sample_repo, test_session: AsyncSession
+):
     """Verify repository scanner parses AST and builds architecture."""
     project = Project(
         name="TestApp",
@@ -130,6 +134,7 @@ async def test_scanner_and_architecture_synthesis(sample_repo, test_session: Asy
 @pytest.mark.asyncio
 async def test_rest_api_endpoints(sample_repo, test_session: AsyncSession):
     """Test FastAPI REST endpoints."""
+
     # Override get_db_session dependency with test_session
     async def override_get_db():
         yield test_session
@@ -173,7 +178,9 @@ async def test_rest_api_endpoints(sample_repo, test_session: AsyncSession):
             assert impact_resp.status_code == 200
             impact_data = impact_resp.json()
             assert "directly_changed_entities" in impact_data
-            assert any("AuthService" in e for e in impact_data["directly_changed_entities"])
+            assert any(
+                "AuthService" in e for e in impact_data["directly_changed_entities"]
+            )
 
         # Static SPA serving is mounted only when apps/web/dist has been built.
         # Asserting on it unconditionally makes an API test fail for the unrelated
@@ -181,7 +188,10 @@ async def test_rest_api_endpoints(sample_repo, test_session: AsyncSession):
         # conditional on the artifact actually existing.
         dist_index = (
             Path(cortexforge.apps.api.main.__file__).resolve().parents[4]
-            / "apps" / "web" / "dist" / "index.html"
+            / "apps"
+            / "web"
+            / "dist"
+            / "index.html"
         )
         spa_resp = await client.get("/")
         if dist_index.exists():
@@ -210,17 +220,23 @@ async def test_mcp_tools(sample_repo):
     assert "auth.py" in comp_text
 
     # task_start tool
-    start_res = await task_start("Refactor login verification", project_id_or_path=sample_repo)
+    start_res = await task_start(
+        "Refactor login verification", project_id_or_path=sample_repo
+    )
     assert "Task started:" in start_res
     task_id = start_res.split("`")[1]
 
     # task_record_event tool
-    ev_res = await task_record_event(task_id, event_type="TOOL_CALLED", tool_name="search_symbols")
+    ev_res = await task_record_event(
+        task_id, event_type="TOOL_CALLED", tool_name="search_symbols"
+    )
     assert "Recorded tool call" in ev_res
 
     # task_complete tool
     comp_res = await task_complete(
-        task_id, success=True, lesson_learned="Always salt hashes before hashing in AuthService"
+        task_id,
+        success=True,
+        lesson_learned="Always salt hashes before hashing in AuthService",
     )
     assert "COMPLETED" in comp_res
 
@@ -246,7 +262,9 @@ def _git_commit(repo: str, msg: str) -> str:
 
 
 @pytest.mark.asyncio
-async def test_incremental_relationship_graph_preservation(tmp_path, test_session: AsyncSession):
+async def test_incremental_relationship_graph_preservation(
+    tmp_path, test_session: AsyncSession
+):
     """Verify incremental scan preserves cross-file inbound relationships and updates generations."""
     repo = str(tmp_path / "inc_repo")
     os.makedirs(os.path.join(repo, "services"), exist_ok=True)
@@ -329,7 +347,9 @@ class PaymentService:
     assert len(rels_after) >= 1
 
     # Verify AuthService was updated with new method
-    ents_after = {e.name: e for e in (await test_session.execute(ents_stmt)).scalars().all()}
+    ents_after = {
+        e.name: e for e in (await test_session.execute(ents_stmt)).scalars().all()
+    }
     assert "verify_token" in ents_after
     assert "PaymentService" in ents_after
 

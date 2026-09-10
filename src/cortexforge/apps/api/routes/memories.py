@@ -32,7 +32,11 @@ class MemoryDeprecatePayload(BaseModel):
     superseded_by_id: str | None = None
 
 
-@router.post("/projects/{project_id}/memories", response_model=MemoryRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/projects/{project_id}/memories",
+    response_model=MemoryRead,
+    status_code=status.HTTP_201_CREATED,
+)
 async def create_memory(
     project_id: str,
     payload: MemoryCreate,
@@ -41,7 +45,9 @@ async def create_memory(
     """Create a durable, evidence-grounded project memory."""
     project = await session.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
 
     memory = await memory_service.create_memory(session, project_id, payload)
     return MemoryRead.model_validate(memory)
@@ -60,7 +66,9 @@ async def list_memories(
     """List project memories with multi-attribute filtering."""
     project = await session.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
 
     memories = await memory_service.list_memories(
         session,
@@ -81,7 +89,9 @@ async def get_memory(
     """Retrieve full memory record with evidences and version history."""
     memory = await memory_service.get_memory(session, memory_id)
     if not memory:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found"
+        )
     return MemoryRead.model_validate(memory)
 
 
@@ -106,7 +116,9 @@ async def update_memory(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
 
     if not updated:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found"
+        )
     return MemoryRead.model_validate(updated)
 
 
@@ -117,17 +129,25 @@ async def verify_memory(
     """Trigger active verification of a memory against current source code."""
     memory = await memory_service.get_memory(session, memory_id)
     if not memory:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found"
+        )
 
     project = await session.get(Project, memory.project_id)
     if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
 
     status_result = await verification_engine.verify_single_memory(
         session, memory, project.local_path
     )
     await session.commit()
-    return {"memory_id": memory.id, "status": status_result, "verified_at": memory.last_verified_at}
+    return {
+        "memory_id": memory.id,
+        "status": status_result,
+        "verified_at": memory.last_verified_at,
+    }
 
 
 @router.post("/memories/{memory_id}/deprecate", response_model=MemoryRead)
@@ -144,7 +164,9 @@ async def deprecate_memory(
         reason=payload.reason,
     )
     if not deprecated:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found"
+        )
     return MemoryRead.model_validate(deprecated)
 
 
@@ -155,6 +177,8 @@ async def consolidate_memories(
     """Trigger memory consolidation loop."""
     project = await session.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
 
     return await consolidation_engine.consolidate_project(session, project_id)

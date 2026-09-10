@@ -91,7 +91,9 @@ def evidence_fingerprint(
 
 def _independence_group(file_path: str | None, commit_sha: str | None) -> str:
     """Evidence from the same file at the same commit is one independent source."""
-    return hashlib.sha256(f"{file_path or ''}@{commit_sha or ''}".encode()).hexdigest()[:32]
+    return hashlib.sha256(f"{file_path or ''}@{commit_sha or ''}".encode()).hexdigest()[
+        :32
+    ]
 
 
 class ClaimService:
@@ -177,7 +179,9 @@ class ClaimService:
             await session.flush()
 
         for claim in live:
-            await self.attach_memory_evidence(session, claim, memory, commit_sha=commit_sha)
+            await self.attach_memory_evidence(
+                session, claim, memory, commit_sha=commit_sha
+            )
 
         if flush:
             await session.flush()
@@ -259,7 +263,9 @@ class ClaimService:
         # relationship attributes: an implicit lazy load inside an async session
         # raises MissingGreenlet, so the queries belong here where they are awaited.
         existing_res = await session.execute(
-            select(ClaimEvidence.evidence_hash).where(ClaimEvidence.claim_id == claim.id)
+            select(ClaimEvidence.evidence_hash).where(
+                ClaimEvidence.claim_id == claim.id
+            )
         )
         existing_hashes = set(existing_res.scalars().all())
 
@@ -331,7 +337,9 @@ class ClaimService:
                     or (enclosing[ev.id].content_hash if ev.id in enclosing else None)
                 ),
                 evidence_hash=fingerprint,
-                independence_group=_independence_group(ev.file_path, ev.commit_sha or commit_sha),
+                independence_group=_independence_group(
+                    ev.file_path, ev.commit_sha or commit_sha
+                ),
                 detail={
                     "memory_evidence_id": ev.id,
                     **({"key": config_key} if config_key else {}),
@@ -354,7 +362,8 @@ class ClaimService:
         simply left unresolved rather than being attached to an approximation.
         """
         unlinked = [
-            ev for ev in (memory.evidences or [])
+            ev
+            for ev in (memory.evidences or [])
             if not ev.symbol_id and ev.file_path and ev.line_start is not None
         ]
         if not unlinked:
@@ -368,7 +377,8 @@ class ClaimService:
             )
         )
         candidates = [
-            entity for entity in res.scalars().all()
+            entity
+            for entity in res.scalars().all()
             if entity.file_path.replace("\\", "/") in paths
             or any(path.endswith(entity.file_path.replace("\\", "/")) for path in paths)
         ]
@@ -381,7 +391,8 @@ class ClaimService:
             ev_end = ev.line_end if ev.line_end is not None else ev.line_start
 
             overlapping = [
-                entity for entity in candidates
+                entity
+                for entity in candidates
                 if (
                     entity.file_path.replace("\\", "/") == ev_path
                     or ev_path.endswith(entity.file_path.replace("\\", "/"))
@@ -438,8 +449,14 @@ class ClaimService:
         a test refutes a claim is as important as recording that code supports it.
         """
         fingerprint = evidence_fingerprint(
-            evidence_type, relation, file_path, qualified_name, line_start, line_end,
-            content_hash, commit_sha,
+            evidence_type,
+            relation,
+            file_path,
+            qualified_name,
+            line_start,
+            line_end,
+            content_hash,
+            commit_sha,
         )
         existing = await session.execute(
             select(ClaimEvidence).where(
@@ -493,7 +510,9 @@ class ClaimService:
         res = await session.execute(
             select(Claim).where(
                 Claim.project_id == project_id,
-                Claim.status.notin_([ClaimStatus.RETIRED.value, ClaimStatus.SUPERSEDED.value]),
+                Claim.status.notin_(
+                    [ClaimStatus.RETIRED.value, ClaimStatus.SUPERSEDED.value]
+                ),
             )
         )
         matches: list[tuple[Claim, float]] = []
@@ -513,7 +532,9 @@ class ClaimService:
         res = await session.execute(
             select(Claim)
             .options(selectinload(Claim.evidence_links))
-            .where(Claim.memory_id == memory_id, Claim.status != ClaimStatus.RETIRED.value)
+            .where(
+                Claim.memory_id == memory_id, Claim.status != ClaimStatus.RETIRED.value
+            )
             .order_by(Claim.created_at)
         )
         return list(res.scalars().all())

@@ -43,7 +43,9 @@ class BaseAgentAdapter(ABC):
     def adapter_name(self) -> str:
         """Name of the AI agent runtime adapter."""
 
-    def extract_canonical_event_type(self, raw_data: dict[str, Any]) -> CanonicalEventType | None:
+    def extract_canonical_event_type(
+        self, raw_data: dict[str, Any]
+    ) -> CanonicalEventType | None:
         """Check if an explicit canonical event_type is already supplied."""
         val = raw_data.get("event_type") or raw_data.get("canonical_event_type")
         if val:
@@ -94,16 +96,25 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
     def normalize_event(self, raw_data: dict[str, Any], task_id: str) -> CanonicalEvent:
         ev_type = self.extract_canonical_event_type(raw_data)
         if ev_type is None:
-            hook_name = str(raw_data.get("hook_name") or raw_data.get("event") or "").lower()
+            hook_name = str(
+                raw_data.get("hook_name") or raw_data.get("event") or ""
+            ).lower()
             if "pre_tool" in hook_name or "tool" in hook_name:
                 ev_type = CanonicalEventType.TOOL_CALLED
-            elif "post_edit" in hook_name or "file_modified" in hook_name or "edit" in hook_name or "write" in hook_name:
+            elif (
+                "post_edit" in hook_name
+                or "file_modified" in hook_name
+                or "edit" in hook_name
+                or "write" in hook_name
+            ):
                 ev_type = CanonicalEventType.FILE_CHANGED
             elif "test_fail" in hook_name or "fail" in hook_name:
                 ev_type = CanonicalEventType.TEST_FAILED
             elif "test_pass" in hook_name or "pass" in hook_name:
                 ev_type = CanonicalEventType.TEST_PASSED
-            elif "finish" in hook_name or "stop" in hook_name or "complete" in hook_name:
+            elif (
+                "finish" in hook_name or "stop" in hook_name or "complete" in hook_name
+            ):
                 ev_type = CanonicalEventType.TASK_COMPLETED
             elif "start" in hook_name or "init" in hook_name:
                 ev_type = CanonicalEventType.TASK_STARTED
@@ -128,17 +139,31 @@ class AntigravityAdapter(BaseAgentAdapter):
     def normalize_event(self, raw_data: dict[str, Any], task_id: str) -> CanonicalEvent:
         ev_type = self.extract_canonical_event_type(raw_data)
         if ev_type is None:
-            step_type = str(raw_data.get("type") or raw_data.get("step_type") or "").upper()
+            step_type = str(
+                raw_data.get("type") or raw_data.get("step_type") or ""
+            ).upper()
             step_type_lower = step_type.lower()
             status_lower = str(raw_data.get("status") or "").lower()
 
             if step_type in ("USER_INPUT", "TASK_STARTED", "INIT"):
                 ev_type = CanonicalEventType.TASK_STARTED
-            elif "file" in raw_data and ("changed" in step_type_lower or "write" in step_type_lower or "edit" in step_type_lower):
+            elif "file" in raw_data and (
+                "changed" in step_type_lower
+                or "write" in step_type_lower
+                or "edit" in step_type_lower
+            ):
                 ev_type = CanonicalEventType.FILE_CHANGED
-            elif "test" in step_type_lower and ("fail" in step_type_lower or "fail" in status_lower or status_lower == "error"):
+            elif "test" in step_type_lower and (
+                "fail" in step_type_lower
+                or "fail" in status_lower
+                or status_lower == "error"
+            ):
                 ev_type = CanonicalEventType.TEST_FAILED
-            elif "test" in step_type_lower and ("pass" in step_type_lower or "pass" in status_lower or status_lower == "done"):
+            elif "test" in step_type_lower and (
+                "pass" in step_type_lower
+                or "pass" in status_lower
+                or status_lower == "done"
+            ):
                 ev_type = CanonicalEventType.TEST_PASSED
             elif step_type in ("TASK_COMPLETED", "COMPLETE", "FINISHED"):
                 ev_type = CanonicalEventType.TASK_COMPLETED
@@ -174,9 +199,13 @@ class CursorAdapter(BaseAgentAdapter):
             output = str(raw_data.get("output") or "").lower()
             if "edit" in action or "save" in action or "modify" in action:
                 ev_type = CanonicalEventType.FILE_CHANGED
-            elif "test" in action and ("fail" in action or "fail" in output or "error" in output):
+            elif "test" in action and (
+                "fail" in action or "fail" in output or "error" in output
+            ):
                 ev_type = CanonicalEventType.TEST_FAILED
-            elif "test" in action and ("pass" in action or "ok" in output or "success" in output):
+            elif "test" in action and (
+                "pass" in action or "ok" in output or "success" in output
+            ):
                 ev_type = CanonicalEventType.TEST_PASSED
             elif "terminal" in action and ("fail" in output or "error" in output):
                 ev_type = CanonicalEventType.TEST_FAILED

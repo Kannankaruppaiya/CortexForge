@@ -79,7 +79,9 @@ async def temporal_repo(tmp_path):
     _git(repo, "config", "user.email", "test@example.com")
     _git(repo, "config", "user.name", "Test")
 
-    with open(os.path.join(repo, "core", "session.py"), "w", encoding="utf-8") as handle:
+    with open(
+        os.path.join(repo, "core", "session.py"), "w", encoding="utf-8"
+    ) as handle:
         handle.write(SESSION_V1)
     return repo, _commit(repo, "redis session storage")
 
@@ -130,7 +132,9 @@ async def test_belief_follows_the_timeline(temporal_repo, test_session: AsyncSes
     )
 
     # --- Commit B: the claim becomes false --------------------------------
-    with open(os.path.join(repo, "core", "session.py"), "w", encoding="utf-8") as handle:
+    with open(
+        os.path.join(repo, "core", "session.py"), "w", encoding="utf-8"
+    ) as handle:
         handle.write(SESSION_V2_REMOVED)
     commit_b = _commit(repo, "remove redis session storage")
 
@@ -153,7 +157,9 @@ async def test_belief_follows_the_timeline(temporal_repo, test_session: AsyncSes
     )
 
     # --- Commit C: a new claim becomes true -------------------------------
-    with open(os.path.join(repo, "core", "session.py"), "w", encoding="utf-8") as handle:
+    with open(
+        os.path.join(repo, "core", "session.py"), "w", encoding="utf-8"
+    ) as handle:
         handle.write(SESSION_V3_REPLACED)
     commit_c = _commit(repo, "stateless postgres-backed sessions")
 
@@ -209,7 +215,9 @@ async def test_belief_follows_the_timeline(temporal_repo, test_session: AsyncSes
     assert status_in(snapshot_c, postgres_memory.id) == MemoryState.ACTIVE.value
 
     # The snapshots describe genuinely different states.
-    assert len({snapshot_a.state_hash, snapshot_b.state_hash, snapshot_c.state_hash}) == 3
+    assert (
+        len({snapshot_a.state_hash, snapshot_b.state_hash, snapshot_c.state_hash}) == 3
+    )
 
     # --- Replay answers about the past, not the present -------------------
     replay_a = await CognitiveSnapshotEngine.replay_state_at_commit(

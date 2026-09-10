@@ -298,7 +298,10 @@ class EvaluationRunner:
             matched_targets = [
                 path
                 for path in repository_files
-                if any(target in path or path.endswith(target) for target in task.target_files)
+                if any(
+                    target in path or path.endswith(target)
+                    for target in task.target_files
+                )
             ] or repository_files[:2]
 
             results: dict[str, ModeEvaluationResult] = {}
@@ -333,12 +336,16 @@ class EvaluationRunner:
             baseline = results[BenchmarkMode.A_NO_MEMORY.value]
             full = results[BenchmarkMode.G_FULL_CORTEX.value]
             token_reduction = (
-                ((baseline.input_tokens - full.input_tokens) / baseline.input_tokens) * 100.0
+                ((baseline.input_tokens - full.input_tokens) / baseline.input_tokens)
+                * 100.0
                 if baseline.input_tokens
                 else 0.0
             )
             exploration_reduction = (
-                ((baseline.files_referenced - full.files_referenced) / baseline.files_referenced)
+                (
+                    (baseline.files_referenced - full.files_referenced)
+                    / baseline.files_referenced
+                )
                 * 100.0
                 if baseline.files_referenced
                 else 0.0
@@ -397,7 +404,9 @@ class EvaluationRunner:
                 break
             abs_path = os.path.join(local_path, rel_path.replace("/", os.sep))
             try:
-                total_chars += len(Path(abs_path).read_text(encoding="utf-8", errors="ignore"))
+                total_chars += len(
+                    Path(abs_path).read_text(encoding="utf-8", errors="ignore")
+                )
                 counted += 1
             except OSError:
                 continue
@@ -443,7 +452,11 @@ class EvaluationRunner:
 
         latency = (time.perf_counter() - start) * 1000
         return self._measure_selection(
-            BenchmarkMode.B_NAIVE_RAG.value, task, selected, latency, includes_provenance=False
+            BenchmarkMode.B_NAIVE_RAG.value,
+            task,
+            selected,
+            latency,
+            includes_provenance=False,
         )
 
     async def _run_flat_memory(
@@ -465,7 +478,11 @@ class EvaluationRunner:
 
         latency = (time.perf_counter() - start) * 1000
         return self._measure_selection(
-            BenchmarkMode.C_FLAT_MEMORY.value, task, selected, latency, includes_provenance=False
+            BenchmarkMode.C_FLAT_MEMORY.value,
+            task,
+            selected,
+            latency,
+            includes_provenance=False,
         )
 
     async def _run_cortex_mode(
@@ -485,11 +502,15 @@ class EvaluationRunner:
         """
         start = time.perf_counter()
 
-        uses_graph = mode in (
-            BenchmarkMode.E_WITH_PROVENANCE,
-            BenchmarkMode.F_WITH_CHANGE_PROP,
-            BenchmarkMode.G_FULL_CORTEX,
-        ) and ablation != AblationType.WITHOUT_GRAPH
+        uses_graph = (
+            mode
+            in (
+                BenchmarkMode.E_WITH_PROVENANCE,
+                BenchmarkMode.F_WITH_CHANGE_PROP,
+                BenchmarkMode.G_FULL_CORTEX,
+            )
+            and ablation != AblationType.WITHOUT_GRAPH
+        )
         excludes_stale = (
             mode in (BenchmarkMode.F_WITH_CHANGE_PROP, BenchmarkMode.G_FULL_CORTEX)
             and ablation != AblationType.WITHOUT_CHANGE_PROP
@@ -564,7 +585,9 @@ class EvaluationRunner:
         if not relevant_ids:
             basis = "keyword and target-file overlap"
             relevant_ids = {
-                memory.id for memory in memories if self._is_topically_relevant(task, memory)
+                memory.id
+                for memory in memories
+                if self._is_topically_relevant(task, memory)
             }
 
         selected_ids = {memory.id for memory in memories}
@@ -579,7 +602,9 @@ class EvaluationRunner:
         )
 
         stale = sum(1 for m in memories if m.status == MemoryState.STALE.value)
-        conflicted = sum(1 for m in memories if m.status == MemoryState.CONFLICTED.value)
+        conflicted = sum(
+            1 for m in memories if m.status == MemoryState.CONFLICTED.value
+        )
 
         context_parts = []
         files: set[str] = set()
@@ -629,7 +654,9 @@ class EvaluationRunner:
 
         for evidence in memory.evidences or []:
             path = (evidence.file_path or "").replace("\\", "/")
-            if any(target in path or path.endswith(target) for target in task.target_files):
+            if any(
+                target in path or path.endswith(target) for target in task.target_files
+            ):
                 return True
         return False
 
@@ -659,7 +686,9 @@ class EvaluationRunner:
         """Write the raw run artifact, so a reported number can be traced back."""
         try:
             self.results_dir.mkdir(parents=True, exist_ok=True)
-            target = self.results_dir / f"run_{scorecard.task_id}_{int(time.time())}.json"
+            target = (
+                self.results_dir / f"run_{scorecard.task_id}_{int(time.time())}.json"
+            )
             target.write_text(
                 json.dumps(
                     {

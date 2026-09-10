@@ -85,8 +85,15 @@ def test_trust_level_hierarchy():
     from cortexforge.security.trust import TrustLevel, get_trust_authority
 
     # Verified code > Git > Documentation > Agent observation > Untrusted
-    assert get_trust_authority(TrustLevel.VERIFIED_CODE) > get_trust_authority(TrustLevel.GIT)
-    assert get_trust_authority(TrustLevel.GIT) > get_trust_authority(TrustLevel.DOCUMENTATION)
-    assert get_trust_authority(TrustLevel.DOCUMENTATION) > get_trust_authority(TrustLevel.AGENT_OBSERVATION)
-    assert get_trust_authority(TrustLevel.AGENT_OBSERVATION) > get_trust_authority(TrustLevel.UNTRUSTED_REPOSITORY_TEXT)
-
+    assert get_trust_authority(TrustLevel.VERIFIED_CODE) > get_trust_authority(
+        TrustLevel.GIT
+    )
+    assert get_trust_authority(TrustLevel.GIT) > get_trust_authority(
+        TrustLevel.DOCUMENTATION
+    )
+    assert get_trust_authority(TrustLevel.DOCUMENTATION) > get_trust_authority(
+        TrustLevel.AGENT_OBSERVATION
+    )
+    assert get_trust_authority(TrustLevel.AGENT_OBSERVATION) > get_trust_authority(
+        TrustLevel.UNTRUSTED_REPOSITORY_TEXT
+    )

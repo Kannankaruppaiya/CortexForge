@@ -24,7 +24,9 @@ async def get_dependencies(
     """Retrieve downstream dependencies for a given entity symbol or ID."""
     project = await session.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
 
     return await graph_service.get_dependencies(
         session, project_id=project_id, entity_name_or_id=entity, depth=depth
@@ -41,7 +43,9 @@ async def get_dependents(
     """Retrieve upstream callers and dependents for an entity to evaluate blast radius."""
     project = await session.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
 
     return await graph_service.get_dependents(
         session, project_id=project_id, entity_name_or_id=entity, depth=depth
@@ -57,7 +61,9 @@ async def check_change_impact(
     """Analyze blast radius of proposed file changes across the code graph and memory layer."""
     project = await session.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
 
     report = await change_propagator.propagate_changes(
         session,
@@ -74,4 +80,3 @@ async def check_change_impact(
         critical_constraints=report.critical_constraints,
         warnings=report.warnings,
     )
-

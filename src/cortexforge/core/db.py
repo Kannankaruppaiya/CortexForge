@@ -21,6 +21,7 @@ DATABASE_URL = (
     or DEFAULT_DB_URL
 )
 
+
 def normalize_async_url(url: str) -> str:
     """Rewrite a database URL to the async driver this application requires.
 
@@ -42,7 +43,9 @@ def normalize_async_url(url: str) -> str:
 DATABASE_URL = normalize_async_url(DATABASE_URL)
 
 
-def create_cortex_engine(url: str) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
+def create_cortex_engine(
+    url: str,
+) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
     """Create async engine and session factory with driver-specific tuning."""
     engine_kwargs: dict[str, Any] = {"echo": False, "future": True}
     if "sqlite" in url:

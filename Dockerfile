@@ -48,8 +48,9 @@ COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/pytho
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Copy source and built frontend assets
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md alembic.ini ./
 COPY src/ ./src/
+COPY migrations/ ./migrations/
 COPY --from=builder /app/apps/web/dist ./apps/web/dist
 
 # Install project package

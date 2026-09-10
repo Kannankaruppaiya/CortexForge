@@ -41,7 +41,9 @@ def obsolete_tax_calc(amount: float) -> float:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+    factory = async_sessionmaker(
+        bind=engine, class_=AsyncSession, expire_on_commit=False
+    )
     async with factory() as session:
         yield temp_dir, session, math_file
 
@@ -73,7 +75,11 @@ async def test_symbol_reanchoring_and_invalidation(lineage_test_env):
             content="compute_discount applies a rate reduction to price.",
             summary="Discount logic",
             importance=0.8,
-            evidence=[MemoryEvidenceCreate(file_path="core/math_utils.py", line_start=1, line_end=2)],
+            evidence=[
+                MemoryEvidenceCreate(
+                    file_path="core/math_utils.py", line_start=1, line_end=2
+                )
+            ],
         ),
     )
 
@@ -88,7 +94,11 @@ async def test_symbol_reanchoring_and_invalidation(lineage_test_env):
             content="obsolete_tax_calc calculates 5% tax.",
             summary="Tax calculation",
             importance=0.7,
-            evidence=[MemoryEvidenceCreate(file_path="core/math_utils.py", line_start=4, line_end=5)],
+            evidence=[
+                MemoryEvidenceCreate(
+                    file_path="core/math_utils.py", line_start=4, line_end=5
+                )
+            ],
         ),
     )
 
@@ -130,8 +140,12 @@ async def test_symbol_reanchoring_and_invalidation(lineage_test_env):
     provenance = await ProvenanceEngine.get_provenance(session, updated_discount.id)
     assert provenance is not None
     assert provenance.status == "ACTIVE"
-    reanchor_decisions = [d for d in provenance.decisions if d["decision"] == "REANCHOR"]
-    assert reanchor_decisions, f"expected a REANCHOR decision, got {provenance.decisions}"
+    reanchor_decisions = [
+        d for d in provenance.decisions if d["decision"] == "REANCHOR"
+    ]
+    assert reanchor_decisions, (
+        f"expected a REANCHOR decision, got {provenance.decisions}"
+    )
     assert reanchor_decisions[0]["reason_code"] == "SYMBOL_RENAMED"
     assert "compute_discount" in reanchor_decisions[0]["reason"]
     # The claim inside the memory was re-verified against the symbol's new name.
@@ -139,7 +153,9 @@ async def test_symbol_reanchoring_and_invalidation(lineage_test_env):
 
     # The invalidated memory's decision log must say why it was invalidated.
     tax_provenance = await ProvenanceEngine.get_provenance(session, updated_tax.id)
-    invalidations = [d for d in tax_provenance.decisions if d["decision"] == "INVALIDATE"]
+    invalidations = [
+        d for d in tax_provenance.decisions if d["decision"] == "INVALIDATE"
+    ]
     assert invalidations
     assert invalidations[0]["reason_code"] == "SYMBOL_REMOVED"
 
@@ -150,7 +166,9 @@ async def test_architecture_invariant_engine():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+    factory = async_sessionmaker(
+        bind=engine, class_=AsyncSession, expire_on_commit=False
+    )
     async with factory() as session:
         project = Project(name="ArchTestProj", local_path="/tmp/fake", status="READY")
         session.add(project)
@@ -209,7 +227,9 @@ async def test_architecture_invariant_engine():
 
         # Evaluate rules
         arch_engine = ArchitectureInvariantEngine()
-        result = await arch_engine.evaluate_rules(session, project.id, persist_violations=True)
+        result = await arch_engine.evaluate_rules(
+            session, project.id, persist_violations=True
+        )
 
         assert result.total_rules_evaluated == 1
         assert len(result.violations_detected) == 1
@@ -228,9 +248,13 @@ async def test_architecture_modalities():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+    factory = async_sessionmaker(
+        bind=engine, class_=AsyncSession, expire_on_commit=False
+    )
     async with factory() as session:
-        project = Project(name="ModalityTestProj", local_path="/tmp/fake", status="READY")
+        project = Project(
+            name="ModalityTestProj", local_path="/tmp/fake", status="READY"
+        )
         session.add(project)
         await session.commit()
         await session.refresh(project)
@@ -311,7 +335,9 @@ async def test_architecture_modalities():
         session.add(rel_bad)
         await session.commit()
 
-        res1 = await arch_engine.evaluate_rules(session, project.id, persist_violations=False)
+        res1 = await arch_engine.evaluate_rules(
+            session, project.id, persist_violations=False
+        )
         assert res1.total_rules_evaluated == 1
         assert len(res1.violations_detected) == 1
         assert res1.has_critical_violations is True
@@ -332,7 +358,9 @@ async def test_architecture_modalities():
         await session.commit()
 
         # Controller -> DB violates ONLY_IF because controller does not match *services*
-        res2 = await arch_engine.evaluate_rules(session, project.id, persist_violations=False)
+        res2 = await arch_engine.evaluate_rules(
+            session, project.id, persist_violations=False
+        )
         assert any("[ONLY_IF]" in v["details"] for v in res2.violations_detected)
 
         # 3. Test MUST / REQUIRES: controller MUST depend on a service
@@ -349,7 +377,9 @@ async def test_architecture_modalities():
         session.add(rule_must)
         await session.commit()
 
-        res3 = await arch_engine.evaluate_rules(session, project.id, persist_violations=False)
+        res3 = await arch_engine.evaluate_rules(
+            session, project.id, persist_violations=False
+        )
         # Controller currently has no edge to service, so MUST triggers a violation
         assert any("[MUST]" in v["details"] for v in res3.violations_detected)
 
@@ -369,7 +399,9 @@ async def test_architecture_modalities():
         await session.delete(rel_bad)
         await session.commit()
 
-        res4 = await arch_engine.evaluate_rules(session, project.id, persist_violations=False)
+        res4 = await arch_engine.evaluate_rules(
+            session, project.id, persist_violations=False
+        )
         assert len(res4.violations_detected) == 0  # MUST is now satisfied!
 
         # 4. Test SHOULD: advisory warning that does not trigger has_critical_violations
@@ -393,7 +425,9 @@ async def test_architecture_modalities():
         session.add(rel_legacy)
         await session.commit()
 
-        res5 = await arch_engine.evaluate_rules(session, project.id, persist_violations=False)
+        res5 = await arch_engine.evaluate_rules(
+            session, project.id, persist_violations=False
+        )
         assert len(res5.violations_detected) == 1
         assert res5.violations_detected[0]["severity"] == "WARNING"
         assert res5.has_critical_violations is False

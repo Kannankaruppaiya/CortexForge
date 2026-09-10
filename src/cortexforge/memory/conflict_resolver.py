@@ -52,11 +52,17 @@ def cosine_similarity(v1: list[float], v2: list[float]) -> float:
 # Antonym / polarity pairs indicating semantic contradiction
 CONTRADICTION_PATTERNS = [
     (r"\brequired\b", r"\b(not required|no longer required|optional|unnecessary)\b"),
-    (r"\buses\b|\busing\b|\benabled\b", r"\b(removed|deprecated|disabled|replaced with|migrated from)\b"),
+    (
+        r"\buses\b|\busing\b|\benabled\b",
+        r"\b(removed|deprecated|disabled|replaced with|migrated from)\b",
+    ),
     (r"\bmust\b|\balways\b", r"\b(never|should not|must not|prohibited)\b"),
     (r"\bsynchronous\b|\bsync\b", r"\b(asynchronous|async)\b"),
     (r"\bdeprecated\b", r"\b(recommended|standard|current)\b"),
-    (r"\bsupports\b|\bsupported\b", r"\b(unsupported|no longer supported|dropped support)\b"),
+    (
+        r"\bsupports\b|\bsupported\b",
+        r"\b(unsupported|no longer supported|dropped support)\b",
+    ),
 ]
 
 
@@ -83,7 +89,9 @@ class ConflictResolver:
     def __init__(self, semantic_similarity_threshold: float = 0.58) -> None:
         self.sim_threshold = semantic_similarity_threshold
 
-    def detect_contradiction_heuristics(self, text_a: str, text_b: str) -> tuple[bool, str]:
+    def detect_contradiction_heuristics(
+        self, text_a: str, text_b: str
+    ) -> tuple[bool, str]:
         """Detect opposing polarity or explicit contradiction between two text passages."""
         a_lower = text_a.lower()
         b_lower = text_b.lower()
@@ -96,13 +104,19 @@ class ConflictResolver:
             neg_in_b = bool(re.search(pat_neg, b_lower))
 
             if (pos_in_a and neg_in_b) or (neg_in_a and pos_in_b):
-                return True, f"Opposing predicates detected matching pattern ({pat_pos} vs {pat_neg})"
+                return (
+                    True,
+                    f"Opposing predicates detected matching pattern ({pat_pos} vs {pat_neg})",
+                )
 
         # Check for explicit removal/replacement mention
-        if ("no longer" in b_lower or "removed" in b_lower or "replaced" in b_lower) and any(
-            w in b_lower for w in a_lower.split() if len(w) > 4
-        ):
-            return True, "Candidate explicitly references removal or supersession of subject in existing memory"
+        if (
+            "no longer" in b_lower or "removed" in b_lower or "replaced" in b_lower
+        ) and any(w in b_lower for w in a_lower.split() if len(w) > 4):
+            return (
+                True,
+                "Candidate explicitly references removal or supersession of subject in existing memory",
+            )
 
         return False, ""
 
@@ -147,17 +161,19 @@ class ConflictResolver:
                 Memory.project_id == project_id,
                 Memory.id != candidate_memory.id,
                 or_(*branch_scope),
-                Memory.status.in_([
-                    MemoryState.ACTIVE.value,
-                    MemoryState.UNVERIFIED.value,
-                    MemoryState.CONFLICTED.value,
-                    MemoryState.STALE.value,
-                    # Proposals are included: a candidate contradicted by a
-                    # higher-authority statement should be resolved now, not left
-                    # waiting for a reviewer to discover it is already refuted.
-                    MemoryState.CANDIDATE.value,
-                    MemoryState.REVIEW_REQUIRED.value,
-                ]),
+                Memory.status.in_(
+                    [
+                        MemoryState.ACTIVE.value,
+                        MemoryState.UNVERIFIED.value,
+                        MemoryState.CONFLICTED.value,
+                        MemoryState.STALE.value,
+                        # Proposals are included: a candidate contradicted by a
+                        # higher-authority statement should be resolved now, not left
+                        # waiting for a reviewer to discover it is already refuted.
+                        MemoryState.CANDIDATE.value,
+                        MemoryState.REVIEW_REQUIRED.value,
+                    ]
+                ),
             )
         )
         res = await session.execute(stmt)
@@ -239,7 +255,9 @@ class ConflictResolver:
 
             # 4. Authority-first arbitration. Authority decides outright when the
             #    levels differ; confidence is only a tie-breaker within a level.
-            e_authority = authority_from_source(existing.authority or existing.source_type)
+            e_authority = authority_from_source(
+                existing.authority or existing.source_type
+            )
 
             # Direct code grounding raises the *effective* authority of an otherwise
             # unverified statement, because a claim anchored in code that a parser
@@ -263,7 +281,11 @@ class ConflictResolver:
             ):
                 e_authority = Authority.CODE_VERIFIED
 
-            c_ts = candidate_memory.created_at.timestamp() if candidate_memory.created_at else 0.0
+            c_ts = (
+                candidate_memory.created_at.timestamp()
+                if candidate_memory.created_at
+                else 0.0
+            )
             e_ts = existing.created_at.timestamp() if existing.created_at else 0.0
             is_candidate_newer = c_ts >= e_ts
 
@@ -305,9 +327,14 @@ class ConflictResolver:
                 candidate_memory.supersedes_id = existing.id
 
                 # Close the superseded memory's validity window
-                existing.valid_to_time = candidate_memory.valid_from_time or datetime.now(UTC)
+                existing.valid_to_time = (
+                    candidate_memory.valid_from_time or datetime.now(UTC)
+                )
                 if candidate_memory.valid_from_commit or candidate_memory.source_commit:
-                    existing.valid_to_commit = candidate_memory.valid_from_commit or candidate_memory.source_commit
+                    existing.valid_to_commit = (
+                        candidate_memory.valid_from_commit
+                        or candidate_memory.source_commit
+                    )
 
                 # A statement that was never believed is *rejected*, not superseded.
                 # Supersession says "this used to be our position"; a candidate that
@@ -319,9 +346,15 @@ class ConflictResolver:
                     MemoryState.REVIEW_REQUIRED.value,
                 )
                 target = (
-                    MemoryState.SUPERSEDED.value if was_believed else MemoryState.INVALIDATED.value
+                    MemoryState.SUPERSEDED.value
+                    if was_believed
+                    else MemoryState.INVALIDATED.value
                 )
-                action = "superseded_existing" if was_believed else "rejected_existing_proposal"
+                action = (
+                    "superseded_existing"
+                    if was_believed
+                    else "rejected_existing_proposal"
+                )
                 verb = "Superseded" if was_believed else "Rejected before activation"
 
                 ver = MemoryLifecycleManager.transition(
@@ -337,7 +370,6 @@ class ConflictResolver:
                 )
                 if ver:
                     session.add(ver)
-
 
             elif winner == "b" and has_e_verified_code and not has_c_verified_code:
                 # The existing memory is code-grounded and the candidate is not.
@@ -385,7 +417,9 @@ class ConflictResolver:
                 # as CONFLICTED and the disagreement is surfaced, because inventing
                 # a winner here is exactly how a memory layer starts asserting
                 # things it has no grounds for (section 30).
-                authority_winner = "unresolved" if winner == "unresolved" else "existing"
+                authority_winner = (
+                    "unresolved" if winner == "unresolved" else "existing"
+                )
                 action = "conflicted_both"
 
                 conflict_id = existing.conflict_group or f"conf-{uuid.uuid4().hex[:8]}"

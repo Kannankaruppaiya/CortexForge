@@ -46,7 +46,9 @@ from cortexforge.verification.engine import ClaimVerificationEngine
 
 # Hypothesis' function-scoped-fixture warning does not apply to the pure
 # properties below, which take no database fixture.
-PURE = settings(max_examples=60, suppress_health_check=[HealthCheck.function_scoped_fixture])
+PURE = settings(
+    max_examples=60, suppress_health_check=[HealthCheck.function_scoped_fixture]
+)
 
 
 # --------------------------------------------------------------- pure properties
@@ -91,7 +93,9 @@ def test_changeset_key_ignores_file_order(files: list[str]):
     about.
     """
     forward = compute_changeset_key("p1", "base", "target", False, files)
-    backward = compute_changeset_key("p1", "base", "target", False, list(reversed(files)))
+    backward = compute_changeset_key(
+        "p1", "base", "target", False, list(reversed(files))
+    )
     assert forward == backward
 
 
@@ -114,7 +118,9 @@ def test_authority_beats_confidence(
         return
 
     strong, weak = (
-        (higher, lower) if authority_rank(higher) > authority_rank(lower) else (lower, higher)
+        (higher, lower)
+        if authority_rank(higher) > authority_rank(lower)
+        else (lower, higher)
     )
     # The weaker statement is given the maximum confidence and the stronger the
     # minimum, which is the most favourable case the weaker one could ever get.
@@ -162,7 +168,9 @@ def test_confidence_is_monotonic_in_independent_evidence(
     )
     more = ConfidenceScorer.score(
         authority=authority,
-        evidence=EvidenceSummary(supporting=count + 1, independent_supporting=count + 1),
+        evidence=EvidenceSummary(
+            supporting=count + 1, independent_supporting=count + 1
+        ),
     )
     assert more.score >= fewer.score
 
@@ -254,7 +262,10 @@ async def test_repeated_change_analysis_creates_one_changeset(
     propagator = SemanticChangePropagator()
     for _ in range(3):
         await propagator.propagate_changes(
-            test_session, project.id, modified_files=["services/auth.py"], mark_stale=True
+            test_session,
+            project.id,
+            modified_files=["services/auth.py"],
+            mark_stale=True,
         )
 
     count = (
@@ -395,7 +406,9 @@ async def test_reverifying_an_unchanged_project_reuses_its_run(
     Re-running must return the same run, so nothing can make old knowledge look
     recently confirmed by asking the same question repeatedly (section 8).
     """
-    project = Project(name="VerificationIdempotency", local_path=sample_repo, status="READY")
+    project = Project(
+        name="VerificationIdempotency", local_path=sample_repo, status="READY"
+    )
     test_session.add(project)
     await test_session.commit()
     await test_session.refresh(project)
@@ -412,7 +425,10 @@ async def test_reverifying_an_unchanged_project_reuses_its_run(
             importance=0.8,
             evidence=[
                 MemoryEvidenceCreate(
-                    file_path="services/auth.py", source_type="code", line_start=2, line_end=4
+                    file_path="services/auth.py",
+                    source_type="code",
+                    line_start=2,
+                    line_end=4,
                 )
             ],
         ),

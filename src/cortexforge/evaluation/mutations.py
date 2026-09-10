@@ -85,7 +85,9 @@ CANONICAL_MUTATIONS: list[MutationTestCase] = [
             summary="Tax addition",
             layer="L2",
             memory_type="CONVENTION",
-            evidence=[MemoryEvidenceCreate(file_path="calc.py", line_start=1, line_end=2)],
+            evidence=[
+                MemoryEvidenceCreate(file_path="calc.py", line_start=1, line_end=2)
+            ],
         ),
         mutated_code={
             "calc.py": "def apply_tax(val: float) -> float:\n    return val * 1.1\n"
@@ -106,7 +108,9 @@ CANONICAL_MUTATIONS: list[MutationTestCase] = [
             summary="Auth check",
             layer="L3",
             memory_type="DECISION",
-            evidence=[MemoryEvidenceCreate(file_path="auth.py", line_start=1, line_end=2)],
+            evidence=[
+                MemoryEvidenceCreate(file_path="auth.py", line_start=1, line_end=2)
+            ],
         ),
         mutated_code={
             "auth.py": "def verify(user: str, token: str, mfa: bool = False) -> bool:\n    return bool(token)\n"
@@ -118,20 +122,18 @@ CANONICAL_MUTATIONS: list[MutationTestCase] = [
         id="MUT-03",
         name="Remove Function Without Replacement",
         mutation_type=MutationType.REMOVE_DEPENDENCY,
-        initial_code={
-            "legacy.py": "def legacy_routine() -> None:\n    pass\n"
-        },
+        initial_code={"legacy.py": "def legacy_routine() -> None:\n    pass\n"},
         initial_memory=MemoryCreate(
             title="Legacy Routine Execution",
             content="legacy_routine performs maintenance.",
             summary="Legacy routine",
             layer="L2",
             memory_type="CONVENTION",
-            evidence=[MemoryEvidenceCreate(file_path="legacy.py", line_start=1, line_end=2)],
+            evidence=[
+                MemoryEvidenceCreate(file_path="legacy.py", line_start=1, line_end=2)
+            ],
         ),
-        mutated_code={
-            "legacy.py": "# Legacy routine removed\n"
-        },
+        mutated_code={"legacy.py": "# Legacy routine removed\n"},
         expected_status="INVALIDATED",
         expected_invalidated=True,
     ),
@@ -148,7 +150,9 @@ CANONICAL_MUTATIONS: list[MutationTestCase] = [
             summary="String hash",
             layer="L2",
             memory_type="CONVENTION",
-            evidence=[MemoryEvidenceCreate(file_path="hash_util.py", line_start=1, line_end=2)],
+            evidence=[
+                MemoryEvidenceCreate(file_path="hash_util.py", line_start=1, line_end=2)
+            ],
         ),
         mutated_code={
             "hash_util.py": "def hash_str(s: str) -> str:\n    # Modified algorithm\n    return s.replace(' ', '_').upper()\n"
@@ -178,12 +182,15 @@ class MutationBenchmarkHarness:
         for rel_path, code in case.initial_code.items():
             full_path = f"{project_dir}/{rel_path}"
             import os
+
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
             with open(full_path, "w", encoding="utf-8") as f:
                 f.write(code)
 
         # 2. Register & scan project
-        project = Project(name=f"MutationTest_{case.id}", local_path=project_dir, status="READY")
+        project = Project(
+            name=f"MutationTest_{case.id}", local_path=project_dir, status="READY"
+        )
         session.add(project)
         await session.commit()
         await session.refresh(project)
@@ -191,7 +198,9 @@ class MutationBenchmarkHarness:
         await self.scanner.scan_project(session, project, incremental=False)
 
         # 3. Create initial memory
-        mem = await self.mem_service.create_memory(session, project.id, case.initial_memory)
+        mem = await self.mem_service.create_memory(
+            session, project.id, case.initial_memory
+        )
         assert mem.status == "ACTIVE"
 
         # 4. Apply mutation to disk
@@ -214,14 +223,14 @@ class MutationBenchmarkHarness:
         updated_mem = await self.mem_service.get_memory(session, mem.id)
         actual_st = updated_mem.status if updated_mem else "UNKNOWN"
 
-        reanchored_ok = (not case.expected_reanchored) or bool(report.memories_reanchored)
-        invalidated_ok = (not case.expected_invalidated) or bool(report.memories_invalidated)
-
-        passed = (
-            actual_st == case.expected_status
-            and reanchored_ok
-            and invalidated_ok
+        reanchored_ok = (not case.expected_reanchored) or bool(
+            report.memories_reanchored
         )
+        invalidated_ok = (not case.expected_invalidated) or bool(
+            report.memories_invalidated
+        )
+
+        passed = actual_st == case.expected_status and reanchored_ok and invalidated_ok
 
         details = (
             f"Expected {case.expected_status}, got {actual_st}. "
@@ -246,10 +255,10 @@ class MutationBenchmarkHarness:
     ) -> list[MutationResult]:
         """Run all canonical repository mutation benchmarks."""
         import tempfile
+
         results = []
         for case in CANONICAL_MUTATIONS:
             with tempfile.TemporaryDirectory() as tmpdir:
                 res = await self.run_mutation_test(session, tmpdir, case)
                 results.append(res)
         return results
-

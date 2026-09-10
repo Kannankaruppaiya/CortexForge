@@ -141,7 +141,9 @@ class ClaimVerificationEngine:
         )
         return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
-    def compute_evidence_state_digest(self, project_root: str, claims: list[Claim]) -> str:
+    def compute_evidence_state_digest(
+        self, project_root: str, claims: list[Claim]
+    ) -> str:
         """Digest the current content of every file the given claims are grounded in.
 
         Files are hashed once each regardless of how many claims reference them, and
@@ -199,7 +201,9 @@ class ClaimVerificationEngine:
             .options(selectinload(Claim.evidence_links))
             .where(
                 Claim.project_id == project_id,
-                Claim.status.notin_([ClaimStatus.RETIRED.value, ClaimStatus.SUPERSEDED.value]),
+                Claim.status.notin_(
+                    [ClaimStatus.RETIRED.value, ClaimStatus.SUPERSEDED.value]
+                ),
             )
         )
         if claim_ids:
@@ -229,7 +233,9 @@ class ClaimVerificationEngine:
                 # Nothing about the examined state changed, so the previous answer
                 # still stands. Returning it -- rather than re-running -- is what
                 # keeps repeated verification from looking like new evidence.
-                logger.debug("Reusing verification run %s for unchanged state", prior.id)
+                logger.debug(
+                    "Reusing verification run %s for unchanged state", prior.id
+                )
                 return prior
 
         run = VerificationRun(
@@ -249,7 +255,9 @@ class ClaimVerificationEngine:
         counts: dict[str, int] = {}
 
         for claim in claims:
-            verdicts = await self._evaluate_claim(session, claim, policies, project_root, commit_sha)
+            verdicts = await self._evaluate_claim(
+                session, claim, policies, project_root, commit_sha
+            )
             for verdict in verdicts:
                 session.add(
                     VerificationResult(
@@ -275,11 +283,15 @@ class ClaimVerificationEngine:
             await self._apply_verdict_to_claim(session, claim, final, commit_sha)
 
         run.verified_count = counts.get(VerificationOutcome.VERIFIED.value, 0)
-        run.partially_verified_count = counts.get(VerificationOutcome.PARTIALLY_VERIFIED.value, 0)
+        run.partially_verified_count = counts.get(
+            VerificationOutcome.PARTIALLY_VERIFIED.value, 0
+        )
         run.failed_count = counts.get(VerificationOutcome.FAILED.value, 0)
         run.conflicted_count = counts.get(VerificationOutcome.CONFLICTED.value, 0)
         run.unknown_count = counts.get(VerificationOutcome.UNKNOWN.value, 0)
-        run.not_applicable_count = counts.get(VerificationOutcome.NOT_APPLICABLE.value, 0)
+        run.not_applicable_count = counts.get(
+            VerificationOutcome.NOT_APPLICABLE.value, 0
+        )
         run.status = "COMPLETED"
         run.finished_at = datetime.now(UTC)
 
@@ -335,7 +347,9 @@ class ClaimVerificationEngine:
             )
         return verdicts
 
-    def _supporting_links(self, claim: Claim, evidence_type: str | None = None) -> list[ClaimEvidence]:
+    def _supporting_links(
+        self, claim: Claim, evidence_type: str | None = None
+    ) -> list[ClaimEvidence]:
         links = [
             link
             for link in (claim.evidence_links or [])
@@ -343,7 +357,11 @@ class ClaimVerificationEngine:
             == EvidenceRelation.SUPPORTS.value
         ]
         if evidence_type:
-            links = [link for link in links if (link.evidence_type or "").upper() == evidence_type.upper()]
+            links = [
+                link
+                for link in links
+                if (link.evidence_type or "").upper() == evidence_type.upper()
+            ]
         return links
 
     async def _strategy_ungrounded(
@@ -422,7 +440,9 @@ class ClaimVerificationEngine:
                 missing.append(link.file_path or "?")
                 continue
 
-            symbol = self._find_symbol(abs_path, link.file_path or "", link.qualified_name)
+            symbol = self._find_symbol(
+                abs_path, link.file_path or "", link.qualified_name
+            )
             if symbol is None:
                 link.state = "MISSING"
                 record["result"] = "symbol_absent"
@@ -559,7 +579,9 @@ class ClaimVerificationEngine:
 
         if missing:
             return ClaimVerdict(
-                claim_id=claim.id, policy_name=policy.name, policy_version=policy.version,
+                claim_id=claim.id,
+                policy_name=policy.name,
+                policy_version=policy.version,
                 policy_id=policy.id,
                 outcome=VerificationOutcome.FAILED.value,
                 reason_code=ReasonCode.EVIDENCE_MISSING.value,
@@ -568,7 +590,9 @@ class ClaimVerificationEngine:
             )
         if modified:
             return ClaimVerdict(
-                claim_id=claim.id, policy_name=policy.name, policy_version=policy.version,
+                claim_id=claim.id,
+                policy_name=policy.name,
+                policy_version=policy.version,
                 policy_id=policy.id,
                 outcome=VerificationOutcome.PARTIALLY_VERIFIED.value,
                 reason_code=ReasonCode.BODY_CHANGED.value,
@@ -580,7 +604,9 @@ class ClaimVerificationEngine:
             )
         if intact:
             return ClaimVerdict(
-                claim_id=claim.id, policy_name=policy.name, policy_version=policy.version,
+                claim_id=claim.id,
+                policy_name=policy.name,
+                policy_version=policy.version,
                 policy_id=policy.id,
                 outcome=VerificationOutcome.VERIFIED.value,
                 reason_code=ReasonCode.EVIDENCE_INTACT.value,
@@ -588,7 +614,9 @@ class ClaimVerificationEngine:
                 evidence_checked=checked,
             )
         return ClaimVerdict(
-            claim_id=claim.id, policy_name=policy.name, policy_version=policy.version,
+            claim_id=claim.id,
+            policy_name=policy.name,
+            policy_version=policy.version,
             policy_id=policy.id,
             outcome=VerificationOutcome.UNKNOWN.value,
             reason_code=ReasonCode.NO_EVIDENCE.value,
@@ -646,19 +674,25 @@ class ClaimVerificationEngine:
 
         if missing or key_absent:
             return ClaimVerdict(
-                claim_id=claim.id, policy_name=policy.name, policy_version=policy.version,
+                claim_id=claim.id,
+                policy_name=policy.name,
+                policy_version=policy.version,
                 policy_id=policy.id,
                 outcome=VerificationOutcome.FAILED.value,
                 reason_code=ReasonCode.CONFIG_CHANGED.value,
                 reason=(
                     "Configuration grounding no longer holds: "
-                    + "; ".join([*(f"missing {m}" for m in missing[:3]), *key_absent[:3]])
+                    + "; ".join(
+                        [*(f"missing {m}" for m in missing[:3]), *key_absent[:3]]
+                    )
                 ),
                 evidence_checked=checked,
             )
         if present:
             return ClaimVerdict(
-                claim_id=claim.id, policy_name=policy.name, policy_version=policy.version,
+                claim_id=claim.id,
+                policy_name=policy.name,
+                policy_version=policy.version,
                 policy_id=policy.id,
                 outcome=VerificationOutcome.VERIFIED.value,
                 reason_code=ReasonCode.EVIDENCE_INTACT.value,
@@ -666,7 +700,9 @@ class ClaimVerificationEngine:
                 evidence_checked=checked,
             )
         return ClaimVerdict(
-            claim_id=claim.id, policy_name=policy.name, policy_version=policy.version,
+            claim_id=claim.id,
+            policy_name=policy.name,
+            policy_version=policy.version,
             policy_id=policy.id,
             outcome=VerificationOutcome.UNKNOWN.value,
             reason_code=ReasonCode.NO_EVIDENCE.value,
@@ -697,7 +733,9 @@ class ClaimVerificationEngine:
         ]
         if not test_names:
             return ClaimVerdict(
-                claim_id=claim.id, policy_name=policy.name, policy_version=policy.version,
+                claim_id=claim.id,
+                policy_name=policy.name,
+                policy_version=policy.version,
                 policy_id=policy.id,
                 outcome=VerificationOutcome.UNKNOWN.value,
                 reason_code=ReasonCode.NO_EVIDENCE.value,
@@ -756,7 +794,9 @@ class ClaimVerificationEngine:
 
         if failing:
             return ClaimVerdict(
-                claim_id=claim.id, policy_name=policy.name, policy_version=policy.version,
+                claim_id=claim.id,
+                policy_name=policy.name,
+                policy_version=policy.version,
                 policy_id=policy.id,
                 outcome=VerificationOutcome.FAILED.value,
                 reason_code=ReasonCode.TEST_CONTRADICTION.value,
@@ -765,7 +805,9 @@ class ClaimVerificationEngine:
             )
         if passing and not inconclusive:
             return ClaimVerdict(
-                claim_id=claim.id, policy_name=policy.name, policy_version=policy.version,
+                claim_id=claim.id,
+                policy_name=policy.name,
+                policy_version=policy.version,
                 policy_id=policy.id,
                 outcome=VerificationOutcome.VERIFIED.value,
                 reason_code=ReasonCode.TEST_SUPPORT.value,
@@ -774,7 +816,9 @@ class ClaimVerificationEngine:
             )
         if passing:
             return ClaimVerdict(
-                claim_id=claim.id, policy_name=policy.name, policy_version=policy.version,
+                claim_id=claim.id,
+                policy_name=policy.name,
+                policy_version=policy.version,
                 policy_id=policy.id,
                 outcome=VerificationOutcome.PARTIALLY_VERIFIED.value,
                 reason_code=ReasonCode.TEST_SUPPORT.value,
@@ -785,7 +829,9 @@ class ClaimVerificationEngine:
                 evidence_checked=checked,
             )
         return ClaimVerdict(
-            claim_id=claim.id, policy_name=policy.name, policy_version=policy.version,
+            claim_id=claim.id,
+            policy_name=policy.name,
+            policy_version=policy.version,
             policy_id=policy.id,
             outcome=VerificationOutcome.UNKNOWN.value,
             reason_code=ReasonCode.BEHAVIOUR_UNVERIFIED.value,
@@ -806,9 +852,14 @@ class ClaimVerificationEngine:
             return verdicts[0]
 
         outcomes = {v.outcome for v in verdicts}
-        if outcomes & POSITIVE_OUTCOMES and VerificationOutcome.FAILED.value in outcomes:
+        if (
+            outcomes & POSITIVE_OUTCOMES
+            and VerificationOutcome.FAILED.value in outcomes
+        ):
             supporting = [v for v in verdicts if v.outcome in POSITIVE_OUTCOMES]
-            refuting = [v for v in verdicts if v.outcome == VerificationOutcome.FAILED.value]
+            refuting = [
+                v for v in verdicts if v.outcome == VerificationOutcome.FAILED.value
+            ]
             return ClaimVerdict(
                 claim_id=verdicts[0].claim_id,
                 policy_name="combined",
@@ -833,7 +884,9 @@ class ClaimVerificationEngine:
         commit_sha: str | None,
     ) -> None:
         """Update a claim's status and *recompute* -- never increment -- confidence."""
-        claim.status = _OUTCOME_TO_CLAIM_STATUS.get(verdict.outcome, ClaimStatus.UNKNOWN.value)
+        claim.status = _OUTCOME_TO_CLAIM_STATUS.get(
+            verdict.outcome, ClaimStatus.UNKNOWN.value
+        )
         claim.last_outcome = verdict.outcome
         claim.last_verified_at = datetime.now(UTC)
         if verdict.outcome in POSITIVE_OUTCOMES and commit_sha:
@@ -872,7 +925,9 @@ class ClaimVerificationEngine:
             logger.warning("Refusing evidence path outside project root: %s", rel_path)
             return None
 
-    def _find_symbol(self, abs_path: str, rel_path: str, qualified_name: str | None) -> Any:
+    def _find_symbol(
+        self, abs_path: str, rel_path: str, qualified_name: str | None
+    ) -> Any:
         """Locate a symbol in the current file by qualified name, then by name."""
         if not qualified_name or not self.parser.can_parse(rel_path):
             return None
@@ -944,9 +999,7 @@ async def latest_results_for_claims(
     return latest
 
 
-async def memory_claim_health(
-    session: AsyncSession, memory: Memory
-) -> dict[str, Any]:
+async def memory_claim_health(session: AsyncSession, memory: Memory) -> dict[str, Any]:
     """Aggregate claim outcomes for a memory.
 
     A memory is only as sound as its worst claim: one refuted proposition makes the

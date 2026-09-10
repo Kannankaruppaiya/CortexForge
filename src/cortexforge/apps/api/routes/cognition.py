@@ -59,9 +59,13 @@ def _claim_payload(claim: Claim) -> dict[str, Any]:
         "authority": claim.authority,
         "scope": claim.scope,
         "confidence": claim.confidence,
-        "confidence_explanation": (claim.confidence_components or {}).get("explanation"),
+        "confidence_explanation": (claim.confidence_components or {}).get(
+            "explanation"
+        ),
         "last_outcome": claim.last_outcome,
-        "last_verified_at": claim.last_verified_at.isoformat() if claim.last_verified_at else None,
+        "last_verified_at": claim.last_verified_at.isoformat()
+        if claim.last_verified_at
+        else None,
         "valid_from_commit": claim.valid_from_commit,
         "valid_to_commit": claim.valid_to_commit,
         "branch": claim.branch,
@@ -134,7 +138,9 @@ async def verify_project_claims(
     """
     project = await session.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
 
     run = await verification_engine.verify_project(
         session, project_id, commit_sha=commit_sha, branch=branch, verifier="rest-api"
@@ -290,7 +296,9 @@ async def list_pending_approvals(
             "layer": memory.layer,
             "authority": memory.authority,
             "confidence": memory.confidence,
-            "confidence_explanation": (memory.confidence_components or {}).get("explanation"),
+            "confidence_explanation": (memory.confidence_components or {}).get(
+                "explanation"
+            ),
             "created_by": memory.created_by,
             "created_at": memory.created_at.isoformat(),
             "why_pending": (
@@ -306,18 +314,25 @@ async def list_pending_approvals(
 @router.post("/memories/{memory_id}/approve")
 async def approve_memory(
     memory_id: str,
-    approver: str = Query(..., description="Who is approving; recorded in the audit log"),
+    approver: str = Query(
+        ..., description="Who is approving; recorded in the audit log"
+    ),
     reason: str = "",
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     """Approve a proposed memory, activating it under the approver's authority."""
     memory = await session.get(Memory, memory_id)
     if not memory:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found"
+        )
 
     previous_status = memory.status
 
-    if memory.memory_type == "LESSON" and memory.status == MemoryState.REVIEW_REQUIRED.value:
+    if (
+        memory.memory_type == "LESSON"
+        and memory.status == MemoryState.REVIEW_REQUIRED.value
+    ):
         # Lessons carry derived-from relations to their source episodes, so
         # approval goes through consolidation, which archives those sources.
         memory = await consolidation_engine.approve_lesson(
@@ -359,14 +374,18 @@ async def approve_memory(
 @router.post("/memories/{memory_id}/reject")
 async def reject_memory(
     memory_id: str,
-    reviewer: str = Query(..., description="Who is rejecting; recorded in the audit log"),
+    reviewer: str = Query(
+        ..., description="Who is rejecting; recorded in the audit log"
+    ),
     reason: str = Query(..., description="Why this proposal was rejected"),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     """Reject a proposed memory. Rejection is terminal and always carries a reason."""
     memory = await session.get(Memory, memory_id)
     if not memory:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found"
+        )
 
     previous_status = memory.status
     try:
@@ -377,7 +396,9 @@ async def reject_memory(
             actor=reviewer,
         )
     except InvalidStateTransitionError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
     if version is not None:
         session.add(version)
 

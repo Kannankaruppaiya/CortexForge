@@ -172,7 +172,12 @@ def classify(file_path: str) -> str | None:
     # CI definitions are identified by location, since their filenames are free-form.
     if "/.github/workflows/" in f"/{normalized}" and name.endswith((".yml", ".yaml")):
         return KIND_CI
-    if name in ("gitlab-ci.yml", ".gitlab-ci.yml", "azure-pipelines.yml", "jenkinsfile"):
+    if name in (
+        "gitlab-ci.yml",
+        ".gitlab-ci.yml",
+        "azure-pipelines.yml",
+        "jenkinsfile",
+    ):
         return KIND_CI
 
     # Alembic revisions live under a migrations/ or versions/ directory by
@@ -310,7 +315,9 @@ class ConfigIntelligenceProvider:
     def _parse_toml(text: str, artifact: ConfigArtifact) -> None:
         data = tomllib.loads(text)
         for section, value in data.items():
-            artifact.keys.append(ConfigKey(name=section, line=_find_line(text, section)))
+            artifact.keys.append(
+                ConfigKey(name=section, line=_find_line(text, section))
+            )
             if isinstance(value, dict):
                 for key in value:
                     artifact.keys.append(
@@ -339,12 +346,22 @@ class ConfigIntelligenceProvider:
             ConfigIntelligenceProvider._parse_yaml(text, artifact)
             return
 
-        artifact.detail["openapi_version"] = document.get("openapi") or document.get("swagger")
+        artifact.detail["openapi_version"] = document.get("openapi") or document.get(
+            "swagger"
+        )
         for path, operations in (document.get("paths") or {}).items():
             artifact.keys.append(ConfigKey(name=path, line=_find_line(text, path)))
             if isinstance(operations, dict):
                 for method in operations:
-                    if method.lower() in ("get", "post", "put", "patch", "delete", "head", "options"):
+                    if method.lower() in (
+                        "get",
+                        "post",
+                        "put",
+                        "patch",
+                        "delete",
+                        "head",
+                        "options",
+                    ):
                         artifact.keys.append(
                             ConfigKey(
                                 name=f"{method.upper()} {path}",
@@ -368,7 +385,9 @@ class ConfigIntelligenceProvider:
                     line=text[: match.start()].count("\n") + 1,
                 )
             )
-        revision = re.search(r"^revision(?:\s*:\s*str)?\s*=\s*['\"]([^'\"]+)['\"]", text, re.MULTILINE)
+        revision = re.search(
+            r"^revision(?:\s*:\s*str)?\s*=\s*['\"]([^'\"]+)['\"]", text, re.MULTILINE
+        )
         if revision:
             artifact.detail["revision"] = revision.group(1)
 
@@ -378,7 +397,7 @@ class ConfigIntelligenceProvider:
         if artifact.file_path.endswith("package.json"):
             document = json.loads(text)
             for section in ("dependencies", "devDependencies", "peerDependencies"):
-                for name in (document.get(section) or {}):
+                for name in document.get(section) or {}:
                     artifact.keys.append(
                         ConfigKey(name=f"{section}.{name}", line=_find_line(text, name))
                     )
@@ -390,9 +409,13 @@ class ConfigIntelligenceProvider:
             for requirement in project.get("dependencies", []) or []:
                 package = re.split(r"[<>=!~\[ ]", str(requirement))[0]
                 artifact.keys.append(
-                    ConfigKey(name=f"dependencies.{package}", line=_find_line(text, package))
+                    ConfigKey(
+                        name=f"dependencies.{package}", line=_find_line(text, package)
+                    )
                 )
-            for group, requirements in (project.get("optional-dependencies") or {}).items():
+            for group, requirements in (
+                project.get("optional-dependencies") or {}
+            ).items():
                 for requirement in requirements:
                     package = re.split(r"[<>=!~\[ ]", str(requirement))[0]
                     artifact.keys.append(
@@ -410,7 +433,9 @@ class ConfigIntelligenceProvider:
                 continue
             package = re.split(r"[<>=!~\[ ]", stripped)[0]
             if package:
-                artifact.keys.append(ConfigKey(name=f"dependencies.{package}", line=number))
+                artifact.keys.append(
+                    ConfigKey(name=f"dependencies.{package}", line=number)
+                )
 
 
 def _find_line(text: str, needle: str) -> int:
@@ -435,7 +460,8 @@ def discover_config_files(root_path: str, ignored_dirs: set[str]) -> list[str]:
         dirnames[:] = [
             name
             for name in dirnames
-            if name not in ignored_dirs and (not name.startswith(".") or name == ".github")
+            if name not in ignored_dirs
+            and (not name.startswith(".") or name == ".github")
         ]
         for filename in filenames:
             relative = os.path.relpath(

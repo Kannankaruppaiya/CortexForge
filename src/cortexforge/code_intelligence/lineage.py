@@ -208,7 +208,11 @@ class SymbolLineageTracker:
         return res.scalars().first()
 
     async def _close_lineage(
-        self, session: AsyncSession, project_id: str, qualified_name: str, commit_sha: str | None
+        self,
+        session: AsyncSession,
+        project_id: str,
+        qualified_name: str,
+        commit_sha: str | None,
     ) -> SymbolLineage | None:
         row = await self._latest_row(session, project_id, qualified_name)
         if row is None:

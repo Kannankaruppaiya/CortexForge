@@ -90,10 +90,22 @@ async def _seed(session: AsyncSession, tmp_path) -> Project:
 
     service = MemoryService()
     contents = [
-        ("Redis session expiry", "Sessions are stored in Redis with a fifteen minute expiry."),
-        ("JWT signing algorithm", "Tokens are signed with HMAC-SHA256 and verified statelessly."),
-        ("Payment idempotency", "Stripe webhooks require an idempotency key before recording."),
-        ("Database pooling", "Connections are pooled and initialised in the application lifespan."),
+        (
+            "Redis session expiry",
+            "Sessions are stored in Redis with a fifteen minute expiry.",
+        ),
+        (
+            "JWT signing algorithm",
+            "Tokens are signed with HMAC-SHA256 and verified statelessly.",
+        ),
+        (
+            "Payment idempotency",
+            "Stripe webhooks require an idempotency key before recording.",
+        ),
+        (
+            "Database pooling",
+            "Connections are pooled and initialised in the application lifespan.",
+        ),
         ("Rate limiting", "Requests are rate limited per API key at the gateway."),
     ]
     for title, body in contents:

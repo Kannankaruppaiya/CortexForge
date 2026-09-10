@@ -104,10 +104,24 @@ class VectorStore:
         """
         if await has_pgvector(session):
             return await self._search_pgvector(
-                session, project_id, query_vector, embedding_model, layer, memory_type, as_of_time, limit
+                session,
+                project_id,
+                query_vector,
+                embedding_model,
+                layer,
+                memory_type,
+                as_of_time,
+                limit,
             )
         return await self._search_python(
-            session, project_id, query_vector, embedding_model, layer, memory_type, as_of_time, limit
+            session,
+            project_id,
+            query_vector,
+            embedding_model,
+            layer,
+            memory_type,
+            as_of_time,
+            limit,
         )
 
     # ------------------------------------------------------------ postgres
@@ -141,8 +155,12 @@ class VectorStore:
         }
 
         if as_of_time:
-            conditions.append("(m.valid_from_time IS NULL OR m.valid_from_time <= :as_of_time)")
-            conditions.append("(m.valid_to_time IS NULL OR m.valid_to_time > :as_of_time)")
+            conditions.append(
+                "(m.valid_from_time IS NULL OR m.valid_from_time <= :as_of_time)"
+            )
+            conditions.append(
+                "(m.valid_to_time IS NULL OR m.valid_to_time > :as_of_time)"
+            )
             params["as_of_time"] = as_of_time
         else:
             conditions.append("(m.valid_to_time IS NULL OR m.valid_to_time > :now)")
@@ -165,7 +183,7 @@ class VectorStore:
             SELECT m.id,
                    1 - (m.embedding_vector <=> CAST(:query_vector AS vector)) AS similarity
             FROM memories AS m
-            WHERE {' AND '.join(conditions)}
+            WHERE {" AND ".join(conditions)}
             ORDER BY m.embedding_vector <=> CAST(:query_vector AS vector)
             LIMIT :limit
             """
@@ -191,7 +209,9 @@ class VectorStore:
         memories = await self._load(session, list(similarities))
 
         return VectorSearchResult(
-            memories=sorted(memories, key=lambda m: similarities.get(m.id, 0.0), reverse=True),
+            memories=sorted(
+                memories, key=lambda m: similarities.get(m.id, 0.0), reverse=True
+            ),
             similarities=similarities,
             strategy=STRATEGY_PGVECTOR,
             candidates_examined=len(rows),
@@ -233,7 +253,10 @@ class VectorStore:
         )
         if as_of_time:
             stmt = stmt.where(
-                or_(Memory.valid_from_time.is_(None), Memory.valid_from_time <= as_of_time)
+                or_(
+                    Memory.valid_from_time.is_(None),
+                    Memory.valid_from_time <= as_of_time,
+                )
             )
 
         if embedding_model:
@@ -334,7 +357,11 @@ async def backfill_vector_column(
         if not vector:
             skipped += 1
             continue
-        if expected_dimension and expected_dimension > 0 and len(vector) != expected_dimension:
+        if (
+            expected_dimension
+            and expected_dimension > 0
+            and len(vector) != expected_dimension
+        ):
             skipped += 1
             continue
         await session.execute(

@@ -128,7 +128,6 @@ async def test_cognitive_rest_endpoints(tmp_path):
         await session.commit()
         memory_id = mem.id
 
-
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         # 1. Add Architecture Rule
@@ -146,19 +145,21 @@ async def test_cognitive_rest_endpoints(tmp_path):
         rule_data = rule_res.json()
         assert rule_data["rule_name"] == "No direct DB from web"
 
-
         # 2. List Architecture Rules
-        list_rules_res = await client.get(f"/api/v1/projects/{project_id}/architecture/rules")
+        list_rules_res = await client.get(
+            f"/api/v1/projects/{project_id}/architecture/rules"
+        )
         assert list_rules_res.status_code == 200
         assert len(list_rules_res.json()) >= 1
 
         # 3. Check Architecture Violations
-        viol_res = await client.get(f"/api/v1/projects/{project_id}/architecture/violations")
+        viol_res = await client.get(
+            f"/api/v1/projects/{project_id}/architecture/violations"
+        )
         assert viol_res.status_code == 200
         viols = viol_res.json()
         assert len(viols) == 1
         assert "CRITICAL" in viols[0]["violation_details"]
-
 
         # 4. Provenance Trace
         prov_res = await client.get(f"/api/v1/memories/{memory_id}/provenance")
@@ -184,7 +185,9 @@ async def test_cognitive_rest_endpoints(tmp_path):
         assert len(list_snap_res.json()) >= 1
 
         # 7. Replay State at Commit -- answered from the snapshot taken then.
-        replay_res = await client.post(f"/api/v1/projects/{project_id}/snapshots/c0ffee1/replay")
+        replay_res = await client.post(
+            f"/api/v1/projects/{project_id}/snapshots/c0ffee1/replay"
+        )
         assert replay_res.status_code == 200
         replay_data = replay_res.json()
         assert replay_data["commit_sha"] == "c0ffee1"
@@ -204,7 +207,6 @@ async def test_cognitive_rest_endpoints(tmp_path):
         assert absent_data["replay_available"] is False
         assert "not captured" in absent_data["reason"]
 
-
         # 8. List Test Runs
         tests_res = await client.get(f"/api/v1/projects/{project_id}/tests")
         assert tests_res.status_code == 200
@@ -217,7 +219,9 @@ async def test_cognitive_rest_endpoints(tmp_path):
         assert failures_res.json()[0]["error_class"] == "OperationalError"
 
         # 10. Mutation Benchmark Endpoint
-        mut_res = await client.post(f"/api/v1/projects/{project_id}/mutations/benchmark")
+        mut_res = await client.post(
+            f"/api/v1/projects/{project_id}/mutations/benchmark"
+        )
         assert mut_res.status_code == 200
         mut_data = mut_res.json()
         assert "results" in mut_data

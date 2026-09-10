@@ -98,7 +98,9 @@ async def test_git_hooks_lifecycle_and_job_dispatch(hook_test_env):
     assert repeat_content.count(HOOK_START_MARKER) == 1
 
     # 3. Simulate hook firing via `cortex hooks handle`
-    handle_res = runner.invoke(cli, ["hooks", "handle", "--hook", "post-commit", "--path", repo])
+    handle_res = runner.invoke(
+        cli, ["hooks", "handle", "--hook", "post-commit", "--path", repo]
+    )
     assert handle_res.exit_code == 0
 
     # Verify a durable job was enqueued in the database
@@ -118,7 +120,9 @@ async def test_git_hooks_lifecycle_and_job_dispatch(hook_test_env):
 
     for hook_name in SUPPORTED_HOOKS:
         hook_path = os.path.join(hooks_dir, hook_name)
-        assert not os.path.exists(hook_path), f"Hook {hook_name} should have been removed"
+        assert not os.path.exists(hook_path), (
+            f"Hook {hook_name} should have been removed"
+        )
 
     # 5. Idempotent uninstall: running again should succeed without error
     uninst_repeat = runner.invoke(cli, ["hooks", "uninstall", repo])

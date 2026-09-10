@@ -102,7 +102,7 @@ class FastDeterministicEmbeddingProvider(EmbeddingProvider):
         # Unigrams & Bigrams
         tokens = list(words)
         for i in range(len(words) - 1):
-            tokens.append(f"{words[i]}_{words[i+1]}")
+            tokens.append(f"{words[i]}_{words[i + 1]}")
 
         for tok in tokens:
             # 64-bit murmur-like hash simulation via md5
@@ -138,7 +138,11 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
     def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         # CORTEX_EMBEDDING_MODEL is documented, so it must select the model.
-        self._model = model or os.environ.get("CORTEX_EMBEDDING_MODEL") or "text-embedding-3-small"
+        self._model = (
+            model
+            or os.environ.get("CORTEX_EMBEDDING_MODEL")
+            or "text-embedding-3-small"
+        )
         self._dim = 3072 if "large" in self._model else 1536
 
     @property

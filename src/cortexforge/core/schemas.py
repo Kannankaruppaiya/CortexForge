@@ -47,9 +47,15 @@ class MemoryType(str, Enum):
 class ProjectBase(BaseModel):
     name: str = Field(..., max_length=255, description="Project or repository name")
     repository_url: str | None = Field(None, description="Remote Git repository URL")
-    local_path: str = Field(..., description="Absolute local filesystem path to repository")
-    default_branch: str = Field("main", max_length=100, description="Default git branch")
-    language: str | None = Field(None, max_length=50, description="Primary detected programming language")
+    local_path: str = Field(
+        ..., description="Absolute local filesystem path to repository"
+    )
+    default_branch: str = Field(
+        "main", max_length=100, description="Default git branch"
+    )
+    language: str | None = Field(
+        None, max_length=50, description="Primary detected programming language"
+    )
 
 
 class ProjectCreate(ProjectBase):
@@ -140,8 +146,12 @@ class ArchitectureResponse(BaseModel):
 
 
 class ScanRequest(BaseModel):
-    incremental: bool = Field(True, description="Whether to scan only files changed since last scan")
-    max_files: int | None = Field(None, description="Optional limit on number of files to process")
+    incremental: bool = Field(
+        True, description="Whether to scan only files changed since last scan"
+    )
+    max_files: int | None = Field(
+        None, description="Optional limit on number of files to process"
+    )
 
 
 class ScanResponse(BaseModel):
@@ -201,7 +211,9 @@ class MemoryEvidenceCreate(BaseModel):
 
 class MemoryCreate(BaseModel):
     layer: str = Field("L1", description="Cognitive layer L0, L1, L2, L3, L4, L5, L6")
-    memory_type: str = Field(..., description="FACT, DECISION, CONSTRAINT, EPISODE, FAILURE, FIX, etc.")
+    memory_type: str = Field(
+        ..., description="FACT, DECISION, CONSTRAINT, EPISODE, FAILURE, FIX, etc."
+    )
     title: str = Field(..., max_length=255)
     content: str
     summary: str
@@ -228,10 +240,16 @@ class MemoryCreate(BaseModel):
             "when omitted."
         ),
     )
-    scope: str = Field("PROJECT", description="PROJECT, MODULE, FILE, SYMBOL, FEATURE, TASK, BRANCH, ENVIRONMENT")
+    scope: str = Field(
+        "PROJECT",
+        description="PROJECT, MODULE, FILE, SYMBOL, FEATURE, TASK, BRANCH, ENVIRONMENT",
+    )
     branch: str | None = None
     workspace: str | None = None
-    is_working_tree: bool = Field(False, description="True if observed from an uncommitted working tree rather than committed truth")
+    is_working_tree: bool = Field(
+        False,
+        description="True if observed from an uncommitted working tree rather than committed truth",
+    )
     source_reference: str | None = None
     source_commit: str | None = None
     created_by: str = "agent"
@@ -381,7 +399,6 @@ class RuleViolationRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-
 class ProvenanceTraceRead(BaseModel):
     memory_id: str
     title: str
@@ -465,5 +482,3 @@ class FailureEpisodeRead(BaseModel):
     fix_attempts: list[FixAttemptRead] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
-
-

@@ -86,9 +86,18 @@ class GraphService:
 
                     # Identify likely APIs or models
                     lower_name = e.name.lower()
-                    if "api" in lower_name or "route" in lower_name or "controller" in lower_name or "service" in lower_name:
+                    if (
+                        "api" in lower_name
+                        or "route" in lower_name
+                        or "controller" in lower_name
+                        or "service" in lower_name
+                    ):
                         primary_apis.append(comp)
-                    elif "model" in lower_name or "schema" in lower_name or e.entity_type in ("model", "interface"):
+                    elif (
+                        "model" in lower_name
+                        or "schema" in lower_name
+                        or e.entity_type in ("model", "interface")
+                    ):
                         primary_models.append(comp)
 
             module_summaries.append(
@@ -156,10 +165,16 @@ class GraphService:
         return "NOT_FOUND", None, []
 
     async def get_dependencies(
-        self, session: AsyncSession, project_id: str, entity_name_or_id: str, depth: int = 2
+        self,
+        session: AsyncSession,
+        project_id: str,
+        entity_name_or_id: str,
+        depth: int = 2,
     ) -> list[dict[str, str]]:
         """Resolve downstream dependencies for a given entity."""
-        status, start_entity, _ = await self.resolve_entity(session, project_id, entity_name_or_id)
+        status, start_entity, _ = await self.resolve_entity(
+            session, project_id, entity_name_or_id
+        )
         if status != "RESOLVED" or not start_entity:
             return []
 
@@ -199,10 +214,16 @@ class GraphService:
         return results
 
     async def get_dependents(
-        self, session: AsyncSession, project_id: str, entity_name_or_id: str, depth: int = 2
+        self,
+        session: AsyncSession,
+        project_id: str,
+        entity_name_or_id: str,
+        depth: int = 2,
     ) -> list[dict[str, str]]:
         """Resolve upstream callers and dependents (blast radius) for a given entity."""
-        status, start_entity, _ = await self.resolve_entity(session, project_id, entity_name_or_id)
+        status, start_entity, _ = await self.resolve_entity(
+            session, project_id, entity_name_or_id
+        )
         if status != "RESOLVED" or not start_entity:
             return []
 

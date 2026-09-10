@@ -56,7 +56,10 @@ async def _prepared_project(sample_repo, session: AsyncSession, name: str) -> Pr
             importance=0.9,
             evidence=[
                 MemoryEvidenceCreate(
-                    file_path="services/auth.py", source_type="code", line_start=2, line_end=4
+                    file_path="services/auth.py",
+                    source_type="code",
+                    line_start=2,
+                    line_end=4,
                 )
             ],
         ),
@@ -73,7 +76,10 @@ async def _prepared_project(sample_repo, session: AsyncSession, name: str) -> Pr
             importance=0.8,
             evidence=[
                 MemoryEvidenceCreate(
-                    file_path="services/payment.py", source_type="code", line_start=1, line_end=6
+                    file_path="services/payment.py",
+                    source_type="code",
+                    line_start=1,
+                    line_end=6,
                 )
             ],
         ),
@@ -131,11 +137,19 @@ async def test_unmeasured_fields_are_null_not_invented(
     )[0]
 
     for mode, result in card.results.items():
-        assert result.task_success is None, f"{mode} claims to know whether the task succeeded"
+        assert result.task_success is None, (
+            f"{mode} claims to know whether the task succeeded"
+        )
         assert result.tests_passed is None, f"{mode} claims to know a test count"
-        assert result.repeated_failures is None, f"{mode} claims to know a failure count"
-        assert result.output_tokens is None, f"{mode} claims to know generated token count"
-        assert result.estimated_cost_usd is None, f"{mode} claims to know generation cost"
+        assert result.repeated_failures is None, (
+            f"{mode} claims to know a failure count"
+        )
+        assert result.output_tokens is None, (
+            f"{mode} claims to know generated token count"
+        )
+        assert result.estimated_cost_usd is None, (
+            f"{mode} claims to know generation cost"
+        )
         assert result.unmeasured_reason
 
     assert card.tool_calls_saved is None

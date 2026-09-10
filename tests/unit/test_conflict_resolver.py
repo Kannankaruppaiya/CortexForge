@@ -73,7 +73,9 @@ async def test_repeated_verification_does_not_inflate_confidence():
         "last_verified_at": datetime.now(UTC),
     }
     scores = [ConfidenceScorer.score(**kwargs).score for _ in range(25)]
-    assert len(set(scores)) == 1, f"confidence drifted across identical checks: {set(scores)}"
+    assert len(set(scores)) == 1, (
+        f"confidence drifted across identical checks: {set(scores)}"
+    )
 
     # Nor may piling up copies of one source stand in for corroboration.
     duplicated = ConfidenceScorer.score(
@@ -137,7 +139,9 @@ async def test_contradiction_heuristics():
 
 
 @pytest.mark.asyncio
-async def test_conflict_resolution_supersedes_outdated_memory(test_session: AsyncSession, tmp_path):
+async def test_conflict_resolution_supersedes_outdated_memory(
+    test_session: AsyncSession, tmp_path
+):
     """Test that newer code-grounded memory supersedes older contradictory documentation memory."""
     project = Project(name="ConflictProj", local_path=str(tmp_path))
     test_session.add(project)
@@ -146,6 +150,11 @@ async def test_conflict_resolution_supersedes_outdated_memory(test_session: Asyn
 
     embed_provider = FastDeterministicEmbeddingProvider(dim=64)
     mem_service = MemoryService(embedding_provider=embed_provider)
+
+    # Write grounded code file
+    queue_file = tmp_path / "src" / "queue.py"
+    queue_file.parent.mkdir(parents=True, exist_ok=True)
+    queue_file.write_text("# Redis removal\n" * 15, encoding="utf-8")
 
     # 1. Create Memory A (old documentation claiming Redis is required)
     mem_a = await mem_service.create_memory(
@@ -207,7 +216,9 @@ async def test_conflict_resolution_supersedes_outdated_memory(test_session: Asyn
 
 
 @pytest.mark.asyncio
-async def test_unresolved_conflict_marks_both_conflicted(test_session: AsyncSession, tmp_path):
+async def test_unresolved_conflict_marks_both_conflicted(
+    test_session: AsyncSession, tmp_path
+):
     """Test that two unsupported contradictory claims are both placed into CONFLICTED state."""
     project = Project(name="UnresolvedProj", local_path=str(tmp_path))
     test_session.add(project)

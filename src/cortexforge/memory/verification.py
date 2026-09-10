@@ -135,12 +135,17 @@ class MemoryVerificationEngine:
 
         counts = {"verified": 0, "stale": 0, "deprecated": 0, "unknown": 0}
         for memory in memories:
-            status = await self._apply_claim_outcomes(session, memory, commit_sha, verifier)
+            status = await self._apply_claim_outcomes(
+                session, memory, commit_sha, verifier
+            )
             if status == MemoryState.ACTIVE.value:
                 counts["verified"] += 1
             elif status == MemoryState.STALE.value:
                 counts["stale"] += 1
-            elif status in (MemoryState.SUPERSEDED.value, MemoryState.INVALIDATED.value):
+            elif status in (
+                MemoryState.SUPERSEDED.value,
+                MemoryState.INVALIDATED.value,
+            ):
                 counts["deprecated"] += 1
             else:
                 counts["unknown"] += 1
@@ -162,7 +167,9 @@ class MemoryVerificationEngine:
         resolved from the project record so that evidence can never be checked
         against a directory the caller nominated (section 41).
         """
-        claims = await self.claims.sync_memory_claims(session, memory, commit_sha=commit_sha)
+        claims = await self.claims.sync_memory_claims(
+            session, memory, commit_sha=commit_sha
+        )
         if not claims:
             # Nothing evaluable was found in the text. That is a statement about the
             # memory, not a verdict on it: the state is left untouched.
@@ -205,7 +212,7 @@ class MemoryVerificationEngine:
 
         if target_state and target_state != memory.status:
             reason = (
-                f"Claim \"{worst.text[:120]}\" resolved to {worst.status}: "
+                f'Claim "{worst.text[:120]}" resolved to {worst.status}: '
                 f"{(worst.confidence_components or {}).get('explanation', 'see verification result')}"
             )
             try:
@@ -222,7 +229,9 @@ class MemoryVerificationEngine:
                 if version is not None:
                     session.add(version)
             except InvalidStateTransitionError as exc:
-                logger.info("Verification transition refused for memory %s: %s", memory.id, exc)
+                logger.info(
+                    "Verification transition refused for memory %s: %s", memory.id, exc
+                )
 
         # Confidence is recomputed from scratch. There is deliberately no code path
         # here that reads the old confidence -- see the module docstring.
@@ -253,14 +262,18 @@ class MemoryVerificationEngine:
         res = await session.execute(
             select(Claim)
             .options(selectinload(Claim.evidence_links))
-            .where(Claim.memory_id == memory.id, Claim.status != ClaimStatus.RETIRED.value)
+            .where(
+                Claim.memory_id == memory.id, Claim.status != ClaimStatus.RETIRED.value
+            )
         )
         claims = list(res.scalars().all())
         return {
             "memory_id": memory.id,
             "status": memory.status,
             "confidence": memory.confidence,
-            "confidence_explanation": (memory.confidence_components or {}).get("explanation"),
+            "confidence_explanation": (memory.confidence_components or {}).get(
+                "explanation"
+            ),
             "claims": [
                 {
                     "id": claim.id,
@@ -270,7 +283,9 @@ class MemoryVerificationEngine:
                     "confidence": claim.confidence,
                     "authority": claim.authority,
                     "evidence_count": len(claim.evidence_links or []),
-                    "explanation": (claim.confidence_components or {}).get("explanation"),
+                    "explanation": (claim.confidence_components or {}).get(
+                        "explanation"
+                    ),
                 }
                 for claim in claims
             ],

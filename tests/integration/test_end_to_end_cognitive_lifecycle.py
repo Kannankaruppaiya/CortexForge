@@ -82,7 +82,9 @@ async def e2e_session():
 
 
 @pytest.mark.asyncio
-async def test_end_to_end_cognitive_lifecycle(synthetic_repo, e2e_session: AsyncSession):
+async def test_end_to_end_cognitive_lifecycle(
+    synthetic_repo, e2e_session: AsyncSession
+):
     scanner = RepositoryScanner()
     mem_service = MemoryService()
     verifier = MemoryVerificationEngine()
@@ -303,7 +305,10 @@ async def test_end_to_end_cognitive_lifecycle(synthetic_repo, e2e_session: Async
         target_files=["services/auth.py"],
     )
     # Should feature the new JWT decision and/or durable lessons
-    assert "Stateless JWT Authentication" in final_context or "Project Conventions & Durable Lessons" in final_context
+    assert (
+        "Stateless JWT Authentication" in final_context
+        or "Project Conventions & Durable Lessons" in final_context
+    )
     # Warning should flag the stale Redis decision
     assert "Potentially Stale Memories Detected" in final_context
     assert "Redis" in final_context
@@ -335,7 +340,6 @@ async def test_end_to_end_cognitive_lifecycle(synthetic_repo, e2e_session: Async
     assert decision.status != "SUPERSEDED"
     assert contradiction_memory.conflict_group is not None
     assert contradiction_memory.conflict_group == decision.conflict_group
-
 
     # ----------------------------------------------------
     # Step 13: Agent Workflow Orchestration & Failure Ingestion
@@ -409,11 +413,15 @@ async def test_end_to_end_cognitive_lifecycle(synthetic_repo, e2e_session: Async
     # ----------------------------------------------------
     # Step 16: Safe Idempotent Consolidation
     # ----------------------------------------------------
-    first_pass = await consolidator.consolidate_project_memories(e2e_session, project.id)
+    first_pass = await consolidator.consolidate_project_memories(
+        e2e_session, project.id
+    )
     # Consolidating the same episodes again must converge, not accumulate: clusters
     # are identified by a fingerprint over their members, so the second pass finds
     # its work already done.
-    second_pass = await consolidator.consolidate_project_memories(e2e_session, project.id)
+    second_pass = await consolidator.consolidate_project_memories(
+        e2e_session, project.id
+    )
     assert second_pass["durable_memories_created"] == 0
     assert second_pass["duplicates_skipped"] >= first_pass["durable_memories_created"]
 
@@ -444,7 +452,9 @@ async def test_end_to_end_cognitive_lifecycle(synthetic_repo, e2e_session: Async
     # ----------------------------------------------------
     # The old Redis session decision was SUPERSEDED and must not be selected as an active decision
     assert "Redis Session Store for Auth" not in [
-        m["title"] for m in next_task_context.selected_memories if m.get("memory_type") == "DECISION"
+        m["title"]
+        for m in next_task_context.selected_memories
+        if m.get("memory_type") == "DECISION"
     ]
 
     # ----------------------------------------------------
@@ -467,6 +477,3 @@ async def test_end_to_end_cognitive_lifecycle(synthetic_repo, e2e_session: Async
     # Replay reports the recorded set, believed and withheld alike, so that "what
     # did we believe then" and "what do we believe now" stay distinguishable.
     assert replay["believed_memories"] or replay["withheld_memories"]
-
-
-

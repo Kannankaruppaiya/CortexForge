@@ -166,7 +166,9 @@ class MemoryReconciliationEngine:
 
         # 2. Re-anchor evidence for renamed and moved symbols *before* verifying, so
         #    that a rename is recognised as continuity rather than as a deletion.
-        reanchored = await self._reanchor_renames(session, affected_claims, semantic_changes)
+        reanchored = await self._reanchor_renames(
+            session, affected_claims, semantic_changes
+        )
         report.reanchored_symbols = reanchored
         await session.flush()
 
@@ -225,15 +227,24 @@ class MemoryReconciliationEngine:
         """
         files = {f.replace("\\", "/") for f in (changed_files or [])}
         files.update(change.file_path.replace("\\", "/") for change in semantic_changes)
-        qualified = {change.qualified_name for change in semantic_changes if change.qualified_name}
+        qualified = {
+            change.qualified_name
+            for change in semantic_changes
+            if change.qualified_name
+        }
         # A rename's old identity is what existing evidence still points at.
         for change in semantic_changes:
-            old = change.details.get("renamed_from") or change.details.get("old_qualified_name")
+            old = change.details.get("renamed_from") or change.details.get(
+                "old_qualified_name"
+            )
             if old:
                 qualified.add(old)
 
         return await self.claims.find_claims_touching(
-            session, project_id, file_paths=sorted(files), qualified_names=sorted(qualified)
+            session,
+            project_id,
+            file_paths=sorted(files),
+            qualified_names=sorted(qualified),
         )
 
     async def _reanchor_renames(
@@ -356,7 +367,9 @@ class MemoryReconciliationEngine:
                 # The finite state machine refused. That is a legitimate answer, not
                 # an error to route around: the decision is downgraded to UNKNOWN and
                 # the refusal is recorded so a human can see what was attempted.
-                logger.info("Reconciliation transition refused for %s: %s", memory.id, exc)
+                logger.info(
+                    "Reconciliation transition refused for %s: %s", memory.id, exc
+                )
                 decision = DecisionCode.UNKNOWN.value
                 reason_code = ReasonCode.BEHAVIOUR_UNVERIFIED.value
                 reason = f"{reason} (lifecycle refused {previous_status} -> {target_state}: {exc})"
@@ -376,7 +389,9 @@ class MemoryReconciliationEngine:
             for claim in claims
         ]
 
-        key = self.compute_decision_key(memory.id, change_set_id, decision, reason_code, commit_sha)
+        key = self.compute_decision_key(
+            memory.id, change_set_id, decision, reason_code, commit_sha
+        )
         existing = await session.execute(
             select(MemoryDecision).where(
                 MemoryDecision.project_id == memory.project_id,
@@ -434,7 +449,9 @@ class MemoryReconciliationEngine:
         """
         refuted = [c for c in claims if c.status == ClaimStatus.REFUTED.value]
         conflicted = [c for c in claims if c.status == ClaimStatus.CONFLICTED.value]
-        partial = [c for c in claims if c.status == ClaimStatus.PARTIALLY_VERIFIED.value]
+        partial = [
+            c for c in claims if c.status == ClaimStatus.PARTIALLY_VERIFIED.value
+        ]
         unknown = [c for c in claims if c.status == ClaimStatus.UNKNOWN.value]
         verified = [c for c in claims if c.status == ClaimStatus.VERIFIED.value]
 
@@ -462,7 +479,7 @@ class MemoryReconciliationEngine:
                     ReasonCode.SYMBOL_REMOVED.value,
                     (
                         f"The symbol this memory depends on was removed, so its claim "
-                        f"\"{claim.text[:120]}\" no longer has any referent."
+                        f'"{claim.text[:120]}" no longer has any referent.'
                     ),
                     claim,
                 )
@@ -470,7 +487,7 @@ class MemoryReconciliationEngine:
                 DecisionCode.INVALIDATE.value,
                 ReasonCode.EVIDENCE_MISSING.value,
                 (
-                    f"Claim \"{claim.text[:120]}\" was refuted: "
+                    f'Claim "{claim.text[:120]}" was refuted: '
                     f"{(claim.confidence_components or {}).get('explanation', 'grounding evidence no longer holds')}"
                 ),
                 claim,
@@ -483,7 +500,7 @@ class MemoryReconciliationEngine:
                 ReasonCode.TEST_CONTRADICTION.value,
                 (
                     f"Verification policies disagree about claim "
-                    f"\"{claim.text[:120]}\"; the memory is held as conflicted rather "
+                    f'"{claim.text[:120]}"; the memory is held as conflicted rather '
                     "than resolved by preference."
                 ),
                 claim,
@@ -506,7 +523,7 @@ class MemoryReconciliationEngine:
                 DecisionCode.REVISE.value,
                 reason_code,
                 (
-                    f"The {what} behind claim \"{claim.text[:120]}\" changed. The code "
+                    f'The {what} behind claim "{claim.text[:120]}" changed. The code '
                     "still exists, but its continued existence does not prove the "
                     "behaviour this memory describes, so the memory needs revision "
                     "rather than deletion."
@@ -532,7 +549,7 @@ class MemoryReconciliationEngine:
                 DecisionCode.UNKNOWN.value,
                 ReasonCode.NO_EVIDENCE.value,
                 (
-                    f"Claim \"{claim.text[:120]}\" could not be decided from the "
+                    f'Claim "{claim.text[:120]}" could not be decided from the '
                     "repository. It is reported as unknown rather than assumed to "
                     "have survived the change."
                 ),

@@ -117,9 +117,7 @@ def test_detects_documented_api_paths_that_are_not_served(tmp_path):
         encoding="utf-8",
     )
 
-    report = ProjectIntegrityChecker(str(project)).check(
-        api_paths={"/api/v1/projects"}
-    )
+    report = ProjectIntegrityChecker(str(project)).check(api_paths={"/api/v1/projects"})
     api_findings = [f for f in report.findings if f.check == "api_paths"]
 
     assert api_findings

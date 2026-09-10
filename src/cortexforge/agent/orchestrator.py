@@ -107,7 +107,10 @@ class AgentWorkflowOrchestrator:
         # 2. Record TASK_STARTED event
         adapter = EventAdapterRegistry.get_adapter(agent_source)
         ev_start = adapter.normalize_event(
-            {"event_type": CanonicalEventType.TASK_STARTED.value, "task_text": task_text},
+            {
+                "event_type": CanonicalEventType.TASK_STARTED.value,
+                "task_text": task_text,
+            },
             task_id=task.id,
         )
         session.add(
@@ -276,7 +279,6 @@ class AgentWorkflowOrchestrator:
                 base_commit=commit_base,
             )
 
-
         await session.commit()
         return impact
 
@@ -298,7 +300,11 @@ class AgentWorkflowOrchestrator:
             return
 
         is_failure = status.upper() == "FAILED"
-        ev_type = CanonicalEventType.TEST_FAILED if is_failure else CanonicalEventType.TEST_PASSED
+        ev_type = (
+            CanonicalEventType.TEST_FAILED
+            if is_failure
+            else CanonicalEventType.TEST_PASSED
+        )
 
         # 1. Log canonical AgentEvent
         adapter = EventAdapterRegistry.get_adapter(agent_source)
@@ -388,7 +394,9 @@ class AgentWorkflowOrchestrator:
                     else tc_result.status
                 )
 
-        blames_this_change = attribution is None or attribution.is_evidence_against_the_change
+        blames_this_change = (
+            attribution is None or attribution.is_evidence_against_the_change
+        )
 
         # 5. If the failure is genuinely attributable, record it as a first-class
         #    episode and durable L4 memory. If it is not, the result is still
@@ -400,7 +408,9 @@ class AgentWorkflowOrchestrator:
                 task_id=task.id,
                 test_case_result_id=tc_result.id,
                 failure_signature=episode.failure_signature,
-                error_class=error_text.split(":")[0][:100] if ":" in error_text else "TestFailure",
+                error_class=error_text.split(":")[0][:100]
+                if ":" in error_text
+                else "TestFailure",
                 error_message=episode.error_message,
                 normalized_trace=episode.normalized_trace,
                 attempted_approach=task.task_text,
@@ -496,7 +506,9 @@ class AgentWorkflowOrchestrator:
             select(AgentTask)
             .options(
                 selectinload(AgentTask.events),
-                selectinload(AgentTask.failure_episodes).selectinload(FailureEpisode.fix_attempts),
+                selectinload(AgentTask.failure_episodes).selectinload(
+                    FailureEpisode.fix_attempts
+                ),
             )
             .where(
                 AgentTask.project_id == project_id,
@@ -513,7 +525,9 @@ class AgentWorkflowOrchestrator:
         query_words = set(task_text.lower().split())
         query_embed = None
         try:
-            query_embed_res = await self.memory_service.embedding_provider.embed_text(task_text)
+            query_embed_res = await self.memory_service.embedding_provider.embed_text(
+                task_text
+            )
             query_embed = query_embed_res.vector
         except Exception as exc:
             logger.debug("Failed to embed task query for similarity: %s", exc)
@@ -533,12 +547,20 @@ class AgentWorkflowOrchestrator:
             cos_sim = 0.0
             if query_embed:
                 try:
-                    t_embed_res = await self.memory_service.embedding_provider.embed_text(t.task_text)
+                    t_embed_res = (
+                        await self.memory_service.embedding_provider.embed_text(
+                            t.task_text
+                        )
+                    )
                     cos_sim = cosine_similarity(query_embed, t_embed_res.vector)
                 except Exception:
                     cos_sim = 0.0
 
-            text_score = max(0.0, (0.65 * cos_sim) + (0.35 * jaccard)) if cos_sim > 0.0 else jaccard
+            text_score = (
+                max(0.0, (0.65 * cos_sim) + (0.35 * jaccard))
+                if cos_sim > 0.0
+                else jaccard
+            )
 
             # Extract files and symbols associated with the task
             task_files: set[str] = set()
@@ -580,7 +602,9 @@ class AgentWorkflowOrchestrator:
             # Symbol overlap score
             symbol_score = 0.0
             if q_syms_norm:
-                symbol_score = len(q_syms_norm & task_symbols) / max(1, len(q_syms_norm))
+                symbol_score = len(q_syms_norm & task_symbols) / max(
+                    1, len(q_syms_norm)
+                )
 
             # Failure signature score
             failure_score = 0.0
@@ -617,7 +641,12 @@ class AgentWorkflowOrchestrator:
                 "failure_score": round(failure_score, 4),
             }
 
-            if composite > 0.05 or overlap >= 1 or file_score > 0.0 or failure_score > 0.0:
+            if (
+                composite > 0.05
+                or overlap >= 1
+                or file_score > 0.0
+                or failure_score > 0.0
+            ):
                 scored_tasks.append((composite, breakdown, t))
 
         scored_tasks.sort(key=lambda x: x[0], reverse=True)
@@ -631,44 +660,63 @@ class AgentWorkflowOrchestrator:
             for ep in t.failure_episodes:
                 has_success = any(
                     getattr(fa, "success", False) is True
-                    or (getattr(fa, "outcome", "") or "").upper() in ("SUCCESS", "FIXED")
+                    or (getattr(fa, "outcome", "") or "").upper()
+                    in ("SUCCESS", "FIXED")
                     for fa in ep.fix_attempts
                 )
-                fix_status = "FIXED" if has_success else ("ATTEMPTED" if ep.fix_attempts else "UNRESOLVED")
+                fix_status = (
+                    "FIXED"
+                    if has_success
+                    else ("ATTEMPTED" if ep.fix_attempts else "UNRESOLVED")
+                )
 
-                fail_data.append({
-                    "error_class": ep.error_class,
-                    "error_message": ep.error_message,
-                    "failure_signature": ep.failure_signature,
-                    "attempted_approach": ep.attempted_approach,
-                    "rejected_reason": ep.rejected_reason,
-                    "fix_status": fix_status,
-                })
+                fail_data.append(
+                    {
+                        "error_class": ep.error_class,
+                        "error_message": ep.error_message,
+                        "failure_signature": ep.failure_signature,
+                        "attempted_approach": ep.attempted_approach,
+                        "rejected_reason": ep.rejected_reason,
+                        "fix_status": fix_status,
+                    }
+                )
                 for fa in ep.fix_attempts:
-                    approach = getattr(fa, "attempted_fix", "") or getattr(fa, "approach_description", "")
-                    outcome = "SUCCESS" if getattr(fa, "success", False) else (getattr(fa, "outcome", "") or "FAILED")
-                    why = getattr(fa, "why_worked_or_failed", "") or getattr(fa, "explanation", "")
-                    fix_data.append({
-                        "attempted_fix": approach,
-                        "approach_description": approach,
-                        "success": getattr(fa, "success", False),
-                        "outcome": outcome,
-                        "why_worked_or_failed": why,
-                        "explanation": why,
-                    })
+                    approach = getattr(fa, "attempted_fix", "") or getattr(
+                        fa, "approach_description", ""
+                    )
+                    outcome = (
+                        "SUCCESS"
+                        if getattr(fa, "success", False)
+                        else (getattr(fa, "outcome", "") or "FAILED")
+                    )
+                    why = getattr(fa, "why_worked_or_failed", "") or getattr(
+                        fa, "explanation", ""
+                    )
+                    fix_data.append(
+                        {
+                            "attempted_fix": approach,
+                            "approach_description": approach,
+                            "success": getattr(fa, "success", False),
+                            "outcome": outcome,
+                            "why_worked_or_failed": why,
+                            "explanation": why,
+                        }
+                    )
 
-            results.append({
-                "task_id": t.id,
-                "task": t,
-                "task_text": t.task_text,
-                "status": t.status,
-                "success": t.success,
-                "similarity_score": round(composite, 4),
-                "score_breakdown": breakdown,
-                "tool_calls": t.tool_calls,
-                "failure_episodes": fail_data,
-                "fix_attempts": fix_data,
-            })
+            results.append(
+                {
+                    "task_id": t.id,
+                    "task": t,
+                    "task_text": t.task_text,
+                    "status": t.status,
+                    "success": t.success,
+                    "similarity_score": round(composite, 4),
+                    "score_breakdown": breakdown,
+                    "tool_calls": t.tool_calls,
+                    "failure_episodes": fail_data,
+                    "fix_attempts": fix_data,
+                }
+            )
 
         return results
 

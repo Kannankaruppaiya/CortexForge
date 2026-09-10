@@ -56,7 +56,9 @@ class ChangeImpactReport:
     # explicitly rather than being silently counted as unaffected (section 30).
     memories_unknown: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
-    propagation_confidence: str = "EXACT"  # "EXACT" | "INFERRED" | "UNKNOWN_CHANGE_SCOPE" (Item 13)
+    propagation_confidence: str = (
+        "EXACT"  # "EXACT" | "INFERRED" | "UNKNOWN_CHANGE_SCOPE" (Item 13)
+    )
     change_set_id: str | None = None
     verification_run_id: str | None = None
     # The full reconciliation record: decision code, reason code and reason per
@@ -92,7 +94,11 @@ class SemanticChangePropagator:
     ) -> ChangeImpactReport:
         """Alias for propagate_changes."""
         return await self.propagate_changes(
-            session, project_id, modified_files, mark_stale=mark_stale, base_commit=base_commit
+            session,
+            project_id,
+            modified_files,
+            mark_stale=mark_stale,
+            base_commit=base_commit,
         )
 
     async def propagate_changes(
@@ -108,7 +114,9 @@ class SemanticChangePropagator:
         workspace: str | None = None,
     ) -> ChangeImpactReport:
         """Analyse a set of modified files and reconcile project memory against it."""
-        target_files = modified_files if modified_files is not None else (changed_files or [])
+        target_files = (
+            modified_files if modified_files is not None else (changed_files or [])
+        )
         base = base_commit if base_commit is not None else commit_base
         normalized_files = [f.replace("\\", "/") for f in target_files]
 
@@ -136,8 +144,9 @@ class SemanticChangePropagator:
             head_commit = git.get_head_commit() or head_commit
 
             for rel_file in normalized_files:
-
-                abs_file = os.path.join(project.local_path, rel_file.replace("/", os.sep))
+                abs_file = os.path.join(
+                    project.local_path, rel_file.replace("/", os.sep)
+                )
                 after_content: bytes | None = None
                 if os.path.exists(abs_file):
                     try:
@@ -148,31 +157,49 @@ class SemanticChangePropagator:
 
                 before_content = git.get_file_content_at_commit(target_base, rel_file)
                 db_file_entities = [
-                    e for e in all_entities
-                    if e.file_path == rel_file or rel_file.endswith(e.file_path.replace("\\", "/"))
+                    e
+                    for e in all_entities
+                    if e.file_path == rel_file
+                    or rel_file.endswith(e.file_path.replace("\\", "/"))
                 ]
 
                 # If git has no before_content, but database already has entities for this file:
                 # Compare against the database entity state!
-                if before_content is None and db_file_entities and after_content is not None:
+                if (
+                    before_content is None
+                    and db_file_entities
+                    and after_content is not None
+                ):
                     if self.differ.parser.can_parse(rel_file):
-                        parsed_after = self.differ.parser.parse_source(rel_file, after_content)
+                        parsed_after = self.differ.parser.parse_source(
+                            rel_file, after_content
+                        )
                         after_sym_map = {
-                            s.qualified_name: s for s in parsed_after.symbols if s.entity_type != "file"
+                            s.qualified_name: s
+                            for s in parsed_after.symbols
+                            if s.entity_type != "file"
                         }
                         # Compare each DB entity against the newly parsed symbols
                         for ent in db_file_entities:
                             if ent.entity_type == "file":
                                 continue
-                            matching_sym = after_sym_map.get(ent.qualified_name) or next(
-                                (s for s in parsed_after.symbols if s.name == ent.name and s.entity_type == ent.entity_type),
-                                None
+                            matching_sym = after_sym_map.get(
+                                ent.qualified_name
+                            ) or next(
+                                (
+                                    s
+                                    for s in parsed_after.symbols
+                                    if s.name == ent.name
+                                    and s.entity_type == ent.entity_type
+                                ),
+                                None,
                             )
                             if not matching_sym:
                                 # Check if symbol was renamed (same body hash or signature)
                                 renamed_to = next(
                                     (
-                                        s for s in parsed_after.symbols
+                                        s
+                                        for s in parsed_after.symbols
                                         if are_symbols_lineage_match(ent, s)
                                     ),
                                     None,
@@ -190,9 +217,18 @@ class SemanticChangePropagator:
                                             after_fingerprint=renamed_to.content_hash,
                                             before_signature=ent.signature,
                                             after_signature=renamed_to.signature,
-                                            before_line_range=(ent.start_line, ent.end_line),
-                                            after_line_range=(renamed_to.start_line, renamed_to.end_line),
-                                            details={"renamed_from": ent.qualified_name, "old_name": ent.name},
+                                            before_line_range=(
+                                                ent.start_line,
+                                                ent.end_line,
+                                            ),
+                                            after_line_range=(
+                                                renamed_to.start_line,
+                                                renamed_to.end_line,
+                                            ),
+                                            details={
+                                                "renamed_from": ent.qualified_name,
+                                                "old_name": ent.name,
+                                            },
                                         )
                                     )
                                 else:
@@ -206,10 +242,16 @@ class SemanticChangePropagator:
                                             entity_type=ent.entity_type,
                                             before_fingerprint=ent.content_hash,
                                             before_signature=ent.signature,
-                                            before_line_range=(ent.start_line, ent.end_line),
+                                            before_line_range=(
+                                                ent.start_line,
+                                                ent.end_line,
+                                            ),
                                         )
                                     )
-                            elif matching_sym.content_hash != ent.content_hash or matching_sym.signature != ent.signature:
+                            elif (
+                                matching_sym.content_hash != ent.content_hash
+                                or matching_sym.signature != ent.signature
+                            ):
                                 sig_changed = matching_sym.signature != ent.signature
                                 c_type = (
                                     SemanticChangeType.SIGNATURE_CHANGED
@@ -228,8 +270,14 @@ class SemanticChangePropagator:
                                         after_fingerprint=matching_sym.content_hash,
                                         before_signature=ent.signature,
                                         after_signature=matching_sym.signature,
-                                        before_line_range=(ent.start_line, ent.end_line),
-                                        after_line_range=(matching_sym.start_line, matching_sym.end_line),
+                                        before_line_range=(
+                                            ent.start_line,
+                                            ent.end_line,
+                                        ),
+                                        after_line_range=(
+                                            matching_sym.start_line,
+                                            matching_sym.end_line,
+                                        ),
                                     )
                                 )
                 else:
@@ -258,15 +306,22 @@ class SemanticChangePropagator:
                 changed_symbol_qnames.add(ch.qualified_name)
                 changed_symbol_names.add(ch.symbol_name)
                 if ch.after_line_range:
-                    changed_file_ranges.setdefault(ch.file_path, []).append(ch.after_line_range)
+                    changed_file_ranges.setdefault(ch.file_path, []).append(
+                        ch.after_line_range
+                    )
                 elif ch.before_line_range:
-                    changed_file_ranges.setdefault(ch.file_path, []).append(ch.before_line_range)
+                    changed_file_ranges.setdefault(ch.file_path, []).append(
+                        ch.before_line_range
+                    )
 
         # 4. Match directly changed entities in database
         directly_changed_entities: list[CodeEntity] = []
         for ent in all_entities:
             ent_file_norm = ent.file_path.replace("\\", "/")
-            if any(ent_file_norm == nf or nf.endswith(ent_file_norm) for nf in normalized_files):
+            if any(
+                ent_file_norm == nf or nf.endswith(ent_file_norm)
+                for nf in normalized_files
+            ):
                 directly_changed_entities.append(ent)
 
         # 5. Graph propagation: compute blast radius (dependents and upstream callers)
@@ -296,8 +351,12 @@ class SemanticChangePropagator:
             branch=branch,
             workspace=workspace,
             existing_files={
-                nf for nf in normalized_files
-                if project and os.path.exists(os.path.join(project.local_path, nf.replace("/", os.sep)))
+                nf
+                for nf in normalized_files
+                if project
+                and os.path.exists(
+                    os.path.join(project.local_path, nf.replace("/", os.sep))
+                )
             },
         )
 
@@ -343,7 +402,10 @@ class SemanticChangePropagator:
             return [o.memory_title for o in reconciliation.by_decision(decision)]
 
         for outcome in reconciliation.outcomes:
-            if outcome.decision in (DecisionCode.REVISE.value, DecisionCode.STALE.value):
+            if outcome.decision in (
+                DecisionCode.REVISE.value,
+                DecisionCode.STALE.value,
+            ):
                 warnings.append(f"{outcome.reason_code}: {outcome.reason}")
             elif outcome.decision == DecisionCode.CONFLICT.value:
                 critical_constraints.append(f"CONFLICT: {outcome.reason}")
@@ -351,10 +413,10 @@ class SemanticChangePropagator:
         await session.commit()
 
         # Determine propagation confidence (Item 13)
-        if not normalized_files or (
-            all_semantic_changes
-            and len({sc.file_path for sc in all_semantic_changes}) >= len(normalized_files)
-        ):
+        semantic_files = {sc.file_path for sc in all_semantic_changes}
+        if not normalized_files:
+            prop_confidence = "UNKNOWN_CHANGE_SCOPE"
+        elif all_semantic_changes and set(normalized_files).issubset(semantic_files):
             prop_confidence = "EXACT"
         elif all_semantic_changes or directly_changed_entities:
             prop_confidence = "INFERRED"
@@ -363,9 +425,12 @@ class SemanticChangePropagator:
 
         return ChangeImpactReport(
             modified_files=normalized_files,
-            directly_changed_entities=[e.qualified_name for e in directly_changed_entities],
+            directly_changed_entities=[
+                e.qualified_name for e in directly_changed_entities
+            ],
             affected_dependents=sorted(affected_dependent_names),
-            memories_flagged_stale=titles(DecisionCode.REVISE.value) + titles(DecisionCode.STALE.value),
+            memories_flagged_stale=titles(DecisionCode.REVISE.value)
+            + titles(DecisionCode.STALE.value),
             critical_constraints=critical_constraints,
             semantic_changes=all_semantic_changes,
             memories_retained_active=titles(DecisionCode.KEEP.value),

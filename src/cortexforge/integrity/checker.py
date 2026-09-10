@@ -70,9 +70,7 @@ class IntegrityReport:
 
     def render(self) -> str:
         if not self.findings:
-            return (
-                f"No documentation drift detected across {len(self.checks_run)} check(s)."
-            )
+            return f"No documentation drift detected across {len(self.checks_run)} check(s)."
         lines = [f"{len(self.findings)} integrity finding(s):", ""]
         lines.extend(finding.render() for finding in self.findings)
         if self.checks_skipped:
@@ -172,7 +170,9 @@ class ProjectIntegrityChecker:
         prose = readme.read_text(encoding="utf-8", errors="ignore")
         # Only the License section is scanned: a license name mentioned while
         # discussing a dependency is not a claim about this project.
-        section = re.split(r"^#+\s*.*license.*$", prose, flags=re.IGNORECASE | re.MULTILINE)
+        section = re.split(
+            r"^#+\s*.*license.*$", prose, flags=re.IGNORECASE | re.MULTILINE
+        )
         candidate = section[-1][:400] if len(section) > 1 else ""
         mentioned = _LICENSE_IN_PROSE.findall(candidate)
         if not mentioned:
@@ -213,7 +213,9 @@ class ProjectIntegrityChecker:
             return
 
         documented: set[str] = set()
-        for line in env_example.read_text(encoding="utf-8", errors="ignore").splitlines():
+        for line in env_example.read_text(
+            encoding="utf-8", errors="ignore"
+        ).splitlines():
             stripped = line.strip().lstrip("#").strip()
             if "=" not in stripped:
                 continue
@@ -261,7 +263,9 @@ class ProjectIntegrityChecker:
         for doc in [self.root / "README.md", *(self.root / "docs").rglob("*.md")]:
             if doc.exists():
                 documented.update(
-                    _API_PATH_IN_DOCS.findall(doc.read_text(encoding="utf-8", errors="ignore"))
+                    _API_PATH_IN_DOCS.findall(
+                        doc.read_text(encoding="utf-8", errors="ignore")
+                    )
                 )
 
         if not documented:
@@ -270,9 +274,16 @@ class ProjectIntegrityChecker:
         def matches(path: str) -> bool:
             # Documentation writes concrete ids where the route has parameters,
             # so compare shapes rather than literal strings.
-            pattern = re.sub(r"\{[^}]+\}", r"[^/]+", re.escape(path).replace(r"\{", "{").replace(r"\}", "}"))
+            pattern = re.sub(
+                r"\{[^}]+\}",
+                r"[^/]+",
+                re.escape(path).replace(r"\{", "{").replace(r"\}", "}"),
+            )
             pattern = re.sub(r"\{[^}]+\}", r"[^/]+", pattern)
-            return any(re.fullmatch(pattern, served) for served in api_paths) or path in api_paths
+            return (
+                any(re.fullmatch(pattern, served) for served in api_paths)
+                or path in api_paths
+            )
 
         missing = sorted(path for path in documented if not matches(path))
         if missing:
@@ -302,14 +313,22 @@ class ProjectIntegrityChecker:
             return
 
         prose = readme.read_text(encoding="utf-8", errors="ignore")
-        claims = re.findall(r"\ball\s+(\d+)\s+(?:unit and integration\s+)?tests\b", prose, re.IGNORECASE)
+        claims = re.findall(
+            r"\ball\s+(\d+)\s+(?:unit and integration\s+)?tests\b", prose, re.IGNORECASE
+        )
         if not claims:
             return
 
         tests_root = self.root / "tests"
         actual = (
             sum(
-                len(re.findall(r"^\s*(?:async\s+)?def\s+test_", path.read_text(encoding="utf-8", errors="ignore"), re.MULTILINE))
+                len(
+                    re.findall(
+                        r"^\s*(?:async\s+)?def\s+test_",
+                        path.read_text(encoding="utf-8", errors="ignore"),
+                        re.MULTILINE,
+                    )
+                )
                 for path in tests_root.rglob("test_*.py")
             )
             if tests_root.exists()

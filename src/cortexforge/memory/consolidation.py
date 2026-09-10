@@ -200,14 +200,19 @@ class MemoryConsolidationEngine:
             "proposals": proposals,
             "message": (
                 f"{created} lesson(s) proposed"
-                + (f", {promoted} promoted, {archived} source episode(s) archived"
-                   if auto_promote else " and left awaiting review")
+                + (
+                    f", {promoted} promoted, {archived} source episode(s) archived"
+                    if auto_promote
+                    else " and left awaiting review"
+                )
             ),
         }
 
     # --------------------------------------------------------------- loading
 
-    async def _load_episodes(self, session: AsyncSession, project_id: str) -> list[Memory]:
+    async def _load_episodes(
+        self, session: AsyncSession, project_id: str
+    ) -> list[Memory]:
         res = await session.execute(
             select(Memory)
             .options(selectinload(Memory.evidences))
@@ -220,7 +225,9 @@ class MemoryConsolidationEngine:
         )
         return list(res.scalars().all())
 
-    async def _load_lessons(self, session: AsyncSession, project_id: str) -> list[Memory]:
+    async def _load_lessons(
+        self, session: AsyncSession, project_id: str
+    ) -> list[Memory]:
         res = await session.execute(
             select(Memory).where(
                 Memory.project_id == project_id,
@@ -251,7 +258,9 @@ class MemoryConsolidationEngine:
                     continue
                 vector_b = (other.embedding or {}).get("vector")
                 similarity = (
-                    cosine_similarity(vector_a, vector_b) if vector_a and vector_b else 0.0
+                    cosine_similarity(vector_a, vector_b)
+                    if vector_a and vector_b
+                    else 0.0
                 )
                 _, tokens_a = canonicalize(f"{first.title} {first.summary}")
                 _, tokens_b = canonicalize(f"{other.title} {other.summary}")
@@ -274,8 +283,10 @@ class MemoryConsolidationEngine:
     def _cluster_contains_contradiction(self, cluster: list[Memory]) -> bool:
         for index, first in enumerate(cluster):
             for other in cluster[index + 1 :]:
-                is_contradiction, _ = self.conflict_resolver.detect_contradiction_heuristics(
-                    first.content, other.content
+                is_contradiction, _ = (
+                    self.conflict_resolver.detect_contradiction_heuristics(
+                        first.content, other.content
+                    )
                 )
                 if is_contradiction:
                     return True
@@ -423,6 +434,7 @@ class MemoryConsolidationEngine:
             # traceable even if the lesson is never promoted.
             session.add(
                 MemoryRelation(
+                    project_id=lesson.project_id,
                     source_memory_id=lesson.id,
                     target_memory_id=episode.id,
                     relation_type="derived_from",
@@ -502,6 +514,15 @@ class MemoryConsolidationEngine:
 
         archived = 0
         for episode in cluster:
+            if episode.project_id != lesson.project_id:
+                logger.warning(
+                    "Rejecting cross-project archive attempt: episode %s (project %s) != lesson %s (project %s)",
+                    episode.id,
+                    episode.project_id,
+                    lesson.id,
+                    lesson.project_id,
+                )
+                continue
             try:
                 version = MemoryLifecycleManager.transition(
                     episode,
@@ -569,6 +590,7 @@ class MemoryConsolidationEngine:
                 .where(
                     MemoryRelation.source_memory_id == lesson.id,
                     MemoryRelation.relation_type == "derived_from",
+                    Memory.project_id == lesson.project_id,
                 )
             )
             await self._archive_sources(session, lesson, list(sources.scalars().all()))

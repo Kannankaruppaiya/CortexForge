@@ -51,7 +51,9 @@ class AuthService:
         return user == "admin"
 """)
 
-    with open(os.path.join(tmp_dir, "services", "payment.py"), "w", encoding="utf-8") as f:
+    with open(
+        os.path.join(tmp_dir, "services", "payment.py"), "w", encoding="utf-8"
+    ) as f:
         f.write("""
 import services.auth
 

@@ -59,7 +59,9 @@ DEFAULT_LEASE_SECONDS = 300
 CLAIM_SCAN_LIMIT = 200
 
 
-def compute_job_key(job_type: str, project_id: str | None, parameters: dict[str, Any]) -> str:
+def compute_job_key(
+    job_type: str, project_id: str | None, parameters: dict[str, Any]
+) -> str:
     """Identity of a unit of work: its type, its project and its parameters."""
     material = json.dumps(
         {"type": job_type, "project": project_id or "", "parameters": parameters or {}},
@@ -103,13 +105,17 @@ class DurableJobStore:
         key = compute_job_key(job_type, project_id, parameters)
 
         existing = (
-            await session.execute(
-                select(Job).where(
-                    Job.idempotency_key == key,
-                    Job.status.in_(CLAIMABLE_STATUSES),
+            (
+                await session.execute(
+                    select(Job).where(
+                        Job.idempotency_key == key,
+                        Job.status.in_(CLAIMABLE_STATUSES),
+                    )
                 )
             )
-        ).scalars().first()
+            .scalars()
+            .first()
+        )
         if existing is not None:
             logger.debug("Job %s already outstanding for key %s", existing.id, key[:12])
             return existing, False
@@ -118,8 +124,10 @@ class DurableJobStore:
         # attempt count. The key still identifies *this* unit of work; it simply
         # allows the same work to be requested again later.
         finished = (
-            await session.execute(select(Job).where(Job.idempotency_key == key))
-        ).scalars().first()
+            (await session.execute(select(Job).where(Job.idempotency_key == key)))
+            .scalars()
+            .first()
+        )
         effective_key = key
         if finished is not None:
             effective_key = hashlib.sha256(
@@ -145,8 +153,14 @@ class DurableJobStore:
             # insert. Theirs wins; the point of the constraint is that exactly
             # one of us succeeds.
             raced = (
-                await session.execute(select(Job).where(Job.idempotency_key == effective_key))
-            ).scalars().first()
+                (
+                    await session.execute(
+                        select(Job).where(Job.idempotency_key == effective_key)
+                    )
+                )
+                .scalars()
+                .first()
+            )
             if raced is not None:
                 return raced, False
             raise
@@ -340,8 +354,10 @@ class DurableJobStore:
         """
         moment = now or datetime.now(UTC)
         running = (
-            await session.execute(select(Job).where(Job.status == STATUS_RUNNING))
-        ).scalars().all()
+            (await session.execute(select(Job).where(Job.status == STATUS_RUNNING)))
+            .scalars()
+            .all()
+        )
 
         recovered: list[Job] = []
         for job in running:

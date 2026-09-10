@@ -41,6 +41,7 @@ def get_git_head_commit(root_path: str) -> str | None:
     except Exception:
         return None
 
+
 DEFAULT_IGNORED_DIRS = {
     ".git",
     "node_modules",
@@ -103,7 +104,11 @@ class RepositoryScanner:
 
         for dirpath, dirnames, filenames in os.walk(canonical_root):
             # Prune ignored directories in-place
-            dirnames[:] = [d for d in dirnames if d not in DEFAULT_IGNORED_DIRS and not d.startswith(".")]
+            dirnames[:] = [
+                d
+                for d in dirnames
+                if d not in DEFAULT_IGNORED_DIRS and not d.startswith(".")
+            ]
 
             for fname in filenames:
                 ext = os.path.splitext(fname)[1].lower()
@@ -248,7 +253,9 @@ class RepositoryScanner:
         head_commit = git.get_head_commit() or get_git_head_commit(canonical_root)
 
         if incremental and project.last_indexed_commit and head_commit:
-            diff_files = git.get_modified_files(base_commit=project.last_indexed_commit, target_commit="HEAD")
+            diff_files = git.get_modified_files(
+                base_commit=project.last_indexed_commit, target_commit="HEAD"
+            )
             if diff_files:
                 is_git_incremental = True
                 # Clean up deleted files from entities
@@ -320,7 +327,9 @@ class RepositoryScanner:
             await session.flush()
 
         # Load existing entities for content-hash caching
-        existing_entities_stmt = select(CodeEntity).where(CodeEntity.project_id == project.id)
+        existing_entities_stmt = select(CodeEntity).where(
+            CodeEntity.project_id == project.id
+        )
         existing_result = await session.execute(existing_entities_stmt)
         existing_by_qualified: dict[str, CodeEntity] = {
             e.qualified_name: e for e in existing_result.scalars().all()
@@ -329,7 +338,9 @@ class RepositoryScanner:
         total_entities_extracted = 0
         total_relationships_extracted = 0
         all_parsed_relationships = []
-        created_entities_by_qualified: dict[str, CodeEntity] = dict(existing_by_qualified)
+        created_entities_by_qualified: dict[str, CodeEntity] = dict(
+            existing_by_qualified
+        )
 
         for rel_path in rel_files:
             abs_path = os.path.join(canonical_root, rel_path)
@@ -347,9 +358,13 @@ class RepositoryScanner:
 
             if incremental:
                 # If an existing entity in this file was removed, clean it and its relationships
-                file_existing = [e for e in existing_by_qualified.values() if e.file_path == rel_path]
+                file_existing = [
+                    e for e in existing_by_qualified.values() if e.file_path == rel_path
+                ]
                 new_qnames = {sym.qualified_name for sym in parse_result.symbols}
-                removed_entities = [e for e in file_existing if e.qualified_name not in new_qnames]
+                removed_entities = [
+                    e for e in file_existing if e.qualified_name not in new_qnames
+                ]
                 if removed_entities:
                     removed_ids = [e.id for e in removed_entities]
                     await session.execute(
@@ -408,7 +423,8 @@ class RepositoryScanner:
         if incremental:
             rescanned_files_set = set(rel_files)
             rescanned_entity_ids = [
-                e.id for e in created_entities_by_qualified.values()
+                e.id
+                for e in created_entities_by_qualified.values()
                 if e.file_path in rescanned_files_set
             ]
             if rescanned_entity_ids:
@@ -473,13 +489,17 @@ class RepositoryScanner:
 
         total_entities_count = (
             await session.execute(
-                select(func.count(CodeEntity.id)).where(CodeEntity.project_id == project.id)
+                select(func.count(CodeEntity.id)).where(
+                    CodeEntity.project_id == project.id
+                )
             )
         ).scalar() or 0
 
         total_relationships_count = (
             await session.execute(
-                select(func.count(Relationship.id)).where(Relationship.project_id == project.id)
+                select(func.count(Relationship.id)).where(
+                    Relationship.project_id == project.id
+                )
             )
         ).scalar() or 0
 

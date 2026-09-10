@@ -15,7 +15,9 @@ from cortexforge.retrieval.vector_store import VectorStore
 
 
 @pytest.mark.asyncio
-async def test_temporal_validity_lifecycle_and_filtering(test_session: AsyncSession, tmp_path):
+async def test_temporal_validity_lifecycle_and_filtering(
+    test_session: AsyncSession, tmp_path
+):
     """Verify temporal bounds are written on creation/transition and respected in queries."""
     project = Project(name="TemporalTestRepo", local_path=str(tmp_path))
     test_session.add(project)
@@ -56,7 +58,9 @@ async def test_temporal_validity_lifecycle_and_filtering(test_session: AsyncSess
     assert mems_at_t0[0].id == memory.id
 
     # Query at commit-alpha -> memory is returned
-    mems_at_commit_a = await service.list_memories(test_session, project.id, at_commit="commit-alpha")
+    mems_at_commit_a = await service.list_memories(
+        test_session, project.id, at_commit="commit-alpha"
+    )
     assert len(mems_at_commit_a) == 1
 
     # 2. Transition to SUPERSEDED at t1
@@ -85,7 +89,9 @@ async def test_temporal_validity_lifecycle_and_filtering(test_session: AsyncSess
     assert len(mems_after) == 0
 
     # Query at commit-beta (closing commit) -> excluded
-    mems_commit_b = await service.list_memories(test_session, project.id, at_commit="commit-beta")
+    mems_commit_b = await service.list_memories(
+        test_session, project.id, at_commit="commit-beta"
+    )
     assert len(mems_commit_b) == 0
 
     # 3. Vector search respect for temporal bounds
@@ -147,7 +153,9 @@ async def test_temporal_succession_by_timestamps(test_session: AsyncSession, tmp
     )
 
     # Semantic contradiction exists
-    is_contra, _ = resolver.detect_contradiction_heuristics(earlier.content, later.content)
+    is_contra, _ = resolver.detect_contradiction_heuristics(
+        earlier.content, later.content
+    )
     assert is_contra is True
 
     # Temporal succession check

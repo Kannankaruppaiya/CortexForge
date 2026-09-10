@@ -5,13 +5,24 @@ import os
 from mcp.server.mcpserver import MCPServer
 from sqlalchemy import func, select
 
+from cortexforge.agent.failure_intelligence import FailureIntelligenceEngine
 from cortexforge.agent.orchestrator import AgentWorkflowOrchestrator
 from cortexforge.agent.success_intelligence import SuccessIntelligence
 from cortexforge.architecture.invariants import ArchitectureInvariantEngine
 from cortexforge.code_intelligence.change_propagator import SemanticChangePropagator
 from cortexforge.code_intelligence.scanner import RepositoryScanner
+from cortexforge.cognition.authority import Authority
+from cortexforge.cognition.epistemics import ClaimStatus
 from cortexforge.core.db import init_db, session_scope
-from cortexforge.core.models import CodeEntity, Memory, MemoryDecision, Project
+from cortexforge.core.models import (
+    Claim,
+    CodeEntity,
+    FailureEpisode,
+    FixAttempt,
+    Memory,
+    MemoryDecision,
+    Project,
+)
 from cortexforge.core.schemas import MemoryCreate, MemoryEvidenceCreate
 from cortexforge.graph.service import GraphService
 from cortexforge.memory.claims import ClaimService
@@ -22,6 +33,7 @@ from cortexforge.memory.snapshots import CognitiveSnapshotEngine
 from cortexforge.memory.verification import MemoryVerificationEngine
 from cortexforge.retrieval.composer import ContextComposer
 from cortexforge.retrieval.engine import HybridRetrievalEngine
+from cortexforge.security.approval import ApprovalService
 from cortexforge.verification.engine import ClaimVerificationEngine
 
 mcp_server = MCPServer(
@@ -41,10 +53,13 @@ claim_service = ClaimService()
 # claims) and claim-level (evaluates the propositions themselves).
 verification_engine = MemoryVerificationEngine()
 claim_verification_engine = ClaimVerificationEngine()
+failure_intelligence = FailureIntelligenceEngine()
 success_intelligence = SuccessIntelligence()
 consolidation_engine = MemoryConsolidationEngine(memory_service=memory_service)
 retrieval_engine = HybridRetrievalEngine(graph_service=graph_service)
-context_composer = ContextComposer(retrieval_engine=retrieval_engine, graph_service=graph_service)
+context_composer = ContextComposer(
+    retrieval_engine=retrieval_engine, graph_service=graph_service
+)
 change_propagator = SemanticChangePropagator(graph_service=graph_service)
 invariant_engine = ArchitectureInvariantEngine()
 provenance_engine = ProvenanceEngine()
@@ -56,7 +71,6 @@ orchestrator = AgentWorkflowOrchestrator(
     verifier=verification_engine,
     consolidator=consolidation_engine,
 )
-
 
 
 async def _resolve_project(session, project_id_or_path: str) -> Project | None:
@@ -86,6 +100,7 @@ async def _resolve_project(session, project_id_or_path: str) -> Project | None:
 
 
 # ==================== 1. PROJECT ARCHITECTURE & CONTEXT TOOLS ====================
+
 
 @mcp_server.tool(
     name="project_get_context",
@@ -127,7 +142,9 @@ async def project_get_architecture(
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
-        arch = await graph_service.get_project_architecture(session, project.id, depth=depth)
+        arch = await graph_service.get_project_architecture(
+            session, project.id, depth=depth
+        )
         if not arch:
             return f"Error: Architecture not found for project '{project.name}'."
 
@@ -139,16 +156,26 @@ async def project_get_architecture(
             "## Modules",
         ]
         for mod in arch.modules:
-            lines.append(f"### {mod.module_path} ({mod.file_count} files, {mod.entity_count} symbols)")
+            lines.append(
+                f"### {mod.module_path} ({mod.file_count} files, {mod.entity_count} symbols)"
+            )
             for comp in mod.top_level_components[:8]:
-                deps_str = f" -> [{', '.join(comp.dependencies[:3])}]" if comp.dependencies else ""
-                lines.append(f"  - `{comp.entity_type}` **{comp.name}** ({comp.file_path}:{comp.line_range[0]}-{comp.line_range[1]}){deps_str}")
+                deps_str = (
+                    f" -> [{', '.join(comp.dependencies[:3])}]"
+                    if comp.dependencies
+                    else ""
+                )
+                lines.append(
+                    f"  - `{comp.entity_type}` **{comp.name}** ({comp.file_path}:{comp.line_range[0]}-{comp.line_range[1]}){deps_str}"
+                )
             lines.append("")
 
         if arch.primary_apis:
             lines.append("## Primary APIs / Entrypoints")
             for api in arch.primary_apis:
-                lines.append(f"- **{api.name}** (`{api.file_path}`): {api.signature or ''}")
+                lines.append(
+                    f"- **{api.name}** (`{api.file_path}`): {api.signature or ''}"
+                )
             lines.append("")
 
         if arch.primary_models:
@@ -174,7 +201,9 @@ async def project_get_component(
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
-        status, entity, candidates = await graph_service.resolve_entity(session, project.id, qualified_name)
+        status, entity, candidates = await graph_service.resolve_entity(
+            session, project.id, qualified_name
+        )
         if status == "AMBIGUOUS":
             cand_list = "\n".join(f"- `{c}`" for c in candidates)
             return (
@@ -183,10 +212,16 @@ async def project_get_component(
                 f"Please specify the full qualified name."
             )
         if status == "NOT_FOUND" or not entity:
-            return f"Component '{qualified_name}' not found in project '{project.name}'."
+            return (
+                f"Component '{qualified_name}' not found in project '{project.name}'."
+            )
 
-        deps = await graph_service.get_dependencies(session, project.id, entity.id, depth=2)
-        callers = await graph_service.get_dependents(session, project.id, entity.id, depth=2)
+        deps = await graph_service.get_dependencies(
+            session, project.id, entity.id, depth=2
+        )
+        callers = await graph_service.get_dependents(
+            session, project.id, entity.id, depth=2
+        )
 
         out = [
             f"# Component: {entity.name} ({entity.entity_type})",
@@ -210,6 +245,7 @@ async def project_get_component(
 
 
 # ==================== 2. MEMORY EXPLORATION & RETRIEVAL TOOLS ====================
+
 
 @mcp_server.tool(
     name="memory_search",
@@ -239,11 +275,15 @@ async def memory_search(
             m = r["memory"]
             score = r["combined_score"]
             status_tag = f"[{m.status}]" if m.status != "ACTIVE" else ""
-            lines.append(f"### {status_tag} [{m.memory_type}] {m.title} (Score: {score:.2f})")
+            lines.append(
+                f"### {status_tag} [{m.memory_type}] {m.title} (Score: {score:.2f})"
+            )
             lines.append(f"**Summary**: {m.summary}")
             lines.append(f"**Content**: {m.content}")
             if m.evidences:
-                ev_str = ", ".join(f"`{e.file_path}:{e.line_start or 1}`" for e in m.evidences)
+                ev_str = ", ".join(
+                    f"`{e.file_path}:{e.line_start or 1}`" for e in m.evidences
+                )
                 lines.append(f"**Evidence Grounding**: {ev_str}")
             lines.append(f"**ID**: `{m.id}` | **Version**: v{m.version}")
             lines.append("")
@@ -277,7 +317,9 @@ async def memory_get(memory_id: str) -> str:
         ]
         if mem.evidences:
             for ev in mem.evidences:
-                lines.append(f"- `{ev.file_path}` (Lines {ev.line_start or 1}-{ev.line_end or 1}) [Commit: {ev.commit_sha or 'N/A'}]")
+                lines.append(
+                    f"- `{ev.file_path}` (Lines {ev.line_start or 1}-{ev.line_end or 1}) [Commit: {ev.commit_sha or 'N/A'}]"
+                )
         else:
             lines.append("- None attached.")
 
@@ -285,13 +327,15 @@ async def memory_get(memory_id: str) -> str:
         lines.append("## Version History")
         if mem.versions:
             for v in mem.versions:
-                lines.append(f"- **v{v.version}** ({v.created_at.strftime('%Y-%m-%d %H:%M')}): {v.change_reason}")
+                lines.append(
+                    f"- **v{v.version}** ({v.created_at.strftime('%Y-%m-%d %H:%M')}): {v.change_reason}"
+                )
         return "\n".join(lines)
 
 
 @mcp_server.tool(
     name="memory_create",
-    description="Registers a new project memory (DECISION, CONSTRAINT, FAILURE, LESSON, etc.) with evidence grounding. Verifies agent observations before promotion to active truth.",
+    description="Registers a new project memory (DECISION, CONSTRAINT, FAILURE, LESSON, etc.) with evidence grounding. Verifies agent observations before promotion to active truth. Human authorization requires a valid server-side approval token.",
 )
 async def memory_create(
     title: str,
@@ -303,7 +347,7 @@ async def memory_create(
     evidence_line_end: int | None = None,
     importance: float = 0.6,
     project_id_or_path: str = ".",
-    trusted_user_confirmed: bool = False,
+    approval_token: str | None = None,
 ) -> str:
     """Store a project memory with validation, trust classification, and verification pipeline."""
     await init_db()
@@ -322,8 +366,22 @@ async def memory_create(
                 )
             )
 
-        authority = "USER_CONFIRMED" if trusted_user_confirmed else "AGENT_OBSERVED"
-        source_type = "user" if trusted_user_confirmed else "agent_observation"
+        authority = Authority.AGENT_OBSERVED.value
+        source_type = "agent_observation"
+
+        if approval_token:
+            _record, err = await ApprovalService.validate_and_consume_token(
+                session=session,
+                token=approval_token,
+                project_id=project.id,
+                title=title,
+                content=content,
+                memory_type=memory_type.upper(),
+            )
+            if err:
+                return f"Error: Invalid or unapproved human confirmation token: {err}"
+            authority = Authority.USER_CONFIRMED.value
+            source_type = "user"
 
         payload = MemoryCreate(
             memory_type=memory_type.upper(),
@@ -338,7 +396,7 @@ async def memory_create(
         mem = await memory_service.create_memory(session, project.id, payload)
 
         # Verification pipeline for agent observations (§29, §32)
-        if not trusted_user_confirmed:
+        if authority != Authority.USER_CONFIRMED.value:
             if evidence_list:
                 verdict = await verification_engine.verify_single_memory(
                     session, mem, project.local_path
@@ -351,6 +409,40 @@ async def memory_create(
                 return f"[CANDIDATE_CREATED] Candidate memory '{mem.title}' recorded without code evidence (ID: `{mem.id}`, Status: `{mem.status}`). Requires verification or human approval."
 
         return f"Successfully created memory '{mem.title}' (ID: `{mem.id}`, Status: `{mem.status}`, Version: v{mem.version})."
+
+
+@mcp_server.tool(
+    name="memory_request_human_approval",
+    description="Requests human operator approval for promoting a high-authority memory (e.g. DECISION, CONSTRAINT). Generates a server-managed approval record that must be approved via trusted API/UI before applying.",
+)
+async def memory_request_human_approval(
+    title: str,
+    content: str,
+    memory_type: str = "LESSON",
+    requested_by: str = "mcp_agent",
+    reason: str = "",
+    project_id_or_path: str = ".",
+) -> str:
+    """Submit a pending human approval request."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(session, project_id_or_path)
+        if not project:
+            return f"Error: Project could not be resolved for '{project_id_or_path}'."
+
+        record = await ApprovalService.create_approval_request(
+            session=session,
+            project_id=project.id,
+            title=title,
+            content=content,
+            memory_type=memory_type.upper(),
+            requested_by=requested_by,
+        )
+        await session.commit()
+        return (
+            f"Created pending human approval request (ID: `{record.id}`, Token: `{record.token}`). "
+            f"A human operator must approve this request via trusted application boundary before it can be committed with USER_CONFIRMED authority."
+        )
 
 
 @mcp_server.tool(
@@ -398,7 +490,10 @@ async def memory_deprecate(
     await init_db()
     async with session_scope() as session:
         dep = await memory_service.deprecate_memory(
-            session, memory_id=memory_id, superseded_by_id=superseded_by_id, reason=reason
+            session,
+            memory_id=memory_id,
+            superseded_by_id=superseded_by_id,
+            reason=reason,
         )
         if not dep:
             return f"Memory with ID '{memory_id}' not found."
@@ -418,7 +513,9 @@ async def memory_verify(memory_id: str) -> str:
             return f"Memory with ID '{memory_id}' not found."
 
         project = await session.get(Project, mem.project_id)
-        st = await verification_engine.verify_single_memory(session, mem, project.local_path)
+        st = await verification_engine.verify_single_memory(
+            session, mem, project.local_path
+        )
         await session.commit()
         return f"Memory '{mem.title}' verified. Verification status: `{st}`."
 
@@ -462,7 +559,9 @@ async def memory_get_failures(project_id_or_path: str = ".") -> str:
         if not failures:
             return f"No failure post-mortems recorded for project '{project.name}'."
 
-        lines = [f"# Historical Failures & Anti-Patterns for {project.name} ({len(failures)})"]
+        lines = [
+            f"# Historical Failures & Anti-Patterns for {project.name} ({len(failures)})"
+        ]
         for f in failures:
             lines.append(f"### [FAILURE] {f.title}")
             lines.append(f"**Problem**: {f.summary}")
@@ -487,7 +586,9 @@ async def memory_get_constraints(project_id_or_path: str = ".") -> str:
         if not constraints:
             return f"No operational constraints recorded for project '{project.name}'."
 
-        lines = [f"# Active Architectural Constraints for {project.name} ({len(constraints)})"]
+        lines = [
+            f"# Active Architectural Constraints for {project.name} ({len(constraints)})"
+        ]
         for c in constraints:
             lines.append(f"- **{c.title}**: {c.summary}")
             lines.append(f"  *Invariant Requirement*: {c.content}")
@@ -506,7 +607,9 @@ async def memory_get_lessons(project_id_or_path: str = ".") -> str:
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
-        lessons = await memory_service.list_memories(session, project.id, layer="L5", status="ACTIVE")
+        lessons = await memory_service.list_memories(
+            session, project.id, layer="L5", status="ACTIVE"
+        )
         # Everything at L5 that is not yet established knowledge: LLM proposals
         # awaiting review, agent observations with no code grounding, and raw
         # candidates. They are useful leads, so they are shown -- but separately,
@@ -548,6 +651,7 @@ async def memory_get_lessons(project_id_or_path: str = ".") -> str:
 
 # ==================== 3. GRAPH & CHANGE IMPACT TOOLS ====================
 
+
 @mcp_server.tool(
     name="graph_get_dependencies",
     description="Returns all downstream dependencies of an entity symbol or file up to depth N.",
@@ -562,13 +666,17 @@ async def graph_get_dependencies(
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
-        deps = await graph_service.get_dependencies(session, project.id, entity_name, depth=depth)
+        deps = await graph_service.get_dependencies(
+            session, project.id, entity_name, depth=depth
+        )
         if not deps:
             return f"No dependencies found for entity '{entity_name}'."
 
         lines = [f"# Dependencies for {entity_name} (depth <= {depth})"]
         for d in deps:
-            lines.append(f"- [Depth {d['depth']}] `{d['relationship']}` -> **{d['name']}** ({d['type']} in `{d['file']}`)")
+            lines.append(
+                f"- [Depth {d['depth']}] `{d['relationship']}` -> **{d['name']}** ({d['type']} in `{d['file']}`)"
+            )
         return "\n".join(lines)
 
 
@@ -586,13 +694,19 @@ async def graph_get_dependents(
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
-        callers = await graph_service.get_dependents(session, project.id, entity_name, depth=depth)
+        callers = await graph_service.get_dependents(
+            session, project.id, entity_name, depth=depth
+        )
         if not callers:
             return f"No callers or dependents found for entity '{entity_name}'."
 
-        lines = [f"# Callers & Dependents for {entity_name} (blast radius depth <= {depth})"]
+        lines = [
+            f"# Callers & Dependents for {entity_name} (blast radius depth <= {depth})"
+        ]
         for c in callers:
-            lines.append(f"- [Depth {c['depth']}] **{c['name']}** ({c['type']} in `{c['file']}`) -> `{c['relationship']}`")
+            lines.append(
+                f"- [Depth {c['depth']}] **{c['name']}** ({c['type']} in `{c['file']}`) -> `{c['relationship']}`"
+            )
         return "\n".join(lines)
 
 
@@ -645,6 +759,7 @@ async def change_get_impact(
 
 # ==================== 4. SHORTCUT ACTIONS & MAINTENANCE TOOLS ====================
 
+
 @mcp_server.tool(
     name="task_record_decision",
     description="Convenience shortcut for an agent to record an architectural decision made during a task.",
@@ -668,25 +783,87 @@ async def task_record_decision(
 
 @mcp_server.tool(
     name="task_record_failure",
-    description="Convenience shortcut for an agent to record an obstacle or failed approach to prevent recurrence.",
+    description="Records a structured failure episode with normalized fingerprint, root-cause claim tracking, and fix attempt history.",
 )
 async def task_record_failure(
     title: str,
     error_description: str,
     attempted_fix: str,
+    task_id: str | None = None,
     component: str | None = None,
+    stack_trace: str | None = None,
+    root_cause_proposal: str | None = None,
+    fix_worked: bool = False,
     project_id_or_path: str = ".",
 ) -> str:
-    """Record a failure post-mortem."""
-    content = f"Error: {error_description}\nAttempted Fix / Prevention: {attempted_fix}"
-    return await memory_create(
-        title=title,
-        content=content,
-        summary=f"Failed approach in {component or 'subsystem'}",
-        memory_type="FAILURE",
-        evidence_file=component,
-        project_id_or_path=project_id_or_path,
-    )
+    """Record a failure post-mortem with actual FailureEpisode and FixAttempt entities."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(session, project_id_or_path)
+        if not project:
+            return f"Error: Project could not be resolved for '{project_id_or_path}'."
+
+        norm_trace = failure_intelligence.normalizer.normalize_stack_trace(
+            stack_trace or error_description
+        )
+        sig = failure_intelligence.normalizer.compute_signature(
+            "TaskFailure", norm_trace
+        )
+
+        root_cause_claim_id = None
+        if root_cause_proposal:
+            rc_claim = Claim(
+                project_id=project.id,
+                claim_type="ROOT_CAUSE",
+                claim_key=f"failure_root_cause:{sig}",
+                proposition=root_cause_proposal,
+                status=ClaimStatus.UNVERIFIED.value,
+                confidence=0.5,
+                authority=Authority.AGENT_OBSERVED.value,
+            )
+            session.add(rc_claim)
+            await session.flush()
+            root_cause_claim_id = rc_claim.id
+
+        episode = FailureEpisode(
+            project_id=project.id,
+            task_id=task_id,
+            failure_signature=sig,
+            error_class="TaskFailure",
+            error_message=error_description[:500],
+            normalized_trace=norm_trace,
+            attempted_approach=title,
+            root_cause=root_cause_proposal,
+            root_cause_claim_id=root_cause_claim_id,
+            affected_files=[component] if component else [],
+        )
+        session.add(episode)
+        await session.flush()
+
+        fix = FixAttempt(
+            failure_episode_id=episode.id,
+            attempted_fix=attempted_fix,
+            success=fix_worked,
+            why_worked_or_failed=(
+                f"Attempted fix: {attempted_fix}. Worked: {fix_worked}"
+            ),
+        )
+        session.add(fix)
+        await session.flush()
+
+        mem_res = await memory_create(
+            title=title,
+            content=f"Error: {error_description}\nAttempted Fix: {attempted_fix}\nSignature: {sig}",
+            summary=f"Failure episode {sig} in {component or 'system'}",
+            memory_type="FAILURE",
+            evidence_file=component,
+            project_id_or_path=project_id_or_path,
+        )
+        await session.commit()
+        return (
+            f"Recorded FailureEpisode `{episode.id}` (Signature: `{sig}`, RootCauseClaim: `{root_cause_claim_id or 'NULL'}`). "
+            f"FixAttempt `{fix.id}` (Success: {fix_worked}).\nMemory: {mem_res}"
+        )
 
 
 @mcp_server.tool(
@@ -747,18 +924,28 @@ async def task_record_event(
     async with session_scope() as session:
         ev_upper = event_type.upper()
         if "TOOL" in ev_upper and tool_name:
-            await orchestrator.record_tool_call(session, task_id=task_id, tool_name=tool_name, tool_result=details)
+            await orchestrator.record_tool_call(
+                session, task_id=task_id, tool_name=tool_name, tool_result=details
+            )
             return f"Recorded tool call '{tool_name}' for task '{task_id}'."
         elif "FILE" in ev_upper and file_path:
-            impact = await orchestrator.record_file_change(session, task_id=task_id, file_path=file_path)
+            impact = await orchestrator.record_file_change(
+                session, task_id=task_id, file_path=file_path
+            )
             return f"Recorded file change '{file_path}'. Flagged {len(impact.memories_flagged_stale)} stale memories."
         elif "TEST" in ev_upper:
             await orchestrator.record_test_result(
-                session, task_id=task_id, test_name=tool_name or "test", status=status or "PASSED", error_text=details
+                session,
+                task_id=task_id,
+                test_name=tool_name or "test",
+                status=status or "PASSED",
+                error_text=details,
             )
             return f"Recorded test result for task '{task_id}'."
         else:
-            await orchestrator.record_tool_call(session, task_id=task_id, tool_name=event_type, tool_result=details)
+            await orchestrator.record_tool_call(
+                session, task_id=task_id, tool_name=event_type, tool_result=details
+            )
             return f"Recorded event '{event_type}' for task '{task_id}'."
 
 
@@ -822,12 +1009,32 @@ async def memory_health(project_id_or_path: str = ".") -> str:
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
-        total_mems = await session.scalar(select(func.count(Memory.id)).where(Memory.project_id == project.id))
-        active_mems = await session.scalar(select(func.count(Memory.id)).where(Memory.project_id == project.id, Memory.status == "ACTIVE"))
-        stale_mems = await session.scalar(select(func.count(Memory.id)).where(Memory.project_id == project.id, Memory.status == "STALE"))
-        conflicted_mems = await session.scalar(select(func.count(Memory.id)).where(Memory.project_id == project.id, Memory.status == "CONFLICTED"))
-        archived_mems = await session.scalar(select(func.count(Memory.id)).where(Memory.project_id == project.id, Memory.status == "ARCHIVED"))
-        entities_count = await session.scalar(select(func.count(CodeEntity.id)).where(CodeEntity.project_id == project.id))
+        total_mems = await session.scalar(
+            select(func.count(Memory.id)).where(Memory.project_id == project.id)
+        )
+        active_mems = await session.scalar(
+            select(func.count(Memory.id)).where(
+                Memory.project_id == project.id, Memory.status == "ACTIVE"
+            )
+        )
+        stale_mems = await session.scalar(
+            select(func.count(Memory.id)).where(
+                Memory.project_id == project.id, Memory.status == "STALE"
+            )
+        )
+        conflicted_mems = await session.scalar(
+            select(func.count(Memory.id)).where(
+                Memory.project_id == project.id, Memory.status == "CONFLICTED"
+            )
+        )
+        archived_mems = await session.scalar(
+            select(func.count(Memory.id)).where(
+                Memory.project_id == project.id, Memory.status == "ARCHIVED"
+            )
+        )
+        entities_count = await session.scalar(
+            select(func.count(CodeEntity.id)).where(CodeEntity.project_id == project.id)
+        )
 
         stale_rate = (stale_mems / max(1, total_mems)) * 100
 
@@ -853,11 +1060,15 @@ async def architecture_check_rules(project_id_or_path: str = ".") -> str:
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
-        violations = await invariant_engine.check_project_invariants(session, project_id=project.id)
+        violations = await invariant_engine.check_project_invariants(
+            session, project_id=project.id
+        )
         if not violations:
             return f"Architecture Invariant Check: All boundary rules passed for '{project.name}'. Zero violations detected."
 
-        lines = [f"# Architecture Invariant Violations for {project.name} ({len(violations)})"]
+        lines = [
+            f"# Architecture Invariant Violations for {project.name} ({len(violations)})"
+        ]
         for v in violations:
             lines.append(
                 f"- **[{v.severity}] {v.rule_id}**: Relationship `{v.relationship_type}` from `{v.source_entity_id}` to `{v.target_entity_id}` is forbidden."
@@ -887,13 +1098,17 @@ async def memory_get_provenance(memory_id: str) -> str:
             f"## Grounding Evidences ({len(trace['evidences'])})",
         ]
         for ev in trace["evidences"]:
-            lines.append(f"- `{ev['file_path']}:{ev.get('line_start') or 1}` [Type: {ev['source_type']}, Confidence: {ev.get('confidence', 1.0):.2f}]")
+            lines.append(
+                f"- `{ev['file_path']}:{ev.get('line_start') or 1}` [Type: {ev['source_type']}, Confidence: {ev.get('confidence', 1.0):.2f}]"
+            )
 
         if trace["symbols"]:
             lines.append("")
             lines.append(f"## Anchored Symbols ({len(trace['symbols'])})")
             for sym in trace["symbols"]:
-                lines.append(f"- **{sym.get('name')}** (`{sym.get('qualified_name')}`) in `{sym.get('file_path')}`")
+                lines.append(
+                    f"- **{sym.get('name')}** (`{sym.get('qualified_name')}`) in `{sym.get('file_path')}`"
+                )
 
         if trace["commits"]:
             lines.append("")
@@ -920,7 +1135,9 @@ async def project_take_snapshot(commit_sha: str, project_id_or_path: str = ".") 
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
-        snap = await snapshot_engine.take_snapshot(session, project_id=project.id, commit_sha=commit_sha)
+        snap = await snapshot_engine.take_snapshot(
+            session, project_id=project.id, commit_sha=commit_sha
+        )
         return (
             f"Cognitive snapshot captured: ID `{snap.id}` for commit `{snap.commit_sha}`\n"
             f"- Cognitive Gen: {snap.cognitive_generation} | Memory Gen: {snap.memory_generation} | Graph Gen: {snap.graph_generation}"
@@ -961,7 +1178,9 @@ async def task_find_similar(
             t = st["task"]
             score = st.get("similarity_score", 0.0)
             breakdown = st.get("score_breakdown", {})
-            lines.append(f"### Task: {t.task_text} (Score: {score}, Status: {t.status}, Success: {t.success})")
+            lines.append(
+                f"### Task: {t.task_text} (Score: {score}, Status: {t.status}, Success: {t.success})"
+            )
             if breakdown:
                 lines.append(
                     f"  **Signals**: text={breakdown.get('text_score')}, "
@@ -972,15 +1191,35 @@ async def task_find_similar(
             if st.get("failure_episodes"):
                 lines.append("  **Past Failures in Similar Tasks**:")
                 for fe in st["failure_episodes"]:
-                    err_cls = fe.get("error_class") if isinstance(fe, dict) else getattr(fe, "error_class", "Error")
-                    err_msg = fe.get("error_message") if isinstance(fe, dict) else getattr(fe, "error_message", "")
-                    fix_stat = fe.get("fix_status") if isinstance(fe, dict) else getattr(fe, "fix_status", "UNRESOLVED")
+                    err_cls = (
+                        fe.get("error_class")
+                        if isinstance(fe, dict)
+                        else getattr(fe, "error_class", "Error")
+                    )
+                    err_msg = (
+                        fe.get("error_message")
+                        if isinstance(fe, dict)
+                        else getattr(fe, "error_message", "")
+                    )
+                    fix_stat = (
+                        fe.get("fix_status")
+                        if isinstance(fe, dict)
+                        else getattr(fe, "fix_status", "UNRESOLVED")
+                    )
                     lines.append(f"  - [{err_cls}] {err_msg} (Fix Status: {fix_stat})")
             if st.get("fix_attempts"):
                 lines.append("  **Successful Fixes & Approaches**:")
                 for fa in st["fix_attempts"]:
-                    appr = fa.get("approach_description") if isinstance(fa, dict) else getattr(fa, "approach_description", "")
-                    outc = fa.get("outcome") if isinstance(fa, dict) else getattr(fa, "outcome", "")
+                    appr = (
+                        fa.get("approach_description")
+                        if isinstance(fa, dict)
+                        else getattr(fa, "approach_description", "")
+                    )
+                    outc = (
+                        fa.get("outcome")
+                        if isinstance(fa, dict)
+                        else getattr(fa, "outcome", "")
+                    )
                     lines.append(f"  - Approach: {appr} (Outcome: {outc})")
             lines.append("")
         return "\n".join(lines)
@@ -1239,7 +1478,9 @@ async def task_find_successful_approaches(
         "CortexForge to conclude about its memories, and why."
     ),
 )
-async def memory_get_decisions_log(project_id_or_path: str = ".", limit: int = 20) -> str:
+async def memory_get_decisions_log(
+    project_id_or_path: str = ".", limit: int = 20
+) -> str:
     """Explain how the project's beliefs got to their current state."""
     await init_db()
     async with session_scope() as session:

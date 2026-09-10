@@ -28,8 +28,8 @@ _CURRENT_TRACE_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 _CURRENT_SPAN_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "cortexforge_current_span_id", default=None
 )
-_CORRELATION_CONTEXT: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
-    "cortexforge_correlation_context", default=None
+_CORRELATION_CONTEXT: contextvars.ContextVar[dict[str, str] | None] = (
+    contextvars.ContextVar("cortexforge_correlation_context", default=None)
 )
 
 # OpenTelemetry bridge detection
@@ -131,9 +131,7 @@ class SpanData:
     status: str = "OK"  # "OK", "ERROR", "UNSET"
     attributes: dict[str, Any] = field(default_factory=dict)
     error_message: str | None = None
-    timestamp: str = field(
-        default_factory=lambda: datetime.now(UTC).isoformat()
-    )
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     def finish(self, status: str = "OK", error: Exception | None = None) -> None:
         self.end_time = time.time()
@@ -187,9 +185,7 @@ class TraceManager:
             matching = [s for s in matching if s.trace_id == trace_id]
         if project_id:
             matching = [
-                s
-                for s in matching
-                if s.attributes.get("project_id") == project_id
+                s for s in matching if s.attributes.get("project_id") == project_id
             ]
         return matching[-limit:]
 

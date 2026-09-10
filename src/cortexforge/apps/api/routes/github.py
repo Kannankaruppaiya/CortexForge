@@ -60,9 +60,10 @@ def verify_github_signature(payload_bytes: bytes, signature_header: str | None) 
     if not signature_header or not signature_header.startswith("sha256="):
         return False
 
-    expected_sig = "sha256=" + hmac.new(
-        secret.encode("utf-8"), payload_bytes, hashlib.sha256
-    ).hexdigest()
+    expected_sig = (
+        "sha256="
+        + hmac.new(secret.encode("utf-8"), payload_bytes, hashlib.sha256).hexdigest()
+    )
     return hmac.compare_digest(expected_sig, signature_header)
 
 
@@ -126,7 +127,9 @@ async def handle_github_webhook(
             "status": "ignored",
             "message": f"No registered CortexForge project matches repository '{repo_name}'",
         }
-        await _record_delivery(session, delivery_id, x_github_event, None, payload_hash, result)
+        await _record_delivery(
+            session, delivery_id, x_github_event, None, payload_hash, result
+        )
         await session.commit()
         return result
 

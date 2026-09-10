@@ -119,7 +119,9 @@ class EvidenceSummary:
         max_contra: Authority | None = None
 
         for item in items:
-            relation = str(getattr(item, "relation", EvidenceRelation.SUPPORTS.value)).upper()
+            relation = str(
+                getattr(item, "relation", EvidenceRelation.SUPPORTS.value)
+            ).upper()
             authority = authority_from_source(
                 getattr(item, "authority", None) or getattr(item, "source_type", None)
             )
@@ -128,7 +130,9 @@ class EvidenceSummary:
 
             if relation == EvidenceRelation.CONTRADICTS.value:
                 contradicting += 1
-                if max_contra is None or authority_rank(authority) > authority_rank(max_contra):
+                if max_contra is None or authority_rank(authority) > authority_rank(
+                    max_contra
+                ):
                     max_contra = authority
             elif relation == EvidenceRelation.WEAKENS.value:
                 weakening += 1
@@ -187,15 +191,25 @@ def _verification_contribution(
         base = 0.6
     elif outcome == VerificationOutcome.NOT_APPLICABLE.value:
         base = 0.3
-    elif outcome in (VerificationOutcome.FAILED.value, VerificationOutcome.CONFLICTED.value):
+    elif outcome in (
+        VerificationOutcome.FAILED.value,
+        VerificationOutcome.CONFLICTED.value,
+    ):
         return 0.0, f"latest verification {outcome}"
     else:
-        return 0.0, "never verified" if not outcome else f"latest verification {outcome}"
+        return (
+            0.0,
+            "never verified" if not outcome else f"latest verification {outcome}",
+        )
 
     if last_verified_at is None:
         return round(base * 0.5, 4), f"{outcome} (no timestamp; decayed)"
 
-    checked = last_verified_at if last_verified_at.tzinfo else last_verified_at.replace(tzinfo=UTC)
+    checked = (
+        last_verified_at
+        if last_verified_at.tzinfo
+        else last_verified_at.replace(tzinfo=UTC)
+    )
     age_days = max(0.0, (datetime.now(UTC) - checked).total_seconds() / 86400.0)
     decay = 0.5 ** (age_days / VERIFICATION_HALF_LIFE_DAYS)
     return round(base * decay, 4), f"{outcome} {age_days:.1f}d ago (decay {decay:.2f})"
@@ -224,11 +238,17 @@ class ConfidenceScorer:
         )
 
         norm_status = (status or "ACTIVE").upper()
-        authority_level = authority_from_source(authority) if not isinstance(authority, Authority) else authority
+        authority_level = (
+            authority_from_source(authority)
+            if not isinstance(authority, Authority)
+            else authority
+        )
 
         c_authority = authority_base(authority_level)
         c_evidence = _evidence_contribution(summary)
-        c_verification, verification_note = _verification_contribution(last_outcome, last_verified_at)
+        c_verification, verification_note = _verification_contribution(
+            last_outcome, last_verified_at
+        )
 
         if has_failing_test:
             c_tests = 0.0
@@ -291,7 +311,9 @@ class ConfidenceScorer:
 
         if (last_outcome or "").upper() == VerificationOutcome.UNKNOWN.value:
             penalties += PENALTIES["unknown"]
-            applied.append(f"-{PENALTIES['unknown']:.2f} evidence insufficient to decide")
+            applied.append(
+                f"-{PENALTIES['unknown']:.2f} evidence insufficient to decide"
+            )
 
         score = max(MIN_CONFIDENCE, min(MAX_CONFIDENCE, round(weighted - penalties, 4)))
 

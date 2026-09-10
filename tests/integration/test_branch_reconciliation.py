@@ -57,7 +57,9 @@ async def branched_repo(tmp_path):
     _git(repo, "config", "user.email", "test@example.com")
     _git(repo, "config", "user.name", "Test")
 
-    with open(os.path.join(repo, "services", "auth.py"), "w", encoding="utf-8") as handle:
+    with open(
+        os.path.join(repo, "services", "auth.py"), "w", encoding="utf-8"
+    ) as handle:
         handle.write("class Auth:\n    def check(self):\n        return True\n")
     base = _commit(repo, "shared history")
 

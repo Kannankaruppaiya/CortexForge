@@ -25,9 +25,13 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 scanner = RepositoryScanner()
 graph_service = GraphService()
 retrieval_engine = HybridRetrievalEngine(graph_service=graph_service)
-context_composer = ContextComposer(retrieval_engine=retrieval_engine, graph_service=graph_service)
+context_composer = ContextComposer(
+    retrieval_engine=retrieval_engine, graph_service=graph_service
+)
 evaluation_runner = EvaluationRunner(
-    retrieval_engine=retrieval_engine, context_composer=context_composer, scanner=scanner
+    retrieval_engine=retrieval_engine,
+    context_composer=context_composer,
+    scanner=scanner,
 )
 
 
@@ -99,7 +103,9 @@ async def get_project(
     """Retrieve details for a registered project."""
     project = await session.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
 
     entity_count = await session.scalar(
         select(func.count(CodeEntity.id)).where(CodeEntity.project_id == project.id)
@@ -120,7 +126,9 @@ async def delete_project(
     """Unregister and remove a project and all associated entities."""
     project = await session.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
     await session.delete(project)
     await session.commit()
 
@@ -134,7 +142,9 @@ async def scan_project(
     """Trigger AST scan of the project repository."""
     project = await session.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
 
     incremental = payload.incremental if payload else True
     max_files = payload.max_files if payload else None
@@ -151,9 +161,13 @@ async def get_project_architecture(
     session: AsyncSession = Depends(get_db_session),
 ) -> ArchitectureResponse:
     """Retrieve synthesized structural architecture of the project."""
-    arch = await graph_service.get_project_architecture(session, project_id, depth=depth)
+    arch = await graph_service.get_project_architecture(
+        session, project_id, depth=depth
+    )
     if not arch:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
     return arch
 
 
@@ -164,7 +178,9 @@ async def run_project_benchmark(
     """Run real empirical benchmark suite on project."""
     project = await session.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
 
     scorecards = await evaluation_runner.run_benchmark(session, project.id)
     out = []
@@ -197,26 +213,28 @@ async def run_project_benchmark(
                 "unmeasured_reason": res.unmeasured_reason,
             }
 
-        out.append({
-            "task_id": sc.task_id,
-            "task_name": sc.task_name,
-            "results": results_dict,
-            "token_reduction_pct": sc.token_reduction_pct,
-            "exploration_reduction_pct": sc.exploration_reduction_pct,
-            "tool_calls_saved": sc.tool_calls_saved,
-            "measurement_notes": sc.measurement_notes,
-            "metadata": {
-                "repository_commit": sc.metadata.repository_commit,
-                "benchmark_suite_version": sc.metadata.benchmark_suite_version,
-                "embedding_model": sc.metadata.embedding_model,
-                "embedding_quality_class": sc.metadata.embedding_quality_class,
-                "retrieval_config": sc.metadata.retrieval_config,
-                "project_memory_count": sc.metadata.project_memory_count,
-                "environment": sc.metadata.environment,
-                "timestamp": sc.metadata.timestamp,
-            },
-            "raw_log_path": sc.raw_log_path,
-        })
+        out.append(
+            {
+                "task_id": sc.task_id,
+                "task_name": sc.task_name,
+                "results": results_dict,
+                "token_reduction_pct": sc.token_reduction_pct,
+                "exploration_reduction_pct": sc.exploration_reduction_pct,
+                "tool_calls_saved": sc.tool_calls_saved,
+                "measurement_notes": sc.measurement_notes,
+                "metadata": {
+                    "repository_commit": sc.metadata.repository_commit,
+                    "benchmark_suite_version": sc.metadata.benchmark_suite_version,
+                    "embedding_model": sc.metadata.embedding_model,
+                    "embedding_quality_class": sc.metadata.embedding_quality_class,
+                    "retrieval_config": sc.metadata.retrieval_config,
+                    "project_memory_count": sc.metadata.project_memory_count,
+                    "environment": sc.metadata.environment,
+                    "timestamp": sc.metadata.timestamp,
+                },
+                "raw_log_path": sc.raw_log_path,
+            }
+        )
     return out
 
 
@@ -227,7 +245,9 @@ async def get_project_economics(
     """Compute live token economics, context budget allocation, and cost savings for the project."""
     project = await session.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
 
     ent_stmt = select(CodeEntity).where(CodeEntity.project_id == project_id)
     ent_res = await session.execute(ent_stmt)
@@ -240,29 +260,90 @@ async def get_project_economics(
     # Count tokens per layer from real memories and entities
     l0_tokens = 250
     l1_tokens = min(4000, max(400, len(entities) * 15))
-    l2_tokens = sum(max(50, len(m.content.split())) for m in memories if m.memory_type == "CONVENTION") or 250
-    l3_tokens = sum(max(80, len(m.content.split())) for m in memories if m.memory_type == "DECISION") or 350
-    l4_tokens = sum(max(100, len(m.content.split())) for m in memories if m.memory_type in ("FAILURE", "FIX")) or 300
-    l5_tokens = sum(max(60, len(m.content.split())) for m in memories if m.memory_type in ("LESSON", "CONSTRAINT")) or 250
+    l2_tokens = (
+        sum(
+            max(50, len(m.content.split()))
+            for m in memories
+            if m.memory_type == "CONVENTION"
+        )
+        or 250
+    )
+    l3_tokens = (
+        sum(
+            max(80, len(m.content.split()))
+            for m in memories
+            if m.memory_type == "DECISION"
+        )
+        or 350
+    )
+    l4_tokens = (
+        sum(
+            max(100, len(m.content.split()))
+            for m in memories
+            if m.memory_type in ("FAILURE", "FIX")
+        )
+        or 300
+    )
+    l5_tokens = (
+        sum(
+            max(60, len(m.content.split()))
+            for m in memories
+            if m.memory_type in ("LESSON", "CONSTRAINT")
+        )
+        or 250
+    )
 
     total_project_code_tokens = max(12000, len(entities) * 45)
 
     profiles = {}
     multiplier_map = {"small": 0.4, "medium": 1.0, "large": 2.2}
     labels_map = {
-        "small": ("Small Budget (Fast / Latency-Optimized)", "Optimized for quick bug fixes and targeted symbol lookups."),
-        "medium": ("Medium Budget (Standard Balanced Task)", "Standard working context for feature additions and refactoring."),
-        "large": ("Large Budget (Deep Cross-Subsystem Audit)", "Maximum depth for complex multi-module redesigns and audits."),
+        "small": (
+            "Small Budget (Fast / Latency-Optimized)",
+            "Optimized for quick bug fixes and targeted symbol lookups.",
+        ),
+        "medium": (
+            "Medium Budget (Standard Balanced Task)",
+            "Standard working context for feature additions and refactoring.",
+        ),
+        "large": (
+            "Large Budget (Deep Cross-Subsystem Audit)",
+            "Maximum depth for complex multi-module redesigns and audits.",
+        ),
     }
 
     for prof_key, mult in multiplier_map.items():
         layer_items = [
-            {"name": "L0 Project Identity & Framework", "tokens": int(l0_tokens * mult), "color": "bg-indigo-500"},
-            {"name": "L1 Primary Architecture Graph", "tokens": int(l1_tokens * mult), "color": "bg-blue-500"},
-            {"name": "L2 Code Conventions & Standards", "tokens": int(l2_tokens * mult), "color": "bg-teal-500"},
-            {"name": "L3 Active Architectural Decisions", "tokens": int(l3_tokens * mult), "color": "bg-emerald-500"},
-            {"name": "L4 Failure Post-Mortems", "tokens": int(l4_tokens * mult), "color": "bg-red-500"},
-            {"name": "L5 Durable Lessons Learned", "tokens": int(l5_tokens * mult), "color": "bg-purple-500"},
+            {
+                "name": "L0 Project Identity & Framework",
+                "tokens": int(l0_tokens * mult),
+                "color": "bg-indigo-500",
+            },
+            {
+                "name": "L1 Primary Architecture Graph",
+                "tokens": int(l1_tokens * mult),
+                "color": "bg-blue-500",
+            },
+            {
+                "name": "L2 Code Conventions & Standards",
+                "tokens": int(l2_tokens * mult),
+                "color": "bg-teal-500",
+            },
+            {
+                "name": "L3 Active Architectural Decisions",
+                "tokens": int(l3_tokens * mult),
+                "color": "bg-emerald-500",
+            },
+            {
+                "name": "L4 Failure Post-Mortems",
+                "tokens": int(l4_tokens * mult),
+                "color": "bg-red-500",
+            },
+            {
+                "name": "L5 Durable Lessons Learned",
+                "tokens": int(l5_tokens * mult),
+                "color": "bg-purple-500",
+            },
         ]
         total_tokens = sum(x["tokens"] for x in layer_items)
         for item in layer_items:
@@ -278,7 +359,9 @@ async def get_project_economics(
 
     cortex_avg_tokens = profiles["medium"]["totalTokens"]
     baseline_avg_tokens = total_project_code_tokens
-    savings_pct = round(((baseline_avg_tokens - cortex_avg_tokens) / baseline_avg_tokens) * 100, 1)
+    savings_pct = round(
+        ((baseline_avg_tokens - cortex_avg_tokens) / baseline_avg_tokens) * 100, 1
+    )
 
     cost_per_task_cortex = (cortex_avg_tokens / 1000.0) * 0.003
     cost_per_task_base = (baseline_avg_tokens / 1000.0) * 0.003
@@ -287,11 +370,15 @@ async def get_project_economics(
 
     files_explored_cortex = 1.2
     files_explored_base = max(8.0, round(min(25.0, len(entities) / 8.0), 1))
-    files_reduction_pct = round(((files_explored_base - files_explored_cortex) / files_explored_base) * 100, 1)
+    files_reduction_pct = round(
+        ((files_explored_base - files_explored_cortex) / files_explored_base) * 100, 1
+    )
 
     tool_calls_cortex = 1.0
     tool_calls_base = round(files_explored_base * 0.75 + 1.5, 1)
-    tool_calls_reduction_pct = round(((tool_calls_base - tool_calls_cortex) / tool_calls_base) * 100, 1)
+    tool_calls_reduction_pct = round(
+        ((tool_calls_base - tool_calls_cortex) / tool_calls_base) * 100, 1
+    )
 
     return {
         "savings_pct": savings_pct,

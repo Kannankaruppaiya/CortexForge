@@ -45,7 +45,9 @@ def calculate_hash(data: str) -> str:
     assert "BaseService" in user_service_sym.metadata.get("bases", [])
 
     # Check relationships
-    rel_types = {(r.relationship_type, r.target_qualified_name) for r in result.relationships}
+    rel_types = {
+        (r.relationship_type, r.target_qualified_name) for r in result.relationships
+    }
     assert ("inherits", "BaseService") in rel_types
     assert ("imports", "os") in rel_types
 
@@ -86,7 +88,9 @@ export function validateToken(token: string): boolean {
     cls = next(s for s in result.symbols if s.name == "AuthManager")
     assert cls.entity_type == "class"
 
-    rel_types = {(r.relationship_type, r.target_qualified_name) for r in result.relationships}
+    rel_types = {
+        (r.relationship_type, r.target_qualified_name) for r in result.relationships
+    }
     assert ("imports", "react") in rel_types
 
 
@@ -123,7 +127,9 @@ func (p *TokenPayload) IsAdmin() bool {
     assert "GenerateToken" in symbol_names
     assert "IsAdmin" in symbol_names
 
-    rel_types = {(r.relationship_type, r.target_qualified_name) for r in result.relationships}
+    rel_types = {
+        (r.relationship_type, r.target_qualified_name) for r in result.relationships
+    }
     assert ("imports", "fmt") in rel_types
 
 

@@ -36,10 +36,14 @@ memory_service = MemoryService()
 verification_engine = MemoryVerificationEngine()
 consolidation_engine = MemoryConsolidationEngine(memory_service=memory_service)
 retrieval_engine = HybridRetrievalEngine(graph_service=graph_service)
-context_composer = ContextComposer(retrieval_engine=retrieval_engine, graph_service=graph_service)
+context_composer = ContextComposer(
+    retrieval_engine=retrieval_engine, graph_service=graph_service
+)
 change_propagator = SemanticChangePropagator(graph_service=graph_service)
 evaluation_runner = EvaluationRunner(
-    retrieval_engine=retrieval_engine, context_composer=context_composer, scanner=scanner
+    retrieval_engine=retrieval_engine,
+    context_composer=context_composer,
+    scanner=scanner,
 )
 
 
@@ -65,7 +69,9 @@ async def _get_project_or_exit(session, ref: str) -> Project:
     return project
 
 
-@click.group(help="CortexForge: Evolving, verified project memory layer for AI coding agents.")
+@click.group(
+    help="CortexForge: Evolving, verified project memory layer for AI coding agents."
+)
 def cli() -> None:
     pass
 
@@ -85,13 +91,17 @@ def init(path: str, name: str | None) -> None:
             res = await session.execute(stmt)
             existing = res.scalars().first()
             if existing:
-                console.print(f"[bold yellow]Project already initialized:[/] {existing.name} (ID: `{existing.id}`)")
+                console.print(
+                    f"[bold yellow]Project already initialized:[/] {existing.name} (ID: `{existing.id}`)"
+                )
                 return
 
             proj = Project(name=proj_name, local_path=canonical_path, status="READY")
             session.add(proj)
             await session.commit()
-            console.print(f"[bold green]Initialized CortexForge project:[/] {proj.name} at `{canonical_path}`")
+            console.print(
+                f"[bold green]Initialized CortexForge project:[/] {proj.name} at `{canonical_path}`"
+            )
             console.print("Next step: Run `cortex scan` to parse AST symbols.")
 
     asyncio.run(_do_init())
@@ -115,14 +125,22 @@ def scan(path: str, incremental: bool, name: str | None) -> None:
 
             if not project:
                 console.print(f"[bold green]Registering new project:[/] {proj_name}")
-                project = Project(name=proj_name, local_path=canonical_path, status="INITIALIZING")
+                project = Project(
+                    name=proj_name, local_path=canonical_path, status="INITIALIZING"
+                )
                 session.add(project)
                 await session.flush()
             else:
-                console.print(f"[bold cyan]Scanning registered project:[/] {project.name}")
+                console.print(
+                    f"[bold cyan]Scanning registered project:[/] {project.name}"
+                )
 
-            with console.status("[bold blue]Parsing AST code entities via Tree-sitter...[/]"):
-                scan_res = await scanner.scan_project(session, project, incremental=incremental)
+            with console.status(
+                "[bold blue]Parsing AST code entities via Tree-sitter...[/]"
+            ):
+                scan_res = await scanner.scan_project(
+                    session, project, incremental=incremental
+                )
 
             table = Table(title=f"Scan Summary: {project.name}", border_style="cyan")
             table.add_column("Metric", style="bold white")
@@ -132,7 +150,12 @@ def scan(path: str, incremental: bool, name: str | None) -> None:
             table.add_row("Entities Extracted", str(scan_res.entities_extracted))
             table.add_row("Relationships Mapped", str(scan_res.relationships_extracted))
             table.add_row("Duration", f"{scan_res.duration_ms:.2f} ms")
-            table.add_row("Status", f"[bold green]{scan_res.status}[/]" if scan_res.status == "SUCCESS" else f"[bold yellow]{scan_res.status}[/]")
+            table.add_row(
+                "Status",
+                f"[bold green]{scan_res.status}[/]"
+                if scan_res.status == "SUCCESS"
+                else f"[bold yellow]{scan_res.status}[/]",
+            )
 
             console.print(table)
 
@@ -150,13 +173,21 @@ def rebuild(project_ref: str) -> None:
         await init_db()
         async with session_scope() as session:
             project = await _get_project_or_exit(session, project_ref)
-            console.print(f"[bold yellow]Initiating clean rebuild for project:[/] {project.name}")
+            console.print(
+                f"[bold yellow]Initiating clean rebuild for project:[/] {project.name}"
+            )
 
-            job = JobContext(job_id="rebuild_manual", job_type="REBUILD", project_id=project.id)
-            with console.status("[bold blue]Purging stale index and rebuilding AST model...[/]"):
+            job = JobContext(
+                job_id="rebuild_manual", job_type="REBUILD", project_id=project.id
+            )
+            with console.status(
+                "[bold blue]Purging stale index and rebuilding AST model...[/]"
+            ):
                 res = await rebuild_project_task(job)
 
-            table = Table(title=f"Rebuild Summary: {project.name}", border_style="green")
+            table = Table(
+                title=f"Rebuild Summary: {project.name}", border_style="green"
+            )
             table.add_column("Metric", style="bold white")
             table.add_column("Value", style="green")
 
@@ -175,22 +206,28 @@ def rebuild(project_ref: str) -> None:
 @cli.command(help="Display synthesized project structural architecture.")
 @click.argument("project_ref", default=".", required=False)
 @click.option("--depth", default=2, type=int, help="Traversal depth")
-
 def architecture(project_ref: str, depth: int) -> None:
     """Show project architecture tree and components."""
+
     async def _do_arch() -> None:
         await init_db()
         async with session_scope() as session:
             project = await _get_project_or_exit(session, project_ref)
-            arch = await graph_service.get_project_architecture(session, project.id, depth=depth)
+            arch = await graph_service.get_project_architecture(
+                session, project.id, depth=depth
+            )
             if not arch:
-                console.print(f"[bold red]Error:[/] Could not compute architecture for {project.name}.")
+                console.print(
+                    f"[bold red]Error:[/] Could not compute architecture for {project.name}."
+                )
                 return
 
             hdr = f"[bold cyan]{arch.project_name}[/]\n"
             hdr += f"Files: [green]{arch.total_files}[/] | Entities: [green]{arch.total_entities}[/] | Relationships: [green]{arch.total_relationships}[/]\n"
             hdr += f"Languages: [magenta]{', '.join(arch.languages)}[/]"
-            console.print(Panel(hdr, title="Project Architecture Overview", border_style="cyan"))
+            console.print(
+                Panel(hdr, title="Project Architecture Overview", border_style="cyan")
+            )
 
             root_tree = Tree(f"[bold white]{arch.project_name}[/]")
             for mod in arch.modules:
@@ -198,7 +235,11 @@ def architecture(project_ref: str, depth: int) -> None:
                     f"[bold yellow]{mod.module_path}[/] ([cyan]{mod.file_count}[/] files, [cyan]{mod.entity_count}[/] symbols)"
                 )
                 for comp in mod.top_level_components[:10]:
-                    deps = f" -> [{', '.join(comp.dependencies[:3])}]" if comp.dependencies else ""
+                    deps = (
+                        f" -> [{', '.join(comp.dependencies[:3])}]"
+                        if comp.dependencies
+                        else ""
+                    )
                     mod_node.add(
                         f"[{comp.entity_type}] [bold]{comp.name}[/] ({comp.file_path}:{comp.line_range[0]}-{comp.line_range[1]}){deps}"
                     )
@@ -208,7 +249,9 @@ def architecture(project_ref: str, depth: int) -> None:
             if arch.primary_apis:
                 console.print("\n[bold cyan]Primary APIs & Entrypoints:[/]")
                 for api in arch.primary_apis:
-                    console.print(f"  - [bold]{api.name}[/] (`{api.file_path}`): {api.signature or ''}")
+                    console.print(
+                        f"  - [bold]{api.name}[/] (`{api.file_path}`): {api.signature or ''}"
+                    )
 
             if arch.primary_models:
                 console.print("\n[bold cyan]Primary Data Models:[/]")
@@ -221,6 +264,7 @@ def architecture(project_ref: str, depth: int) -> None:
 @cli.command(help="Show CortexForge system status and registered repositories.")
 def status() -> None:
     """Display system status and projects."""
+
     async def _do_status() -> None:
         await init_db()
         async with session_scope() as session:
@@ -237,8 +281,14 @@ def status() -> None:
             table.add_column("Status", style="magenta")
 
             for p in projects:
-                entity_count = await session.scalar(select(func.count(CodeEntity.id)).where(CodeEntity.project_id == p.id))
-                memory_count = await session.scalar(select(func.count(Memory.id)).where(Memory.project_id == p.id))
+                entity_count = await session.scalar(
+                    select(func.count(CodeEntity.id)).where(
+                        CodeEntity.project_id == p.id
+                    )
+                )
+                memory_count = await session.scalar(
+                    select(func.count(Memory.id)).where(Memory.project_id == p.id)
+                )
                 table.add_row(
                     p.id[:8] + "...",
                     p.name,
@@ -255,6 +305,7 @@ def status() -> None:
 
 # ==================== MEMORY SUBCOMMANDS ====================
 
+
 @cli.group(help="Inspect, search, verify, and consolidate project memories.")
 def memory() -> None:
     pass
@@ -262,12 +313,28 @@ def memory() -> None:
 
 @memory.command("create", help="Create a durable, evidence-grounded project memory.")
 @click.argument("project_ref", default=".", required=False)
-@click.option("--type", "memory_type", default="DECISION", help="Memory type (DECISION, CONSTRAINT, FAILURE, LESSON, etc.)")
+@click.option(
+    "--type",
+    "memory_type",
+    default="DECISION",
+    help="Memory type (DECISION, CONSTRAINT, FAILURE, LESSON, etc.)",
+)
 @click.option("--title", required=True, help="Short descriptive title")
-@click.option("--content", required=True, help="Detailed architectural or post-mortem content")
-@click.option("--summary", default=None, help="One-line summary for rapid agent scanning")
-@click.option("--importance", default=0.8, type=float, help="Importance weight (0.0 to 1.0)")
-@click.option("--file", "evidence_file", default=None, help="Relative file path for evidence grounding")
+@click.option(
+    "--content", required=True, help="Detailed architectural or post-mortem content"
+)
+@click.option(
+    "--summary", default=None, help="One-line summary for rapid agent scanning"
+)
+@click.option(
+    "--importance", default=0.8, type=float, help="Importance weight (0.0 to 1.0)"
+)
+@click.option(
+    "--file",
+    "evidence_file",
+    default=None,
+    help="Relative file path for evidence grounding",
+)
 def memory_create(
     project_ref: str,
     memory_type: str,
@@ -278,6 +345,7 @@ def memory_create(
     evidence_file: str | None,
 ) -> None:
     """Create project memory."""
+
     async def _do_create() -> None:
         await init_db()
         async with session_scope() as session:
@@ -285,7 +353,9 @@ def memory_create(
             evidence_list = []
             if evidence_file:
                 evidence_list.append(
-                    MemoryEvidenceCreate(source_type="file", file_path=evidence_file, confidence=1.0)
+                    MemoryEvidenceCreate(
+                        source_type="file", file_path=evidence_file, confidence=1.0
+                    )
                 )
 
             payload = MemoryCreate(
@@ -297,24 +367,33 @@ def memory_create(
                 evidence=evidence_list if evidence_list else None,
             )
             created = await memory_service.create_memory(session, project.id, payload)
-            console.print(Panel(
-                f"[bold green]Successfully created memory:[/] {created.id}\n"
-                f"[bold white]Title:[/] {created.title}\n"
-                f"[bold white]Type:[/]  {created.memory_type} (Status: {created.status})\n"
-                f"[bold white]Summary:[/] {created.summary}",
-                title="Memory Stored",
-                border_style="green",
-            ))
+            console.print(
+                Panel(
+                    f"[bold green]Successfully created memory:[/] {created.id}\n"
+                    f"[bold white]Title:[/] {created.title}\n"
+                    f"[bold white]Type:[/]  {created.memory_type} (Status: {created.status})\n"
+                    f"[bold white]Summary:[/] {created.summary}",
+                    title="Memory Stored",
+                    border_style="green",
+                )
+            )
 
     asyncio.run(_do_create())
 
 
 @memory.command("list", help="List project memories.")
 @click.argument("project_ref", default=".", required=False)
-@click.option("--type", default=None, help="Filter by memory type (DECISION, CONSTRAINT, FAILURE, etc.)")
-@click.option("--status", default=None, help="Filter by status (ACTIVE, STALE, DEPRECATED, etc.)")
+@click.option(
+    "--type",
+    default=None,
+    help="Filter by memory type (DECISION, CONSTRAINT, FAILURE, etc.)",
+)
+@click.option(
+    "--status", default=None, help="Filter by status (ACTIVE, STALE, DEPRECATED, etc.)"
+)
 def memory_list(project_ref: str, type: str | None, status: str | None) -> None:
     """List project memories."""
+
     async def _do_list() -> None:
         await init_db()
         async with session_scope() as session:
@@ -323,7 +402,10 @@ def memory_list(project_ref: str, type: str | None, status: str | None) -> None:
                 session, project_id=project.id, memory_type=type, status=status
             )
 
-            table = Table(title=f"Memories for {project.name} ({len(memories)})", border_style="yellow")
+            table = Table(
+                title=f"Memories for {project.name} ({len(memories)})",
+                border_style="yellow",
+            )
             table.add_column("Type", style="bold cyan")
             table.add_column("Title", style="bold white")
             table.add_column("Status", style="magenta")
@@ -331,7 +413,11 @@ def memory_list(project_ref: str, type: str | None, status: str | None) -> None:
             table.add_column("Summary", style="white")
 
             for m in memories:
-                st_color = "green" if m.status == "ACTIVE" else ("yellow" if m.status == "STALE" else "red")
+                st_color = (
+                    "green"
+                    if m.status == "ACTIVE"
+                    else ("yellow" if m.status == "STALE" else "red")
+                )
                 table.add_row(
                     m.memory_type,
                     m.title,
@@ -350,61 +436,84 @@ def memory_list(project_ref: str, type: str | None, status: str | None) -> None:
 @click.option("--limit", default=5, type=int)
 def memory_search(query: str, project_ref: str, limit: int) -> None:
     """Search project memories."""
+
     async def _do_search() -> None:
         await init_db()
         async with session_scope() as session:
             project = await _get_project_or_exit(session, project_ref)
-            results = await memory_service.search_memories(session, project.id, query=query, limit=limit)
-            console.print(f"\n[bold green]Search Results for:[/] '{query}' ({len(results)})\n")
+            results = await memory_service.search_memories(
+                session, project.id, query=query, limit=limit
+            )
+            console.print(
+                f"\n[bold green]Search Results for:[/] '{query}' ({len(results)})\n"
+            )
             for r in results:
                 m = r["memory"]
                 score = r["combined_score"]
-                console.print(Panel(
-                    f"[bold white]{m.summary}[/]\n\n{m.content}\n\n[dim]ID: {m.id} | Score: {score:.2f} | Status: {m.status}[/]",
-                    title=f"[{m.memory_type}] {m.title}",
-                    border_style="cyan",
-                ))
+                console.print(
+                    Panel(
+                        f"[bold white]{m.summary}[/]\n\n{m.content}\n\n[dim]ID: {m.id} | Score: {score:.2f} | Status: {m.status}[/]",
+                        title=f"[{m.memory_type}] {m.title}",
+                        border_style="cyan",
+                    )
+                )
 
     asyncio.run(_do_search())
 
 
-@memory.command("verify", help="Verify all memories against current filesystem source code.")
+@memory.command(
+    "verify", help="Verify all memories against current filesystem source code."
+)
 @click.argument("project_ref", default=".", required=False)
 def memory_verify(project_ref: str) -> None:
     """Run verification engine on project memories."""
+
     async def _do_verify() -> None:
         await init_db()
         async with session_scope() as session:
             project = await _get_project_or_exit(session, project_ref)
-            counts = await verification_engine.verify_project_memories(session, project.id)
-            console.print(Panel(
-                f"Verified Active: [green]{counts['verified']}[/]\n"
-                f"Flagged Stale:   [yellow]{counts['stale']}[/]\n"
-                f"Deprecated:      [red]{counts['deprecated']}[/]",
-                title=f"Verification Report: {project.name}",
-                border_style="green",
-            ))
+            counts = await verification_engine.verify_project_memories(
+                session, project.id
+            )
+            console.print(
+                Panel(
+                    f"Verified Active: [green]{counts['verified']}[/]\n"
+                    f"Flagged Stale:   [yellow]{counts['stale']}[/]\n"
+                    f"Deprecated:      [red]{counts['deprecated']}[/]",
+                    title=f"Verification Report: {project.name}",
+                    border_style="green",
+                )
+            )
 
     asyncio.run(_do_verify())
 
 
-@memory.command("consolidate", help="Consolidate episodic events into durable knowledge principles.")
+@memory.command(
+    "consolidate", help="Consolidate episodic events into durable knowledge principles."
+)
 @click.argument("project_ref", default=".", required=False)
 def memory_consolidate(project_ref: str) -> None:
     """Run memory consolidation."""
+
     async def _do_consolidate() -> None:
         await init_db()
         async with session_scope() as session:
             project = await _get_project_or_exit(session, project_ref)
-            with console.status("[bold magenta]Clustering episodic memories & synthesizing durable rules...[/]"):
-                res = await consolidation_engine.consolidate_project(session, project.id)
-            console.print(Panel(
-                f"Clusters Consolidated: [green]{res['clusters_consolidated']}[/]\n"
-                f"Durable Rules Created: [green]{res['durable_memories_created']}[/]\n"
-                f"Episodes Archived:     [yellow]{res['memories_archived']}[/]",
-                title=f"Consolidation Summary: {project.name}",
-                border_style="magenta",
-            ))
+            with console.status(
+                "[bold magenta]Clustering episodic memories & synthesizing durable rules...[/]"
+            ):
+                res = await consolidation_engine.consolidate_project(
+                    session, project.id
+                )
+            console.print(
+                Panel(
+                    f"Clusters Consolidated: [green]{res['clusters_consolidated']}[/]\n"
+                    f"Durable Rules Created: [green]{res['durable_memories_created']}[/]\n"
+                    f"Episodes Archived:     [yellow]{res['memories_archived']}[/]",
+                    title=f"Consolidation Summary: {project.name}",
+                    border_style="magenta",
+                )
+            )
 
     asyncio.run(_do_consolidate())
 
@@ -414,54 +523,70 @@ def memory_consolidate(project_ref: str) -> None:
 @click.argument("project_ref", default=".", required=False)
 def memory_export(output_file: str, project_ref: str) -> None:
     """Export memories to JSON for privacy and portability."""
+
     async def _do_export() -> None:
         await init_db()
         async with session_scope() as session:
             project = await _get_project_or_exit(session, project_ref)
-            memories = await memory_service.list_memories(session, project.id, limit=1000)
+            memories = await memory_service.list_memories(
+                session, project.id, limit=1000
+            )
             data = []
             for m in memories:
-                data.append({
-                    "id": m.id,
-                    "type": m.memory_type,
-                    "title": m.title,
-                    "summary": m.summary,
-                    "content": m.content,
-                    "status": m.status,
-                    "importance": m.importance,
-                    "created_at": m.created_at.isoformat(),
-                })
+                data.append(
+                    {
+                        "id": m.id,
+                        "type": m.memory_type,
+                        "title": m.title,
+                        "summary": m.summary,
+                        "content": m.content,
+                        "status": m.status,
+                        "importance": m.importance,
+                        "created_at": m.created_at.isoformat(),
+                    }
+                )
             with open(output_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
-            console.print(f"[bold green]Exported {len(data)} memories to:[/] {output_file}")
+            console.print(
+                f"[bold green]Exported {len(data)} memories to:[/] {output_file}"
+            )
 
     asyncio.run(_do_export())
 
 
 @memory.command("purge", help="Permanently purge all memories for a project.")
 @click.argument("project_ref", default=".", required=False)
-@click.confirmation_option(prompt="Are you sure you want to purge all project memories?")
+@click.confirmation_option(
+    prompt="Are you sure you want to purge all project memories?"
+)
 def memory_purge(project_ref: str) -> None:
     """Purge project memories."""
+
     async def _do_purge() -> None:
         await init_db()
         async with session_scope() as session:
             project = await _get_project_or_exit(session, project_ref)
             await session.execute(delete(Memory).where(Memory.project_id == project.id))
             await session.commit()
-            console.print(f"[bold red]Purged all memories for project:[/] {project.name}")
+            console.print(
+                f"[bold red]Purged all memories for project:[/] {project.name}"
+            )
 
     asyncio.run(_do_purge())
 
 
 # ==================== CONTEXT & GOVERNANCE ====================
 
-@cli.command(help="Generate structured, token-bounded context block for a planned task.")
+
+@cli.command(
+    help="Generate structured, token-bounded context block for a planned task."
+)
 @click.argument("task_text")
 @click.argument("project_ref", default=".", required=False)
 @click.option("--profile", default="medium", help="small, medium, or large")
 def context(task_text: str, project_ref: str, profile: str) -> None:
     """Generate prompt context block."""
+
     async def _do_context() -> None:
         await init_db()
         async with session_scope() as session:
@@ -474,22 +599,26 @@ def context(task_text: str, project_ref: str, profile: str) -> None:
     asyncio.run(_do_context())
 
 
-
-
-@cli.command(help="Run automated comparative benchmark suite (Baseline vs CortexForge).")
+@cli.command(
+    help="Run automated comparative benchmark suite (Baseline vs CortexForge)."
+)
 @click.argument("project_ref", default=".", required=False)
 def benchmark(project_ref: str) -> None:
     """Run empirical benchmark scorecards for hypotheses H1-H5."""
+
     async def _do_bench() -> None:
         await init_db()
         async with session_scope() as session:
             project = await _get_project_or_exit(session, project_ref)
-            with console.status(f"[bold green]Running comparative benchmark on {project.name}...[/]"):
+            with console.status(
+                f"[bold green]Running comparative benchmark on {project.name}...[/]"
+            ):
                 scorecards = await evaluation_runner.run_benchmark(session, project.id)
 
             for sc in scorecards:
                 table = Table(
-                    title=f"Benchmark Task: {sc.task_name} ({sc.task_id})", border_style="cyan"
+                    title=f"Benchmark Task: {sc.task_name} ({sc.task_id})",
+                    border_style="cyan",
                 )
                 table.add_column("Configuration", style="bold white")
                 table.add_column("Context Items", style="yellow")
@@ -508,24 +637,30 @@ def benchmark(project_ref: str) -> None:
                         f"{res.latency_ms:.1f}",
                         f"{res.stale_retrieval_rate:.0%}",
                         # An unmeasured metric prints as "n/a", never as 0.
-                        "n/a" if res.retrieval_precision is None else f"{res.retrieval_precision:.2f}",
+                        "n/a"
+                        if res.retrieval_precision is None
+                        else f"{res.retrieval_precision:.2f}",
                     )
 
                 console.print(table)
-                console.print(Panel(
-                    f"[bold green]Exploration Reduction:[/] {sc.exploration_reduction_pct}%\n"
-                    f"[bold green]Token Reduction:[/]       {sc.token_reduction_pct}%\n"
-                    f"[dim]Relevance judged by: "
-                    f"{next(iter(sc.results.values())).relevance_basis}[/]",
-                    title="Measured Scorecard",
-                    border_style="green",
-                ))
+                console.print(
+                    Panel(
+                        f"[bold green]Exploration Reduction:[/] {sc.exploration_reduction_pct}%\n"
+                        f"[bold green]Token Reduction:[/]       {sc.token_reduction_pct}%\n"
+                        f"[dim]Relevance judged by: "
+                        f"{next(iter(sc.results.values())).relevance_basis}[/]",
+                        title="Measured Scorecard",
+                        border_style="green",
+                    )
+                )
 
-                console.print(Panel(
-                    "\n".join(f"- {note}" for note in sc.measurement_notes),
-                    title="What was and was not measured",
-                    border_style="yellow",
-                ))
+                console.print(
+                    Panel(
+                        "\n".join(f"- {note}" for note in sc.measurement_notes),
+                        title="What was and was not measured",
+                        border_style="yellow",
+                    )
+                )
 
     asyncio.run(_do_bench())
 
@@ -534,10 +669,13 @@ def benchmark(project_ref: str) -> None:
 def mcp() -> None:
     """Start MCP server."""
     from cortexforge.apps.mcp.server import main as mcp_main
+
     mcp_main()
 
 
-@cli.command(help="Mirror stored embeddings into the indexed vector column (PostgreSQL).")
+@cli.command(
+    help="Mirror stored embeddings into the indexed vector column (PostgreSQL)."
+)
 @click.argument("project_ref", default=".", required=False)
 def reindex(project_ref: str) -> None:
     """Populate the pgvector column so retrieval can use the index.
@@ -547,6 +685,7 @@ def reindex(project_ref: str) -> None:
     index covers. Run it after upgrading an existing database, or after changing
     embedding provider.
     """
+
     async def _do_reindex() -> None:
         await init_db()
         async with session_scope() as session:
@@ -573,7 +712,9 @@ def reindex(project_ref: str) -> None:
                 project = await _get_project_or_exit(session, project_ref)
                 project_id = project.id
 
-            with console.status("[bold green]Mirroring embeddings into the vector index...[/]"):
+            with console.status(
+                "[bold green]Mirroring embeddings into the vector index...[/]"
+            ):
                 result = await backfill_vector_column(session, project_id=project_id)
 
             console.print(
@@ -589,7 +730,9 @@ def reindex(project_ref: str) -> None:
     asyncio.run(_do_reindex())
 
 
-@cli.command(help="Check this project's documentation against what it actually contains.")
+@cli.command(
+    help="Check this project's documentation against what it actually contains."
+)
 @click.argument("root", default=".", required=False)
 @click.option(
     "--strict",
@@ -637,6 +780,7 @@ def integrity(root: str, strict: bool) -> None:
         )
     console.print(table)
 
+
 HOOK_START_MARKER = "# >>> CORTEXFORGE_HOOK_START >>>"
 HOOK_END_MARKER = "# <<< CORTEXFORGE_HOOK_END <<<"
 SUPPORTED_HOOKS = ("post-commit", "post-merge", "post-checkout")
@@ -661,14 +805,18 @@ def hooks() -> None:
     pass
 
 
-@hooks.command("install", help="Install post-commit, post-merge, and post-checkout Git hooks.")
+@hooks.command(
+    "install", help="Install post-commit, post-merge, and post-checkout Git hooks."
+)
 @click.argument("path", default=".", type=click.Path(exists=True, file_okay=False))
 def install_hooks(path: str) -> None:
     """Install git hooks into .git/hooks/ idempotently."""
     canonical_path = os.path.realpath(path)
     git_dir = os.path.join(canonical_path, ".git")
     if not os.path.isdir(git_dir):
-        console.print(f"[bold red]Error:[/] '{canonical_path}' is not a Git repository (.git not found).")
+        console.print(
+            f"[bold red]Error:[/] '{canonical_path}' is not a Git repository (.git not found)."
+        )
         sys.exit(1)
 
     hooks_dir = os.path.join(git_dir, "hooks")
@@ -700,7 +848,9 @@ def install_hooks(path: str) -> None:
 
         installed.append(hook_name)
 
-    console.print(f"[bold green]CortexForge Git hooks installed:[/] {', '.join(installed)}")
+    console.print(
+        f"[bold green]CortexForge Git hooks installed:[/] {', '.join(installed)}"
+    )
 
 
 @hooks.command("uninstall", help="Remove CortexForge hooks from Git repository.")
@@ -710,7 +860,9 @@ def uninstall_hooks(path: str) -> None:
     canonical_path = os.path.realpath(path)
     git_dir = os.path.join(canonical_path, ".git")
     if not os.path.isdir(git_dir):
-        console.print(f"[bold red]Error:[/] '{canonical_path}' is not a Git repository (.git not found).")
+        console.print(
+            f"[bold red]Error:[/] '{canonical_path}' is not a Git repository (.git not found)."
+        )
         sys.exit(1)
 
     hooks_dir = os.path.join(git_dir, "hooks")
@@ -740,13 +892,19 @@ def uninstall_hooks(path: str) -> None:
         removed.append(hook_name)
 
     if removed:
-        console.print(f"[bold green]Removed CortexForge Git hooks:[/] {', '.join(removed)}")
+        console.print(
+            f"[bold green]Removed CortexForge Git hooks:[/] {', '.join(removed)}"
+        )
     else:
         console.print("[dim]No CortexForge Git hooks found to remove.[/]")
 
 
 @hooks.command("handle", help="Enqueue background durable job when Git hook fires.")
-@click.option("--hook", required=True, help="Name of the hook (post-commit, post-merge, post-checkout)")
+@click.option(
+    "--hook",
+    required=True,
+    help="Name of the hook (post-commit, post-merge, post-checkout)",
+)
 @click.option("--path", default=".", help="Repository root path")
 def handle_hook(hook: str, path: str) -> None:
     """Enqueue durable background scan job without blocking git execution."""
@@ -780,6 +938,7 @@ def handle_hook(hook: str, path: str) -> None:
 
         if loop and loop.is_running():
             import concurrent.futures
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 pool.submit(asyncio.run, _do_handle()).result()
         else:
@@ -821,7 +980,9 @@ def serve(host: str | None, port: int | None, reload: bool) -> None:
     )
 
 
-@cli.command(help="Display machine-readable capability registry and operational status (§42).")
+@cli.command(
+    help="Display machine-readable capability registry and operational status (§42)."
+)
 @click.option(
     "--status",
     default=None,
@@ -882,9 +1043,15 @@ def capabilities(status: str | None, category: str | None, as_json: bool) -> Non
     console.print(Panel(summary_text, title="Registry Summary", border_style="blue"))
 
 
-@cli.command(help="Run system diagnostics and verify readiness across all subsystems (§56).")
+@cli.command(
+    help="Run system diagnostics and verify readiness across all subsystems (§56)."
+)
 @click.option(
-    "--json", "as_json", is_flag=True, default=False, help="Output diagnostic report as JSON"
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Output diagnostic report as JSON",
 )
 def doctor(as_json: bool) -> None:
     """Perform real pre-flight diagnostics across database, parsers, providers, and security."""
@@ -923,7 +1090,9 @@ def doctor(as_json: bool) -> None:
         mig_status = "PASS"
         try:
             async with engine.connect() as conn:
-                res = await conn.execute(text("SELECT version_num FROM alembic_version"))
+                res = await conn.execute(
+                    text("SELECT version_num FROM alembic_version")
+                )
                 head = res.scalar()
                 mig_details = f"Alembic revision: {head}"
         except Exception:
@@ -949,11 +1118,13 @@ def doctor(as_json: bool) -> None:
             except ImportError:
                 ts_status = "WARN"
 
-        report.append({
-            "subsystem": "AST Parsers",
-            "status": ts_status,
-            "details": f"{len(loaded_langs)}/5 languages available ({', '.join(loaded_langs)})",
-        })
+        report.append(
+            {
+                "subsystem": "AST Parsers",
+                "status": ts_status,
+                "details": f"{len(loaded_langs)}/5 languages available ({', '.join(loaded_langs)})",
+            }
+        )
 
         # 4. Embedding Provider
         emb_provider = os.environ.get(
@@ -961,11 +1132,13 @@ def doctor(as_json: bool) -> None:
             os.environ.get("CORTEX_EMBEDDINGS_PROVIDER", "hash"),
         ).lower()
         emb_model = os.environ.get("CORTEX_EMBEDDING_MODEL", "local-hash-384")
-        report.append({
-            "subsystem": "Embeddings",
-            "status": "PASS",
-            "details": f"Provider: {emb_provider} (model: {emb_model})",
-        })
+        report.append(
+            {
+                "subsystem": "Embeddings",
+                "status": "PASS",
+                "details": f"Provider: {emb_provider} (model: {emb_model})",
+            }
+        )
 
         # 5. LLM Provider
         llm_provider = os.environ.get("CORTEX_LLM_PROVIDER", "mock").lower()
@@ -975,20 +1148,20 @@ def doctor(as_json: bool) -> None:
             if llm_provider != "mock" or os.environ.get("CORTEX_ENV") != "production"
             else "WARN"
         )
-        report.append({
-            "subsystem": "LLM Provider",
-            "status": llm_status,
-            "details": f"Provider: {llm_provider} (model: {llm_model})",
-        })
+        report.append(
+            {
+                "subsystem": "LLM Provider",
+                "status": llm_status,
+                "details": f"Provider: {llm_provider} (model: {llm_model})",
+            }
+        )
 
         # 6. Durable Background Jobs
         job_status = "PASS"
         try:
             async with session_scope() as session:
                 recovered = await DurableJobStore().recover_abandoned(session)
-                job_details = (
-                    f"DurableJobStore active ({len(recovered)} abandoned leases recovered)"
-                )
+                job_details = f"DurableJobStore active ({len(recovered)} abandoned leases recovered)"
         except Exception as exc:
             job_status = "WARN"
             job_details = f"Job store warning: {exc}"
@@ -1006,29 +1179,35 @@ def doctor(as_json: bool) -> None:
             if "sk-proj-" not in redact_test and "[REDACTED" in redact_test
             else "FAIL"
         )
-        report.append({
-            "subsystem": "Secret Redaction",
-            "status": redact_status,
-            "details": "Pre-flight credential detection verified",
-        })
+        report.append(
+            {
+                "subsystem": "Secret Redaction",
+                "status": redact_status,
+                "details": "Pre-flight credential detection verified",
+            }
+        )
 
         # 8. Distributed Tracing & Telemetry
         tel_enabled = is_telemetry_enabled()
         tel_mode = os.environ.get("CORTEX_TELEMETRY", "local")
-        report.append({
-            "subsystem": "Observability",
-            "status": "PASS",
-            "details": f"Tracing: {'active' if tel_enabled else 'disabled'} (mode: {tel_mode})",
-        })
+        report.append(
+            {
+                "subsystem": "Observability",
+                "status": "PASS",
+                "details": f"Tracing: {'active' if tel_enabled else 'disabled'} (mode: {tel_mode})",
+            }
+        )
 
         # 9. Capability Registry
         reg = CapabilityRegistry.get_instance()
         summary = reg.summary()
-        report.append({
-            "subsystem": "Capabilities",
-            "status": "PASS",
-            "details": f"{summary.get('IMPLEMENTED', 0)} implemented, {summary.get('PARTIAL', 0)} partial, {summary.get('DISABLED', 0)} disabled",
-        })
+        report.append(
+            {
+                "subsystem": "Capabilities",
+                "status": "PASS",
+                "details": f"{summary.get('IMPLEMENTED', 0)} implemented, {summary.get('PARTIAL', 0)} partial, {summary.get('DISABLED', 0)} disabled",
+            }
+        )
 
     asyncio.run(_run_diagnostics())
 

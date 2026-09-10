@@ -189,17 +189,36 @@ class HybridRetrievalEngine:
         entities = await self._entities_for_files(session, project_id, target_files)
 
         # Build graph proximity set if target_files provided
-        graph_proximate_names: set[str] = set()
+        proximate_entity_ids: set[str] = set()
+        proximate_files: set[str] = set()
         if target_files:
-            for tf in target_files:
-                for ent in entities:
-                    if ent.file_path == tf or tf in ent.file_path:
-                        graph_proximate_names.add(ent.qualified_name)
-                        graph_proximate_names.add(ent.name)
-                        # Expand 1-hop
-                        deps = await self.graph_service.get_dependencies(session, project_id, ent.id, depth=1)
-                        for d in deps:
-                            graph_proximate_names.add(d["name"])
+            norm_targets = {tf.replace("\\", "/").strip("/") for tf in target_files}
+            for ent in entities:
+                ent_fp = ent.file_path.replace("\\", "/").strip("/")
+                if ent_fp in norm_targets or any(
+                    ent_fp.endswith("/" + t) or t.endswith("/" + ent_fp)
+                    for t in norm_targets
+                ):
+                    proximate_entity_ids.add(ent.id)
+                    proximate_files.add(ent_fp)
+                    # Expand 1-hop dependencies
+                    deps = await self.graph_service.get_dependencies(
+                        session, project_id, ent.id, depth=1
+                    )
+                    for d in deps:
+                        if d.get("id"):
+                            proximate_entity_ids.add(d["id"])
+                        if d.get("file"):
+                            proximate_files.add(d["file"].replace("\\", "/").strip("/"))
+                    # Expand 1-hop callers / dependents
+                    callers = await self.graph_service.get_dependents(
+                        session, project_id, ent.id, depth=1
+                    )
+                    for c in callers:
+                        if c.get("id"):
+                            proximate_entity_ids.add(c["id"])
+                        if c.get("file"):
+                            proximate_files.add(c["file"].replace("\\", "/").strip("/"))
 
         candidates: list[tuple[ScoredItem, list[float] | None]] = []
         now = datetime.now(UTC)
@@ -216,21 +235,31 @@ class HybridRetrievalEngine:
             # Okapi BM25 lexical score
             sim_lex = bm25_scores[idx]
 
-            # Graph relevance
+            # Graph relevance (strictly based on entity IDs and exact file paths)
             rel_graph = 0.0
-            if mem.evidences:
+            if mem.evidences and (proximate_entity_ids or proximate_files):
                 for ev in mem.evidences:
-                    if any(ev.file_path in p or p in ev.file_path for p in graph_proximate_names):
+                    if ev.symbol_id and ev.symbol_id in proximate_entity_ids:
                         rel_graph = 1.0
                         break
+                    if ev.file_path:
+                        ev_norm = ev.file_path.replace("\\", "/").strip("/")
+                        if ev_norm in proximate_files or any(
+                            ev_norm.endswith("/" + pf) or pf.endswith("/" + ev_norm)
+                            for pf in proximate_files
+                        ):
+                            rel_graph = 1.0
+                            break
 
             # Task relevance
             match_task = 0.0
             if task_type:
                 tt_lower = task_type.lower()
-                if ("fail" in tt_lower and mem.memory_type in ("FAILURE", "FIX")) or (
-                    "decision" in tt_lower and mem.memory_type == "DECISION"
-                ) or ("constraint" in tt_lower and mem.memory_type == "CONSTRAINT"):
+                if (
+                    ("fail" in tt_lower and mem.memory_type in ("FAILURE", "FIX"))
+                    or ("decision" in tt_lower and mem.memory_type == "DECISION")
+                    or ("constraint" in tt_lower and mem.memory_type == "CONSTRAINT")
+                ):
                     match_task = 1.0
 
             # Freshness decay
@@ -274,7 +303,8 @@ class HybridRetrievalEngine:
                     "conf": round(conf, 3),
                     "fresh": round(freshness, 3),
                 },
-                provenance=mem.source_reference or (mem.evidences[0].file_path if mem.evidences else None),
+                provenance=mem.source_reference
+                or (mem.evidences[0].file_path if mem.evidences else None),
                 status=mem.status,
                 memory_type=mem.memory_type,
                 layer=mem.layer,
