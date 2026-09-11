@@ -75,10 +75,14 @@ const AppDashboard: React.FC = () => {
 
   // Initial load of authenticated user's projects
   const loadProjects = async () => {
-    const projectList = await fetchProjects();
-    setProjects(projectList);
-    if (projectList.length > 0 && (!selectedProjectId || !projectList.some((p) => p.id === selectedProjectId))) {
-      setSelectedProjectId(projectList[0].id);
+    try {
+      const projectList = await fetchProjects();
+      setProjects(projectList);
+      if (projectList.length > 0 && (!selectedProjectId || !projectList.some((p) => p.id === selectedProjectId))) {
+        setSelectedProjectId(projectList[0].id);
+      }
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to load projects.', 'error');
     }
   };
 
@@ -96,13 +100,18 @@ const AppDashboard: React.FC = () => {
 
     async function loadProjectDetails() {
       setIsLoadingMemories(true);
-      const [arch, mems] = await Promise.all([
-        fetchArchitecture(selectedProjectId!),
-        fetchMemories(selectedProjectId!),
-      ]);
-      setArchitecture(arch);
-      setMemories(mems);
-      setIsLoadingMemories(false);
+      try {
+        const [arch, mems] = await Promise.all([
+          fetchArchitecture(selectedProjectId!),
+          fetchMemories(selectedProjectId!),
+        ]);
+        setArchitecture(arch);
+        setMemories(mems);
+      } catch (err: any) {
+        showToast(err?.message || 'Failed to load project details.', 'error');
+      } finally {
+        setIsLoadingMemories(false);
+      }
     }
 
     loadProjectDetails();
@@ -115,46 +124,56 @@ const AppDashboard: React.FC = () => {
     setIsScanning(true);
     showToast('Repository AST scan initiated...', 'info');
 
-    const ok = await triggerScan(selectedProjectId);
-    if (ok) {
-      showToast('Scan complete: code graph and entities synchronized', 'success');
-      const [arch, mems, updatedProjects] = await Promise.all([
-        fetchArchitecture(selectedProjectId),
-        fetchMemories(selectedProjectId),
-        fetchProjects(),
-      ]);
-      setArchitecture(arch);
-      setMemories(mems);
-      setProjects(updatedProjects);
-    } else {
-      showToast('Scan failed. Ensure directory is accessible.', 'error');
+    try {
+      const ok = await triggerScan(selectedProjectId);
+      if (ok) {
+        showToast('Scan complete: code graph and entities synchronized', 'success');
+        const [arch, mems, updatedProjects] = await Promise.all([
+          fetchArchitecture(selectedProjectId),
+          fetchMemories(selectedProjectId),
+          fetchProjects(),
+        ]);
+        setArchitecture(arch);
+        setMemories(mems);
+        setProjects(updatedProjects);
+      }
+    } catch (err: any) {
+      showToast(err?.message || 'Scan failed. Ensure directory is accessible.', 'error');
+    } finally {
+      setIsScanning(false);
     }
-    setIsScanning(false);
   };
 
   const handleConsolidate = async () => {
     if (!selectedProjectId) return;
     showToast('Consolidating episodic memories into durable lessons...', 'info');
 
-    const res = await triggerConsolidate(selectedProjectId);
-    if (res) {
-      showToast(
-        `Consolidated: ${res.clustered_count || 0} episodes merged into ${res.lessons_created || 0} lessons`,
-        'success'
-      );
-      const mems = await fetchMemories(selectedProjectId);
-      setMemories(mems);
-    } else {
-      showToast('Consolidation encountered an issue', 'error');
+    try {
+      const res = await triggerConsolidate(selectedProjectId);
+      if (res) {
+        showToast(
+          `Consolidated: ${res.clustered_count || 0} episodes merged into ${res.lessons_created || 0} lessons`,
+          'success'
+        );
+        const mems = await fetchMemories(selectedProjectId);
+        setMemories(mems);
+      }
+    } catch (err: any) {
+      showToast(err?.message || 'Consolidation encountered an issue', 'error');
     }
   };
 
   const handleRefreshMemories = async () => {
     if (!selectedProjectId) return;
     setIsLoadingMemories(true);
-    const mems = await fetchMemories(selectedProjectId);
-    setMemories(mems);
-    setIsLoadingMemories(false);
+    try {
+      const mems = await fetchMemories(selectedProjectId);
+      setMemories(mems);
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to refresh memories.', 'error');
+    } finally {
+      setIsLoadingMemories(false);
+    }
   };
 
   const handleProjectCreated = (newProj: Project) => {

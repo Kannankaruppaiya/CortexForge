@@ -8,9 +8,12 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - CORTEX_DB_URL=postgresql+asyncpg://cortex:cortex_secret@postgres:5432/cortexforge
-      - CORTEX_EMBEDDINGS_PROVIDER=local
-      - CORTEX_LLM_PROVIDER=mock
+      - CORTEX_ENV=${CORTEX_ENV:-production}
+      - CORTEX_AUTH_STRICT=${CORTEX_AUTH_STRICT:-true}
+      - CORTEX_DB_URL=postgresql+asyncpg://${POSTGRES_USER:-cortex}:${POSTGRES_PASSWORD:-cortex_secret}@postgres:5432/${POSTGRES_DB:-cortexforge}
+      - CORTEX_EMBEDDINGS_PROVIDER=${CORTEX_EMBEDDINGS_PROVIDER:-openai}
+      - CORTEX_LLM_PROVIDER=${CORTEX_LLM_PROVIDER:-openai}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - CORTEX_TELEMETRY=disabled
       - REDIS_URL=redis://redis:6379/0
       - PYTHONUNBUFFERED=1
@@ -31,13 +34,15 @@ services:
     restart: unless-stopped
     command: ["python", "-m", "cortexforge.jobs.worker"]
     environment:
-      - CORTEX_DB_URL=postgresql+asyncpg://cortex:cortex_secret@postgres:5432/cortexforge
-      - CORTEX_EMBEDDINGS_PROVIDER=local
-      - CORTEX_LLM_PROVIDER=mock
+      - CORTEX_ENV=${CORTEX_ENV:-production}
+      - CORTEX_AUTH_STRICT=${CORTEX_AUTH_STRICT:-true}
+      - CORTEX_DB_URL=postgresql+asyncpg://${POSTGRES_USER:-cortex}:${POSTGRES_PASSWORD:-cortex_secret}@postgres:5432/${POSTGRES_DB:-cortexforge}
+      - CORTEX_EMBEDDINGS_PROVIDER=${CORTEX_EMBEDDINGS_PROVIDER:-openai}
+      - CORTEX_LLM_PROVIDER=${CORTEX_LLM_PROVIDER:-openai}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - CORTEX_TELEMETRY=disabled
       - REDIS_URL=redis://redis:6379/0
       - PYTHONUNBUFFERED=1
-      - CORTEX_ENV=production
     volumes:
       - cortex_data:/root/.cortexforge
       - .:/workspace:ro
@@ -54,13 +59,13 @@ services:
     ports:
       - "5432:5432"
     environment:
-      - POSTGRES_USER=cortex
-      - POSTGRES_PASSWORD=cortex_secret
-      - POSTGRES_DB=cortexforge
+      - POSTGRES_USER=${POSTGRES_USER:-cortex}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-cortex_secret}
+      - POSTGRES_DB=${POSTGRES_DB:-cortexforge}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U cortex -d cortexforge"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cortex} -d ${POSTGRES_DB:-cortexforge}"]
       interval: 5s
       timeout: 5s
       retries: 5

@@ -39,9 +39,7 @@ def upgrade() -> None:
                 )
                 batch_op.create_index("ix_projects_source_type", ["source_type"])
             if "clone_url" not in proj_cols:
-                batch_op.add_column(
-                    sa.Column("clone_url", sa.Text(), nullable=True)
-                )
+                batch_op.add_column(sa.Column("clone_url", sa.Text(), nullable=True))
             if "github_repository_id" not in proj_cols:
                 batch_op.add_column(
                     sa.Column("github_repository_id", sa.String(100), nullable=True)

@@ -34,6 +34,7 @@ from cortexforge.security.auth import (
     RequireProjectAccess,
     get_current_principal,
 )
+from cortexforge.security.policy import Permission
 
 router = APIRouter(tags=["cognition"], dependencies=[Depends(RequireProjectAccess())])
 
@@ -74,8 +75,22 @@ async def create_architecture_rule(
     project_id: str,
     payload: ArchitectureRuleCreate,
     session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(
+        RequireProjectAccess("project_id", permission=Permission.ARCHITECTURE_WRITE)
+    ),
 ) -> ArchitectureRuleRead:
     """Create a new architectural invariant boundary rule."""
+    if payload.authority:
+        auth_norm = payload.authority.strip().upper()
+        if (
+            auth_norm in ("USER_CONFIRMED", "REVIEW_CONFIRMED", "HIGH_AUTHORITY")
+            and principal.actor_type != "USER"
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Non-human principals cannot self-assert human-confirmed epistemic authority.",
+            )
+
     project = await session.get(Project, project_id)
     if not project:
         raise HTTPException(

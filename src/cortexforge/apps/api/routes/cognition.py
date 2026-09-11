@@ -41,6 +41,7 @@ from cortexforge.security.auth import (
     RequireProjectAccess,
     get_current_principal,
 )
+from cortexforge.security.policy import Permission
 from cortexforge.verification.engine import ClaimVerificationEngine
 
 logger = logging.getLogger(__name__)
@@ -364,9 +365,13 @@ async def approve_memory(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found"
         )
-    RequireProjectAccess.check_access(principal, memory.project_id)
+    RequireProjectAccess.check_access(
+        principal, memory.project_id, permission=Permission.MEMORY_VERIFY
+    )
 
     previous_status = memory.status
+    authoritative_actor = principal.email or principal.user_id or principal.principal_id
+    effective_reason = reason or f"Approved by {approver or authoritative_actor}"
 
     if (
         memory.memory_type == "LESSON"
@@ -375,15 +380,15 @@ async def approve_memory(
         # Lessons carry derived-from relations to their source episodes, so
         # approval goes through consolidation, which archives those sources.
         memory = await consolidation_engine.approve_lesson(
-            session, memory_id, approver=approver, reason=reason
+            session, memory_id, approver=authoritative_actor, reason=effective_reason
         )
     else:
         try:
             version = MemoryLifecycleManager.transition(
                 memory,
                 MemoryState.ACTIVE.value,
-                reason=reason or f"Approved by {approver}",
-                actor=approver,
+                reason=effective_reason,
+                actor=authoritative_actor,
                 verified=True,
             )
         except InvalidStateTransitionError as exc:
@@ -398,11 +403,11 @@ async def approve_memory(
         action=AuditAction.MEMORY_APPROVED,
         resource_type="memory",
         resource_id=memory_id,
-        actor=approver,
+        actor=authoritative_actor,
         project_id=memory.project_id,
         before={"status": previous_status},
         after={"status": memory.status},
-        reason=reason,
+        reason=effective_reason,
     )
     await session.commit()
     await session.refresh(memory)
@@ -426,15 +431,20 @@ async def reject_memory(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found"
         )
-    RequireProjectAccess.check_access(principal, memory.project_id)
+    RequireProjectAccess.check_access(
+        principal, memory.project_id, permission=Permission.MEMORY_VERIFY
+    )
 
     previous_status = memory.status
+    authoritative_actor = principal.email or principal.user_id or principal.principal_id
+    effective_reason = f"Rejected by {reviewer or authoritative_actor}: {reason}"
+
     try:
         version = MemoryLifecycleManager.transition(
             memory,
             MemoryState.INVALIDATED.value,
-            reason=f"Rejected by {reviewer}: {reason}",
-            actor=reviewer,
+            reason=effective_reason,
+            actor=authoritative_actor,
         )
     except InvalidStateTransitionError as exc:
         raise HTTPException(
@@ -448,11 +458,11 @@ async def reject_memory(
         action=AuditAction.MEMORY_REJECTED,
         resource_type="memory",
         resource_id=memory_id,
-        actor=reviewer,
+        actor=authoritative_actor,
         project_id=memory.project_id,
         before={"status": previous_status},
         after={"status": memory.status},
-        reason=reason,
+        reason=effective_reason,
     )
     await session.commit()
     return {"id": memory.id, "status": memory.status}

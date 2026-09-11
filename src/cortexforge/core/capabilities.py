@@ -21,6 +21,29 @@ class CapabilityStatus(str, Enum):
     UNSUPPORTED = "UNSUPPORTED"
 
 
+def resolve_current_commit() -> str:
+    """Resolve the current active commit SHA or symbolic Git reference."""
+    import os
+    import subprocess
+
+    env_commit = os.environ.get("CORTEX_GIT_COMMIT")
+    if env_commit:
+        return env_commit.strip()
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            return res.stdout.strip()
+    except Exception:
+        pass
+    return "HEAD"
+
+
 class CapabilityEntry(BaseModel):
     """Detailed metadata for a single system capability."""
 
@@ -32,7 +55,7 @@ class CapabilityEntry(BaseModel):
     entry_points: list[str] = Field(default_factory=list)
     tests: list[str] = Field(default_factory=list)
     limitations: str | None = None
-    last_verified_commit: str = "HEAD"
+    last_verified_commit: str = Field(default_factory=resolve_current_commit)
 
 
 class CapabilityRegistry:

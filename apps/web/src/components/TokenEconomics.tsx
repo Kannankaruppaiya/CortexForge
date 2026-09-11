@@ -32,15 +32,24 @@ export const TokenEconomics: React.FC<TokenEconomicsProps> = ({ projectId }) => 
   const [selectedBudget, setSelectedBudget] = useState<'small' | 'medium' | 'large'>('medium');
   const [liveData, setLiveData] = useState<any>(null);
   const [_isLoading, setIsLoading] = useState<boolean>(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!projectId) return;
     let isMounted = true;
     setIsLoading(true);
+    setError(null);
     fetchTokenEconomics(projectId)
       .then((data) => {
         if (isMounted && data) {
           setLiveData(data);
+          setError(null);
+        }
+      })
+      .catch((err) => {
+        if (isMounted) {
+          setError(err?.message || 'Failed to fetch token economics metrics.');
+          setLiveData(null);
         }
       })
       .finally(() => {
@@ -51,7 +60,7 @@ export const TokenEconomics: React.FC<TokenEconomicsProps> = ({ projectId }) => 
     };
   }, [projectId]);
 
-  const fallbackProfiles: Record<'small' | 'medium' | 'large', BudgetProfile> = {
+  const referenceModelProfiles: Record<'small' | 'medium' | 'large', BudgetProfile> = {
     small: {
       totalTokens: 2400,
       label: 'Small Budget (Fast / Latency-Optimized)',
@@ -94,10 +103,11 @@ export const TokenEconomics: React.FC<TokenEconomicsProps> = ({ projectId }) => 
   };
 
   const [showEstimation, setShowEstimation] = useState(false);
-  const profiles = liveData?.profiles || fallbackProfiles;
-  const activeProfile = profiles[selectedBudget] || fallbackProfiles[selectedBudget];
+  const profiles = liveData?.profiles || (showEstimation ? referenceModelProfiles : null);
+  const activeProfile = profiles ? profiles[selectedBudget] : null;
 
   const hasLiveData = Boolean(liveData && liveData.savings_pct !== undefined);
+  const isMeasured = Boolean(liveData && liveData.has_measured_data);
   const savingsPct = hasLiveData ? liveData.savings_pct : (showEstimation ? 88.5 : null);
   const avgCortexTokens = hasLiveData ? liveData.avg_context_tokens_cortex : (showEstimation ? 2850 : null);
   const avgBaseTokens = hasLiveData ? liveData.avg_context_tokens_baseline : (showEstimation ? 24500 : null);
@@ -111,6 +121,12 @@ export const TokenEconomics: React.FC<TokenEconomicsProps> = ({ projectId }) => 
 
   return (
     <div className="space-y-6">
+      {error && (
+        <div className="p-4 bg-red-950/40 border border-red-800 rounded-xl text-xs font-mono text-red-300">
+          ⚠️ <strong>API Error:</strong> {error}
+        </div>
+      )}
+
       {/* Overview Banner */}
       <div className="p-5 bg-slate-900/80 rounded-xl border border-slate-800 backdrop-blur flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
@@ -124,12 +140,17 @@ export const TokenEconomics: React.FC<TokenEconomicsProps> = ({ projectId }) => 
         </div>
         <div className="flex items-center gap-2">
           {hasLiveData ? (
-            <span className="px-2.5 py-1 bg-emerald-950/80 border border-emerald-800 text-emerald-300 text-xs font-mono font-bold rounded-lg flex items-center gap-1.5">
-              <TrendingDown className="w-3.5 h-3.5" /> {savingsPct}% Measured Savings
+            <span className={`px-2.5 py-1 text-xs font-mono font-bold rounded-lg flex items-center gap-1.5 ${
+              isMeasured
+                ? 'bg-emerald-950/80 border border-emerald-800 text-emerald-300'
+                : 'bg-indigo-950/80 border border-indigo-800 text-indigo-300'
+            }`}>
+              <TrendingDown className="w-3.5 h-3.5" />
+              {isMeasured ? `${savingsPct}% Live Measured Savings` : `${savingsPct}% Modeled Estimate`}
             </span>
           ) : showEstimation ? (
             <span className="px-2.5 py-1 bg-amber-950/60 border border-amber-800/80 text-amber-300 text-xs font-mono rounded-lg flex items-center gap-1.5">
-              Reference Model (~88.5% Est.)
+              Reference Simulation (~88.5% Est.)
             </span>
           ) : (
             <span className="px-2.5 py-1 bg-slate-800 border border-slate-700 text-slate-400 text-xs font-mono rounded-lg">
@@ -148,7 +169,7 @@ export const TokenEconomics: React.FC<TokenEconomicsProps> = ({ projectId }) => 
         }`}>
           <div>
             {showEstimation ? (
-              <span>⚠️ <strong>OFFLINE REFERENCE ESTIMATION:</strong> Displaying theoretical profile limits from <code>retrieval/composer.py</code>, not empirical measurements.</span>
+              <span>⚠️ <strong>OFFLINE REFERENCE SIMULATION:</strong> Displaying theoretical profile limits from <code>retrieval/composer.py</code>, not empirical measurements.</span>
             ) : (
               <span>ℹ️ <strong>EMPTY STATE:</strong> No benchmark runs recorded for this project yet. Run <code>cortex benchmark</code> to generate live empirical scorecards.</span>
             )}
@@ -157,7 +178,7 @@ export const TokenEconomics: React.FC<TokenEconomicsProps> = ({ projectId }) => 
             onClick={() => setShowEstimation(!showEstimation)}
             className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded border border-slate-700 whitespace-nowrap transition"
           >
-            {showEstimation ? 'Switch to Real Data View' : 'Preview Reference Model'}
+            {showEstimation ? 'Switch to Truthful Empty View' : 'Preview Reference Simulation Model'}
           </button>
         </div>
       )}

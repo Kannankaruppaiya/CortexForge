@@ -14,6 +14,7 @@ import os
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 
@@ -217,6 +218,180 @@ class OpenAIProvider(LLMProvider):
             )
 
 
+class AnthropicProvider(LLMProvider):
+    """Anthropic Claude API provider."""
+
+    def __init__(
+        self, api_key: str | None = None, default_model: str | None = None
+    ) -> None:
+        self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        self._default_model = (
+            default_model
+            or os.environ.get("CORTEX_LLM_MODEL")
+            or "claude-3-5-sonnet-20241022"
+        )
+
+    @property
+    def provider_name(self) -> str:
+        return "anthropic"
+
+    @property
+    def default_model(self) -> str:
+        return self._default_model
+
+    async def generate(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        model: str | None = None,
+        temperature: float = 0.2,
+        max_tokens: int = 2000,
+    ) -> LLMResponse:
+        chosen_model = model or self.default_model
+        if not self._api_key:
+            environment = current_environment()
+            if environment in NON_MOCKABLE_ENVIRONMENTS:
+                raise RuntimeError(
+                    "AnthropicProvider is configured but ANTHROPIC_API_KEY is not set, and "
+                    f"the environment is '{environment}'. Refusing to substitute "
+                    "mock output for a model response."
+                )
+            logger.warning(
+                "ANTHROPIC_API_KEY is not set; returning deterministic mock output."
+            )
+            return await MockLLMProvider().generate(prompt, system_prompt, chosen_model)
+
+        start = time.perf_counter()
+        headers = {
+            "x-api-key": self._api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+        payload: dict[str, Any] = {
+            "model": chosen_model,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if system_prompt:
+            payload["system"] = system_prompt
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers=headers,
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            latency = (time.perf_counter() - start) * 1000
+
+            usage = data.get("usage", {})
+            in_tokens = usage.get("input_tokens", len(prompt.split()))
+            out_tokens = usage.get("output_tokens", 0)
+            content_blocks = data.get("content", [])
+            content = "".join(
+                b.get("text", "") for b in content_blocks if b.get("type") == "text"
+            )
+
+            return LLMResponse(
+                content=content,
+                model=chosen_model,
+                provider="anthropic",
+                input_tokens=in_tokens,
+                output_tokens=out_tokens,
+                latency_ms=round(latency, 2),
+                cost_estimate=(in_tokens * 0.000003) + (out_tokens * 0.000015),
+            )
+
+
+class GeminiProvider(LLMProvider):
+    """Google Gemini API provider."""
+
+    def __init__(
+        self, api_key: str | None = None, default_model: str | None = None
+    ) -> None:
+        self._api_key = (
+            api_key
+            or os.environ.get("GEMINI_API_KEY")
+            or os.environ.get("GOOGLE_API_KEY", "")
+        )
+        self._default_model = (
+            default_model or os.environ.get("CORTEX_LLM_MODEL") or "gemini-1.5-pro"
+        )
+
+    @property
+    def provider_name(self) -> str:
+        return "gemini"
+
+    @property
+    def default_model(self) -> str:
+        return self._default_model
+
+    async def generate(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        model: str | None = None,
+        temperature: float = 0.2,
+        max_tokens: int = 2000,
+    ) -> LLMResponse:
+        chosen_model = model or self.default_model
+        if not self._api_key:
+            environment = current_environment()
+            if environment in NON_MOCKABLE_ENVIRONMENTS:
+                raise RuntimeError(
+                    "GeminiProvider is configured but GEMINI_API_KEY is not set, and "
+                    f"the environment is '{environment}'. Refusing to substitute "
+                    "mock output for a model response."
+                )
+            logger.warning(
+                "GEMINI_API_KEY is not set; returning deterministic mock output."
+            )
+            return await MockLLMProvider().generate(prompt, system_prompt, chosen_model)
+
+        start = time.perf_counter()
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{chosen_model}:generateContent?key={self._api_key}"
+        parts = []
+        if system_prompt:
+            parts.append({"text": f"System Instructions: {system_prompt}\n\n"})
+        parts.append({"text": prompt})
+
+        payload = {
+            "contents": [{"parts": parts}],
+            "generationConfig": {
+                "temperature": temperature,
+                "maxOutputTokens": max_tokens,
+            },
+        }
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(url, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            latency = (time.perf_counter() - start) * 1000
+
+            candidates = data.get("candidates", [])
+            content = ""
+            if candidates:
+                cand_parts = candidates[0].get("content", {}).get("parts", [])
+                content = "".join(p.get("text", "") for p in cand_parts)
+
+            usage = data.get("usageMetadata", {})
+            in_tokens = usage.get("promptTokenCount", len(prompt.split()))
+            out_tokens = usage.get("candidatesTokenCount", len(content.split()))
+
+            return LLMResponse(
+                content=content,
+                model=chosen_model,
+                provider="gemini",
+                input_tokens=in_tokens,
+                output_tokens=out_tokens,
+                latency_ms=round(latency, 2),
+                cost_estimate=0.0,
+            )
+
+
 def get_llm_provider(provider_type: str | None = None) -> LLMProvider:
     """Return the configured LLM provider.
 
@@ -230,8 +405,12 @@ def get_llm_provider(provider_type: str | None = None) -> LLMProvider:
     )
     environment = current_environment()
 
-    if ptype == "openai":
+    if ptype in ("openai", "custom_openai", "openai_compatible"):
         return OpenAIProvider()
+    if ptype in ("anthropic", "claude"):
+        return AnthropicProvider()
+    if ptype in ("gemini", "google"):
+        return GeminiProvider()
     if ptype == "mock":
         if environment in NON_MOCKABLE_ENVIRONMENTS:
             raise RuntimeError(
@@ -242,6 +421,6 @@ def get_llm_provider(provider_type: str | None = None) -> LLMProvider:
         return MockLLMProvider()
 
     raise ValueError(
-        f"Unknown LLM provider '{ptype}'. Set CORTEX_LLM_PROVIDER to 'openai' or "
-        "'mock' (mock is unavailable in production)."
+        f"Unknown LLM provider '{ptype}'. Supported providers are: 'openai', 'anthropic', "
+        "'gemini', 'openai_compatible', or 'mock' (mock is unavailable in production)."
     )

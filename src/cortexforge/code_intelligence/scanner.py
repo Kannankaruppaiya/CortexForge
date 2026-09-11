@@ -14,6 +14,10 @@ from cortexforge.code_intelligence.config_intelligence import (
 from cortexforge.code_intelligence.git_provider import GitProvider
 from cortexforge.code_intelligence.lineage import SymbolLineageTracker
 from cortexforge.code_intelligence.parser import ParseResult
+from cortexforge.code_intelligence.source_adapter import (
+    RepositorySource,
+    get_repository_source,
+)
 from cortexforge.code_intelligence.treesitter.analyzer import TreeSitterProvider
 from cortexforge.core.models import (
     CodeEntity,
@@ -24,7 +28,6 @@ from cortexforge.core.models import (
 from cortexforge.core.schemas import ScanResponse
 from cortexforge.security.path_safety import (
     PathSecurity,
-    SafeFileReader,
 )
 
 # Hard resource limits to prevent denial-of-service from hostile repositories (§25)
@@ -245,14 +248,37 @@ class RepositoryScanner:
     async def scan_project(
         self,
         session: AsyncSession,
-        project: Project,
+        project: Project | str,
         incremental: bool = True,
         max_files: int | None = None,
+        source: RepositorySource | None = None,
+        repository_source: RepositorySource | None = None,
+        force_full: bool = False,
     ) -> ScanResponse:
-        """Perform full or incremental AST scan of project repository."""
+        """Perform full or incremental AST scan of project repository via RepositorySource."""
         start_time = time.perf_counter()
+
+        if isinstance(project, str):
+            proj_obj = await session.get(Project, project)
+            if not proj_obj:
+                return ScanResponse(
+                    project_id=project,
+                    files_scanned=0,
+                    entities_extracted=0,
+                    relationships_extracted=0,
+                    duration_ms=0.0,
+                    status="FAILED",
+                    errors=[f"Project '{project}' not found."],
+                )
+            project = proj_obj
+
+        if force_full:
+            incremental = False
+
+        repo_source = repository_source or source or get_repository_source(project)
         canonical_root = os.path.realpath(project.local_path)
-        if not os.path.exists(canonical_root):
+
+        if not repo_source.is_accessible():
             return ScanResponse(
                 project_id=project.id,
                 files_scanned=0,
@@ -260,16 +286,17 @@ class RepositoryScanner:
                 relationships_extracted=0,
                 duration_ms=0.0,
                 status="FAILED",
-                errors=[f"Directory does not exist: {project.local_path}"],
+                errors=[
+                    f"Repository source '{repo_source.source_type}' is not accessible for: {project.local_path}"
+                ],
             )
 
         errors: list[str] = []
         is_git_incremental = False
-        git = GitProvider(canonical_root)
-        head_commit = git.get_head_commit() or get_git_head_commit(canonical_root)
+        head_commit = repo_source.get_head_commit()
 
         if incremental and project.last_indexed_commit and head_commit:
-            diff_files = git.get_modified_files(
+            diff_files = repo_source.get_modified_files(
                 base_commit=project.last_indexed_commit, target_commit="HEAD"
             )
             if diff_files:
@@ -306,9 +333,7 @@ class RepositoryScanner:
                 rel_files = [
                     df.file_path
                     for df in diff_files
-                    if df.status != "D"
-                    and os.path.exists(os.path.join(canonical_root, df.file_path))
-                    and self.provider.can_parse(df.file_path)
+                    if df.status != "D" and self.provider.can_parse(df.file_path)
                 ]
             elif project.last_indexed_commit == head_commit:
                 # No changes between last indexed commit and HEAD
@@ -330,7 +355,11 @@ class RepositoryScanner:
                 )
 
         if not is_git_incremental:
-            rel_files = self.discover_files(canonical_root, max_files=max_files)
+            rel_files = [
+                f
+                for f in repo_source.discover_files(max_files=max_files)
+                if self.provider.can_parse(f)
+            ]
 
         # If not incremental, clear previous entities and relationships
         if not incremental:
@@ -358,10 +387,9 @@ class RepositoryScanner:
             existing_by_qualified
         )
 
-        safe_reader = SafeFileReader()
         for rel_path in rel_files:
             try:
-                content = safe_reader.read_bytes(canonical_root, rel_path)
+                content = repo_source.read_bytes(rel_path)
             except Exception as e:
                 errors.append(f"Failed to read file {rel_path}: {e}")
                 continue

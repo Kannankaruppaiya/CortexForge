@@ -86,10 +86,24 @@ class LocalBridgeClient:
             return {"X-API-Key": token}
         return {"Authorization": f"Bearer {token}"}
 
+    def check_remote_connectivity(self, timeout_seconds: float = 2.0) -> bool:
+        """Perform lightweight live connectivity check against configured server URL."""
+        import httpx
+
+        try:
+            url = f"{self.config.server_url}/api/v1/health/live"
+            headers = self.get_headers()
+            with httpx.Client(timeout=timeout_seconds) as client:
+                res = client.get(url, headers=headers)
+                return res.status_code == 200
+        except Exception:
+            return False
+
     def get_bridge_status(self) -> dict[str, Any]:
-        """Summarize bridge health and local repository synchronization status."""
+        """Summarize bridge health and local repository synchronization status truthfully."""
+        is_connected = self.check_remote_connectivity()
         return {
-            "status": "CONNECTED",
+            "status": "CONNECTED" if is_connected else "DISCONNECTED",
             "project_id": self.config.project_id,
             "server_url": self.config.server_url,
             "local_root_canonical": str(self.canonical_root),

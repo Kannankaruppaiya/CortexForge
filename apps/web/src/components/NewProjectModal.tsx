@@ -783,7 +783,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                           setValidationResult(null);
                         }}
                         onBlur={() => handleValidateLocalPath()}
-                        placeholder="e.g. C:\Users\Kannan\Downloads\CortexForge or D:\Projects\MyRepo"
+                        placeholder="e.g. /home/user/projects/my-repo or C:\Projects\MyRepo"
                         className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm font-mono text-white placeholder-slate-600 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-colors"
                       />
                       <button

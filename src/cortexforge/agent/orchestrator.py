@@ -557,6 +557,7 @@ class AgentWorkflowOrchestrator:
             jaccard = overlap / max(1, len(query_words | t_words))
 
             cos_sim = 0.0
+            embedding_degraded = False
             if query_embed:
                 try:
                     t_embed_res = (
@@ -565,8 +566,14 @@ class AgentWorkflowOrchestrator:
                         )
                     )
                     cos_sim = cosine_similarity(query_embed, t_embed_res.vector)
-                except Exception:
+                except Exception as exc:
+                    logger.warning(
+                        "Embedding generation failed for task %s; falling back to degraded lexical jaccard overlap: %s",
+                        t.id,
+                        exc,
+                    )
                     cos_sim = 0.0
+                    embedding_degraded = True
 
             text_score = (
                 max(0.0, (0.65 * cos_sim) + (0.35 * jaccard))
@@ -651,6 +658,7 @@ class AgentWorkflowOrchestrator:
                 "file_score": round(file_score, 4),
                 "symbol_score": round(symbol_score, 4),
                 "failure_score": round(failure_score, 4),
+                "embedding_degraded": embedding_degraded,
             }
 
             if (

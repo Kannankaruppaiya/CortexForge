@@ -152,6 +152,7 @@ async def browse_workspace_directories(
             parent_path = str(target.parent)
 
     entries: list[DirectoryEntry] = []
+    scan_error: str | None = None
     try:
         with os.scandir(target) as it:
             for entry in it:
@@ -172,6 +173,7 @@ async def browse_workspace_directories(
                     continue
     except (PermissionError, OSError) as e:
         logger.warning("Error scanning directory %s: %s", target, e)
+        scan_error = f"Inaccessible directory: {e}"
 
     entries.sort(key=lambda d: (not d.is_git, d.name.lower()))
 
@@ -182,6 +184,7 @@ async def browse_workspace_directories(
         directories=entries,
         is_windows=is_windows,
         is_drive_root=is_drive_root,
+        error=scan_error,
     )
 
 
@@ -255,6 +258,17 @@ async def create_project(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only authenticated human users can create projects.",
+        )
+
+    env = (
+        os.environ.get("CORTEX_ENV", os.environ.get("ENVIRONMENT", "development"))
+        .strip()
+        .lower()
+    )
+    if env in ("production", "prod", "staging") and not principal.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authenticated user identity is required to create projects in production.",
         )
 
     owner_id = principal.user_id or "00000000-0000-0000-0000-000000000001"
@@ -898,24 +912,66 @@ async def get_project_economics(
     cost_per_1k_cortex = round(cost_per_task_cortex * 1000.0, 2)
     cost_per_1k_base = round(cost_per_task_base * 1000.0, 2)
 
-    files_explored_cortex = 1.2
+    # Query actual agent tasks to derive live measured metrics where available
+    from cortexforge.core.models import AgentEvent, AgentTask
+
+    tasks_stmt = select(AgentTask).where(AgentTask.project_id == project_id)
+    tasks_res = await session.execute(tasks_stmt)
+    project_tasks = tasks_res.scalars().all()
+
+    has_measured_data = len(project_tasks) > 0
+    if has_measured_data:
+        task_ids = [t.id for t in project_tasks]
+        events_stmt = select(AgentEvent).where(AgentEvent.task_id.in_(task_ids))
+        events_res = await session.execute(events_stmt)
+        all_events = events_res.scalars().all()
+
+        tool_events = [
+            e for e in all_events if (e.event_type or "").upper() == "TOOL_CALL"
+        ]
+        measured_tools_per_task = round(
+            len(tool_events) / max(1, len(project_tasks)), 1
+        )
+
+        files_set = set()
+        for e in all_events:
+            p = e.payload or {}
+            for k in ("path", "file_path", "target_path"):
+                if k in p and isinstance(p[k], str):
+                    files_set.add(p[k])
+        measured_files_per_task = round(len(files_set) / max(1, len(project_tasks)), 1)
+
+        files_explored_cortex = max(1.0, measured_files_per_task)
+        tool_calls_cortex = max(1.0, measured_tools_per_task)
+        metric_mode = "measured"
+    else:
+        # Explicit modeled benchmark reference estimate when no live task executions exist yet
+        files_explored_cortex = 1.2
+        tool_calls_cortex = 1.0
+        metric_mode = "modelled_estimate"
+
     files_explored_base = max(8.0, round(min(25.0, len(entities) / 8.0), 1))
     files_reduction_pct = round(
         ((files_explored_base - files_explored_cortex) / files_explored_base) * 100, 1
     )
 
-    tool_calls_cortex = 1.0
     tool_calls_base = round(files_explored_base * 0.75 + 1.5, 1)
     tool_calls_reduction_pct = round(
         ((tool_calls_base - tool_calls_cortex) / tool_calls_base) * 100, 1
     )
 
     return {
-        "is_modelled_estimate": True,
+        "metric_mode": metric_mode,
+        "has_measured_data": has_measured_data,
+        "is_modelled_estimate": not has_measured_data,
         "estimation_methodology": (
-            "Modelled simulation estimate based on token character heuristics, assumed "
-            "model price ($0.003 / 1k tokens), and typical agent context retrieval profiles. "
-            "Not measured live agent execution."
+            "Live task execution telemetry from AgentEvent records."
+            if has_measured_data
+            else (
+                "Modelled reference estimate based on token character heuristics, assumed "
+                "model price ($0.003 / 1k tokens), and typical agent context retrieval profiles. "
+                "No live agent task executions recorded yet for this project."
+            )
         ),
         "savings_pct": savings_pct,
         "avg_context_tokens_cortex": cortex_avg_tokens,

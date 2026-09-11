@@ -1,6 +1,7 @@
 """Full-Featured Model Context Protocol (MCP) Server for CortexForge."""
 
 import os
+import uuid
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any
@@ -14,6 +15,7 @@ from cortexforge.agent.success_intelligence import SuccessIntelligence
 from cortexforge.architecture.invariants import ArchitectureInvariantEngine
 from cortexforge.code_intelligence.change_propagator import SemanticChangePropagator
 from cortexforge.code_intelligence.scanner import RepositoryScanner
+from cortexforge.code_intelligence.source_adapter import get_repository_source
 from cortexforge.cognition.authority import Authority
 from cortexforge.cognition.epistemics import ClaimStatus
 from cortexforge.core.db import init_db, session_scope
@@ -30,6 +32,7 @@ from cortexforge.core.models import (
     MemoryDecision,
     Project,
     ProjectMembership,
+    User,
 )
 from cortexforge.core.models import (
     Session as UserSession,
@@ -42,10 +45,18 @@ from cortexforge.memory.provenance import ProvenanceEngine
 from cortexforge.memory.service import ConcurrentModificationError, MemoryService
 from cortexforge.memory.snapshots import CognitiveSnapshotEngine
 from cortexforge.memory.verification import MemoryVerificationEngine
+from cortexforge.observability.audit import AuditAction, record_audit
 from cortexforge.retrieval.composer import ContextComposer
 from cortexforge.retrieval.engine import HybridRetrievalEngine
 from cortexforge.security.approval import ApprovalService
+from cortexforge.security.auth import validate_local_registration_path
 from cortexforge.security.crypto import hash_token
+from cortexforge.security.policy import (
+    Permission,
+    ProjectRole,
+    check_project_permission,
+    evaluate_agent_permission,
+)
 from cortexforge.verification.engine import ClaimVerificationEngine
 
 mcp_server = MCPServer(
@@ -96,7 +107,11 @@ def set_mcp_caller(
     _CURRENT_MCP_CALLER.set({"user_id": user_id, "agent_id": agent_id, "token": token})
 
 
-async def _resolve_project(session, project_id_or_path: str) -> Project | None:
+async def _resolve_project(
+    session,
+    project_id_or_path: str,
+    required_permission: Permission | None = None,
+) -> Project | None:
     """Resolve project by ID or local filesystem path, enforcing user ownership and agent permissions."""
     project = await session.get(Project, project_id_or_path)
 
@@ -111,17 +126,13 @@ async def _resolve_project(session, project_id_or_path: str) -> Project | None:
 
     # Enforce Project Authorization in MCP (§12, §25)
     caller_ctx = _CURRENT_MCP_CALLER.get() or {}
-    caller_user_id = caller_ctx.get("user_id") or os.environ.get(
-        "CORTEX_CALLER_USER_ID"
-    )
-    caller_agent_id = caller_ctx.get("agent_id") or os.environ.get(
-        "CORTEX_CALLER_AGENT_ID"
-    )
     caller_token = (
         caller_ctx.get("token")
         or os.environ.get("CORTEX_MCP_TOKEN")
         or os.environ.get("CORTEX_AGENT_KEY")
     )
+    caller_user_id = None
+    caller_agent_id = None
 
     if caller_token:
         t_hash = hash_token(caller_token)
@@ -161,9 +172,17 @@ async def _resolve_project(session, project_id_or_path: str) -> Project | None:
                 if usess:
                     caller_user_id = usess.user_id
 
-    # If an invalid or revoked token was provided, reject immediately
-    if caller_token and not caller_agent_id and not caller_user_id:
-        return None
+        # If token was provided but failed verification, reject immediately
+        if not caller_agent_id and not caller_user_id:
+            return None
+    else:
+        # In non-production only, allow ambient caller ID if explicitly configured
+        caller_user_id = caller_ctx.get("user_id") or os.environ.get(
+            "CORTEX_CALLER_USER_ID"
+        )
+        caller_agent_id = caller_ctx.get("agent_id") or os.environ.get(
+            "CORTEX_CALLER_AGENT_ID"
+        )
 
     # In production, require authenticated principal (fail-closed)
     if not caller_agent_id and not caller_user_id:
@@ -186,25 +205,774 @@ async def _resolve_project(session, project_id_or_path: str) -> Project | None:
                 | (AgentProjectPermission.expires_at > now),
             )
         )
-        if not perm_res.scalars().first():
+        perm = perm_res.scalars().first()
+        if not perm:
             return None
+        if required_permission is not None:
+            if not evaluate_agent_permission(perm.scopes, required_permission):
+                return None
 
-    # If a User caller is identified, the project must be owned by that user or user is a member
-    if (
-        caller_user_id
-        and caller_user_id != "00000000-0000-0000-0000-000000000001"
-        and project.owner_user_id != caller_user_id
-    ):
-        mem_res = await session.execute(
-            select(ProjectMembership).where(
-                ProjectMembership.project_id == project.id,
-                ProjectMembership.user_id == caller_user_id,
+    # If a User caller is identified, check admin role or ownership/membership
+    if caller_user_id:
+        user = await session.get(User, caller_user_id)
+        is_admin = bool(getattr(user, "is_admin", False))
+        is_owner = project.owner_user_id == caller_user_id
+        if not is_admin and not is_owner:
+            mem_res = await session.execute(
+                select(ProjectMembership).where(
+                    ProjectMembership.project_id == project.id,
+                    ProjectMembership.user_id == caller_user_id,
+                )
             )
-        )
-        if not mem_res.scalars().first():
-            return None
+            mem = mem_res.scalars().first()
+            if not mem:
+                return None
+            role = mem.role
+        else:
+            role = ProjectRole.OWNER.value if is_owner else ProjectRole.ADMIN.value
+
+        if required_permission is not None and not is_admin:
+            if not check_project_permission(
+                role, required_permission, is_admin=is_admin, is_owner=is_owner
+            ):
+                return None
 
     return project
+
+
+# ==================== 0. CODING AGENT WORKFLOW & DISCOVERY TOOLS ====================
+
+
+@mcp_server.tool(
+    name="resolve_project",
+    description=(
+        "Resolves and binds the CortexForge project for a working directory or project ID. "
+        "Verifies agent authorization, automatically onboards/indexes new repositories when requested, "
+        "and returns current project status, Git branch/commit, and cognition summary."
+    ),
+)
+async def resolve_project(
+    project_id_or_path: str = ".",
+    auto_onboard: bool = True,
+    project_name: str | None = None,
+) -> str:
+    """Resolve and optionally onboard a project for the authenticated agent."""
+    await init_db()
+    async with session_scope() as session:
+        canonical_path = os.path.realpath(project_id_or_path)
+
+        # Check if project exists in database
+        stmt = select(Project).where(
+            (Project.id == project_id_or_path) | (Project.local_path == canonical_path)
+        )
+        res = await session.execute(stmt)
+        existing_proj = res.scalars().first()
+
+        # Attempt authenticated resolution
+        project = await _resolve_project(
+            session, project_id_or_path, required_permission=Permission.PROJECT_READ
+        )
+
+        if existing_proj and not project:
+            return (
+                f"Access Denied: The authenticated agent/user does not have permission "
+                f"to access project '{existing_proj.name}' ({existing_proj.id})."
+            )
+
+        if project:
+            # Check if project has been indexed
+            entities_count = await session.scalar(
+                select(func.count(CodeEntity.id)).where(
+                    CodeEntity.project_id == project.id
+                )
+            )
+            if entities_count == 0 and not project.last_indexed_commit:
+                source = get_repository_source(project)
+                await scanner.scan_project(
+                    session, project.id, repository_source=source
+                )
+                await session.commit()
+                entities_count = await session.scalar(
+                    select(func.count(CodeEntity.id)).where(
+                        CodeEntity.project_id == project.id
+                    )
+                )
+
+            total_mems = await session.scalar(
+                select(func.count(Memory.id)).where(Memory.project_id == project.id)
+            )
+            active_decisions = await session.scalar(
+                select(func.count(Memory.id)).where(
+                    Memory.project_id == project.id,
+                    Memory.memory_type == "DECISION",
+                    Memory.status == "ACTIVE",
+                )
+            )
+            active_failures = await session.scalar(
+                select(func.count(Memory.id)).where(
+                    Memory.project_id == project.id,
+                    Memory.memory_type == "FAILURE",
+                    Memory.status == "ACTIVE",
+                )
+            )
+
+            source = get_repository_source(project)
+            branch = source.get_current_branch()
+            head = source.get_head_commit()
+
+            return (
+                f"# Project Resolved: {project.name}\n"
+                f"- **Project ID**: `{project.id}`\n"
+                f"- **Local Path**: `{project.local_path or 'N/A'}`\n"
+                f"- **Source Type**: `{project.source_type}`\n"
+                f"- **Git Branch**: `{branch}` | **HEAD Commit**: `{head[:8] if head else 'N/A'}`\n"
+                f"- **Cognition Index**: {entities_count} code entities, {total_mems} memories "
+                f"({active_decisions} active decisions, {active_failures} known failures)\n"
+                f"- **Status**: Ready for agent queries."
+            )
+
+        # Project does not exist yet
+        if not auto_onboard:
+            return (
+                f"Project not found for '{project_id_or_path}'. "
+                f"Call resolve_project with auto_onboard=True to link and index this repository."
+            )
+
+        # First connection / onboarding workflow
+        caller_ctx = _CURRENT_MCP_CALLER.get() or {}
+        caller_token = (
+            caller_ctx.get("token")
+            or os.environ.get("CORTEX_MCP_TOKEN")
+            or os.environ.get("CORTEX_AGENT_KEY")
+        )
+        caller_user_id = None
+        caller_agent_id = None
+
+        if caller_token:
+            t_hash = hash_token(caller_token)
+            now = datetime.now(UTC)
+            cred_res = await session.execute(
+                select(AgentCredential).where(
+                    AgentCredential.key_hash == t_hash,
+                    AgentCredential.revoked_at.is_(None),
+                    (AgentCredential.expires_at.is_(None))
+                    | (AgentCredential.expires_at > now),
+                )
+            )
+            cred = cred_res.scalars().first()
+            if cred:
+                caller_agent_id = cred.agent_id
+            else:
+                agent_res = await session.execute(
+                    select(Agent).where(
+                        Agent.api_key_hash == t_hash, Agent.status == "ACTIVE"
+                    )
+                )
+                agent = agent_res.scalars().first()
+                if agent:
+                    caller_agent_id = agent.id
+                else:
+                    sess_res = await session.execute(
+                        select(UserSession).where(
+                            UserSession.session_token_hash == t_hash,
+                            UserSession.revoked_at.is_(None),
+                            UserSession.expires_at > now,
+                        )
+                    )
+                    usess = sess_res.scalars().first()
+                    if usess:
+                        caller_user_id = usess.user_id
+        else:
+            caller_user_id = caller_ctx.get("user_id") or os.environ.get(
+                "CORTEX_CALLER_USER_ID"
+            )
+            caller_agent_id = caller_ctx.get("agent_id") or os.environ.get(
+                "CORTEX_CALLER_AGENT_ID"
+            )
+
+        if not caller_agent_id and not caller_user_id:
+            if os.environ.get("CORTEX_ENV") == "production":
+                return "Error: Authentication required to onboard a new project in production."
+            caller_user_id = "00000000-0000-0000-0000-000000000001"
+
+        # Derive owner_user_id authoritatively
+        if caller_agent_id:
+            agent = await session.get(Agent, caller_agent_id)
+            if agent and agent.owner_user_id:
+                owner_user_id = agent.owner_user_id
+            else:
+                owner_user_id = caller_user_id or "00000000-0000-0000-0000-000000000001"
+        else:
+            owner_user_id = caller_user_id
+
+        # Validate local path
+        try:
+            canonical = validate_local_registration_path(project_id_or_path)
+        except Exception as e:
+            return f"Error: Invalid local repository path '{project_id_or_path}': {e}"
+
+        proj_id = str(uuid.uuid4())
+        pname = project_name or os.path.basename(canonical) or "Project"
+
+        new_project = Project(
+            id=proj_id,
+            name=pname,
+            local_path=canonical,
+            owner_user_id=owner_user_id,
+            source_type="LOCAL",
+        )
+        session.add(new_project)
+        await session.flush()
+
+        # Link agent permission if caller is an agent
+        if caller_agent_id:
+            perm = AgentProjectPermission(
+                id=str(uuid.uuid4()),
+                agent_id=caller_agent_id,
+                project_id=proj_id,
+                scopes=["*"],
+            )
+            session.add(perm)
+
+        await record_audit(
+            session=session,
+            action=AuditAction.PROJECT_CONFIGURED,
+            resource_type="project",
+            resource_id=proj_id,
+            actor=caller_agent_id or owner_user_id,
+            project_id=proj_id,
+            after={"auto_onboard": True, "local_path": canonical},
+        )
+
+        # Initial indexing scan via RepositorySource
+        source = get_repository_source(new_project)
+        scan_res = await scanner.scan_project(
+            session, new_project.id, repository_source=source
+        )
+        await session.commit()
+
+        return (
+            f"# Project Onboarded: {new_project.name}\n"
+            f"- **Project ID**: `{new_project.id}`\n"
+            f"- **Local Path**: `{canonical}`\n"
+            f"- **Owner User**: `{owner_user_id}`\n"
+            f"- **Initial Indexing**: {scan_res.files_scanned} files scanned, "
+            f"{scan_res.entities_extracted} entities indexed\n"
+            f"- **Agent Permission**: Granted full access to linking agent\n"
+            f"- **Status**: CortexForge memory and code intelligence active."
+        )
+
+
+@mcp_server.tool(
+    name="get_project_context",
+    description="Returns structured, token-budget-aware project context (architecture, active decisions, constraints, previous failures, and warnings) for a planned task.",
+)
+async def get_project_context(
+    task_text: str,
+    profile: str = "medium",
+    target_files: list[str] | None = None,
+    project_id_or_path: str = ".",
+) -> str:
+    """Build structured context block for coding agent prompt injection."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(
+            session, project_id_or_path, required_permission=Permission.PROJECT_READ
+        )
+        if not project:
+            return f"Error: Project could not be resolved or access denied for '{project_id_or_path}'."
+
+        return await context_composer.build_context(
+            session,
+            project_id=project.id,
+            task_text=task_text,
+            profile=profile,
+            target_files=target_files,
+        )
+
+
+@mcp_server.tool(
+    name="search_project_memory",
+    description="Performs multi-signal hybrid search across project memories (decisions, constraints, failures, lessons).",
+)
+async def search_project_memory(
+    query: str,
+    memory_type: str | None = None,
+    limit: int = 5,
+    project_id_or_path: str = ".",
+) -> str:
+    """Hybrid search across memories with provenance."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(
+            session, project_id_or_path, required_permission=Permission.MEMORY_READ
+        )
+        if not project:
+            return f"Error: Project could not be resolved or access denied for '{project_id_or_path}'."
+
+        results = await memory_service.search_memories(
+            session, project.id, query=query, memory_type=memory_type, limit=limit
+        )
+        if not results:
+            return f"No memories matching '{query}' found for project '{project.name}'."
+
+        lines = [f"# Project Memories matching '{query}' ({len(results)})"]
+        for item in results:
+            m = item["memory"] if isinstance(item, dict) and "memory" in item else item
+            score = (
+                item.get("combined_score", 1.0)
+                if isinstance(item, dict)
+                else getattr(item, "confidence", 1.0)
+            )
+            mtype = getattr(m, "memory_type", "MEMORY")
+            title = getattr(m, "title", "Untitled")
+            status = getattr(m, "status", "ACTIVE")
+            confidence = getattr(m, "confidence", 1.0)
+            importance = getattr(m, "importance", 1.0)
+            authority = getattr(m, "authority", "UNKNOWN")
+            source_type = getattr(m, "source_type", "LOCAL")
+            summary = getattr(m, "summary", "")
+            content = getattr(m, "content", "")
+            mid = getattr(m, "id", "")
+            version = getattr(m, "version", 1)
+            evidences = getattr(m, "evidences", [])
+
+            lines.append(f"### [{mtype}] {title} (Score: {score:.2f})")
+            lines.append(
+                f"- **Status**: `{status}` | **Confidence**: {confidence:.2f} | **Importance**: {importance:.2f}"
+            )
+            lines.append(
+                f"- **Authority**: `{authority}` | **Source**: `{source_type}`"
+            )
+            lines.append(f"**Summary**: {summary}")
+            lines.append(f"**Content**: {content}")
+            if evidences:
+                ev_str = ", ".join(
+                    f"`{getattr(e, 'file_path', '')}:{getattr(e, 'line_start', 1)}`"
+                    for e in evidences
+                )
+                lines.append(f"**Evidence Grounding**: {ev_str}")
+            lines.append(f"**ID**: `{mid}` | **Version**: v{version}")
+            lines.append("")
+        return "\n".join(lines)
+
+
+@mcp_server.tool(
+    name="get_relevant_memories",
+    description="Retrieves memories most relevant to a specific task and set of target files, ranked by hybrid relevance.",
+)
+async def get_relevant_memories(
+    task_text: str,
+    target_files: list[str] | None = None,
+    limit: int = 5,
+    project_id_or_path: str = ".",
+) -> str:
+    """Retrieve memories prioritized by hybrid scoring against the planned task."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(
+            session, project_id_or_path, required_permission=Permission.MEMORY_READ
+        )
+        if not project:
+            return f"Error: Project could not be resolved or access denied for '{project_id_or_path}'."
+
+        scored = await retrieval_engine.retrieve(
+            session,
+            project_id=project.id,
+            query=task_text,
+            target_files=target_files,
+            limit=limit,
+        )
+        memory_items = [s for s in scored if s.item_type == "memory"]
+        if not memory_items:
+            return f"No relevant memories found for task '{task_text}' in project '{project.name}'."
+
+        lines = [f"# Relevant Memories for Task ({len(memory_items)})"]
+        for item in memory_items:
+            lines.append(
+                f"### [{item.memory_type or 'MEMORY'}] {item.title} (Score: {item.score:.2f})"
+            )
+            lines.append(
+                f"- **Status**: `{item.status}` | **Layer**: `{item.layer or 'N/A'}`"
+            )
+            lines.append(f"**Summary**: {item.summary}")
+            lines.append(f"**Content**: {item.content}")
+            if item.provenance:
+                lines.append(f"**Provenance**: {item.provenance}")
+            lines.append("")
+        return "\n".join(lines)
+
+
+@mcp_server.tool(
+    name="get_architecture_context",
+    description="Returns high-level structural architecture of the project (modules, primary APIs, models, and dependencies).",
+)
+async def get_architecture_context(
+    project_id_or_path: str = ".", depth: int = 2
+) -> str:
+    """Retrieve synthesized structural architecture of the project."""
+    return await project_get_architecture(
+        project_id_or_path=project_id_or_path, depth=depth
+    )
+
+
+@mcp_server.tool(
+    name="get_decisions",
+    description="Returns all active architectural decisions (ADRs) and trade-off rationales.",
+)
+async def get_decisions(project_id_or_path: str = ".") -> str:
+    """Fetch architectural decisions."""
+    return await memory_get_decisions(project_id_or_path=project_id_or_path)
+
+
+@mcp_server.tool(
+    name="get_known_failures",
+    description="Returns previous bug post-mortems, failed attempts, and anti-patterns to prevent repeating past mistakes.",
+)
+async def get_known_failures(project_id_or_path: str = ".") -> str:
+    """Fetch known failure post-mortems."""
+    return await memory_get_failures(project_id_or_path=project_id_or_path)
+
+
+@mcp_server.tool(
+    name="search_code_knowledge",
+    description=(
+        "Searches indexed AST symbols (classes, functions, methods, modules) without dumping full file contents. "
+        "Returns qualified names, signatures, file paths, line ranges, and docstrings."
+    ),
+)
+async def search_code_knowledge(
+    query: str,
+    entity_type: str | None = None,
+    limit: int = 10,
+    project_id_or_path: str = ".",
+) -> str:
+    """Search code entity index without exposing raw repository contents."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(
+            session, project_id_or_path, required_permission=Permission.GRAPH_READ
+        )
+        if not project:
+            return f"Error: Project could not be resolved or access denied for '{project_id_or_path}'."
+
+        stmt = select(CodeEntity).where(CodeEntity.project_id == project.id)
+        if entity_type:
+            stmt = stmt.where(CodeEntity.entity_type == entity_type.upper())
+        q = f"%{query}%"
+        stmt = stmt.where(
+            (CodeEntity.name.ilike(q))
+            | (CodeEntity.qualified_name.ilike(q))
+            | (CodeEntity.signature.ilike(q))
+        ).limit(limit)
+
+        res = await session.execute(stmt)
+        entities = res.scalars().all()
+        if not entities:
+            return f"No code entities matching '{query}' found in project '{project.name}'."
+
+        lines = [f"# Code Intelligence Search: '{query}' ({len(entities)} symbols)"]
+        for e in entities:
+            lines.append(f"### `{e.qualified_name}` ({e.entity_type})")
+            lines.append(
+                f"- **File**: `{e.file_path}` (Lines {e.start_line}-{e.end_line})"
+            )
+            lines.append(
+                f"- **Language**: {e.language} | **Hash**: `{e.content_hash[:12]}...`"
+            )
+            if e.signature:
+                lines.append(f"- **Signature**: `{e.signature}`")
+            doc = (
+                (e.entity_metadata or {}).get("docstring")
+                if hasattr(e, "entity_metadata")
+                else None
+            )
+            if doc:
+                lines.append(f"- **Docstring**: {str(doc)[:150]}...")
+            lines.append("")
+        return "\n".join(lines)
+
+
+@mcp_server.tool(
+    name="get_symbol_context",
+    description="Inspects detailed AST symbol definition, signature, location, dependencies, callers, and linked constraints.",
+)
+async def get_symbol_context(qualified_name: str, project_id_or_path: str = ".") -> str:
+    """Retrieve detailed AST component definition and graph connections."""
+    return await project_get_component(
+        qualified_name=qualified_name, project_id_or_path=project_id_or_path
+    )
+
+
+@mcp_server.tool(
+    name="get_related_components",
+    description="Returns both upstream callers (blast radius) and downstream dependencies for an entity or file.",
+)
+async def get_related_components(
+    entity_name: str, project_id_or_path: str = ".", depth: int = 2
+) -> str:
+    """Get complete relational neighborhood (callers + dependencies) for an entity."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(
+            session, project_id_or_path, required_permission=Permission.GRAPH_READ
+        )
+        if not project:
+            return f"Error: Project could not be resolved or access denied for '{project_id_or_path}'."
+
+        deps = await graph_service.get_dependencies(
+            session, project.id, entity_name, depth=depth
+        )
+        callers = await graph_service.get_dependents(
+            session, project.id, entity_name, depth=depth
+        )
+
+        lines = [f"# Related Components for '{entity_name}'"]
+        lines.append(f"## Downstream Dependencies ({len(deps)})")
+        for d in deps[:10]:
+            lines.append(
+                f"- [Depth {d['depth']}] `{d['relationship']}` -> **{d['name']}** ({d['type']} in `{d['file']}`)"
+            )
+
+        lines.append("")
+        lines.append(f"## Upstream Callers / Blast Radius ({len(callers)})")
+        for c in callers[:10]:
+            lines.append(
+                f"- [Depth {c['depth']}] **{c['name']}** ({c['type']} in `{c['file']}`) -> `{c['relationship']}`"
+            )
+        return "\n".join(lines)
+
+
+@mcp_server.tool(
+    name="get_dependency_context",
+    description="Returns downstream dependencies and imports of an entity up to depth N.",
+)
+async def get_dependency_context(
+    entity_name: str, project_id_or_path: str = ".", depth: int = 2
+) -> str:
+    """List downstream dependencies for an entity."""
+    return await graph_get_dependencies(
+        entity_name=entity_name, project_id_or_path=project_id_or_path, depth=depth
+    )
+
+
+@mcp_server.tool(
+    name="get_git_context",
+    description="Returns current Git context (HEAD commit, active branch, remote, and unindexed modified files).",
+)
+async def get_git_context(project_id_or_path: str = ".") -> str:
+    """Returns real Git state without relying solely on equality of commits."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(
+            session, project_id_or_path, required_permission=Permission.PROJECT_READ
+        )
+        if not project:
+            return f"Error: Project could not be resolved or access denied for '{project_id_or_path}'."
+
+        source = get_repository_source(project)
+        branch = source.get_current_branch()
+        head = source.get_head_commit()
+        modified = (
+            source.get_modified_files(project.last_indexed_commit)
+            if project.last_indexed_commit
+            else []
+        )
+
+        lines = [
+            f"# Git Context for {project.name}",
+            f"- **Active Branch**: `{branch}`",
+            f"- **HEAD Commit**: `{head or 'N/A'}`",
+            f"- **Last Indexed Commit**: `{project.last_indexed_commit or 'Never'}`",
+            f"- **Source Type**: `{project.source_type}`",
+            f"- **Repository URL**: `{project.repository_url or project.clone_url or 'Local'}`",
+            "",
+            f"## Unindexed / Changed Files Since Last Scan ({len(modified)})",
+        ]
+        if modified:
+            for f in modified[:15]:
+                p = f.file_path if hasattr(f, "file_path") else str(f)
+                lines.append(f"- `{p}`")
+            if len(modified) > 15:
+                lines.append(f"- ... and {len(modified) - 15} more")
+        else:
+            lines.append("- Working tree is fully synchronized with CortexForge index.")
+        return "\n".join(lines)
+
+
+@mcp_server.tool(
+    name="record_memory",
+    description="Records project knowledge from an AI agent. Enforces epistemic authority: agent observations are stored as AGENT_OBSERVED and cannot self-assert USER_CONFIRMED authority.",
+)
+async def record_memory(
+    title: str,
+    content: str,
+    summary: str | None = None,
+    memory_type: str = "LESSON",
+    evidence_file: str | None = None,
+    evidence_line_start: int | None = None,
+    evidence_line_end: int | None = None,
+    project_id_or_path: str = ".",
+) -> str:
+    """Store agent observation with enforced non-inflated authority."""
+    return await memory_create(
+        title=title,
+        content=content,
+        summary=summary or content[:150],
+        memory_type=memory_type,
+        evidence_file=evidence_file,
+        evidence_line_start=evidence_line_start,
+        evidence_line_end=evidence_line_end,
+        project_id_or_path=project_id_or_path,
+        approval_token=None,
+    )
+
+
+@mcp_server.tool(
+    name="record_decision",
+    description="Records an architectural decision made during coding. Stored with AGENT_OBSERVED authority for verification.",
+)
+async def record_decision(
+    title: str,
+    rationale: str,
+    component: str | None = None,
+    project_id_or_path: str = ".",
+) -> str:
+    """Record an architectural decision."""
+    return await task_record_decision(
+        title=title,
+        rationale=rationale,
+        component=component,
+        project_id_or_path=project_id_or_path,
+    )
+
+
+@mcp_server.tool(
+    name="record_failure",
+    description="Records a structured failure episode with error details, attempted fix, and affected component to prevent future regressions.",
+)
+async def record_failure(
+    title: str,
+    error_description: str,
+    attempted_fix: str,
+    component: str | None = None,
+    stack_trace: str | None = None,
+    project_id_or_path: str = ".",
+) -> str:
+    """Record a failure episode."""
+    return await task_record_failure(
+        title=title,
+        error_description=error_description,
+        attempted_fix=attempted_fix,
+        component=component,
+        stack_trace=stack_trace,
+        project_id_or_path=project_id_or_path,
+    )
+
+
+@mcp_server.tool(
+    name="record_lesson",
+    description="Records a durable engineering lesson learned or convention.",
+)
+async def record_lesson(
+    title: str,
+    lesson: str,
+    context: str | None = None,
+    evidence_file: str | None = None,
+    project_id_or_path: str = ".",
+) -> str:
+    """Record a durable engineering lesson."""
+    content = f"{lesson}\n\nContext: {context}" if context else lesson
+    return await record_memory(
+        title=title,
+        content=content,
+        summary=lesson[:150],
+        memory_type="LESSON",
+        evidence_file=evidence_file,
+        project_id_or_path=project_id_or_path,
+    )
+
+
+@mcp_server.tool(
+    name="trigger_project_scan",
+    description="Triggers AST repository scanning and code-intelligence indexing via the appropriate RepositorySource adapter (local or remote).",
+)
+async def trigger_project_scan(
+    project_id_or_path: str = ".", force_full: bool = False
+) -> str:
+    """Scan and index project source code."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(
+            session, project_id_or_path, required_permission=Permission.PROJECT_SCAN
+        )
+        if not project:
+            return f"Error: Project could not be resolved or access denied for '{project_id_or_path}'."
+
+        source = get_repository_source(project)
+        res = await scanner.scan_project(
+            session, project.id, repository_source=source, force_full=force_full
+        )
+        await session.commit()
+        head_sha = source.get_head_commit()
+        return (
+            f"Project scan complete for '{project.name}':\n"
+            f"- Files scanned: {res.files_scanned}\n"
+            f"- Entities extracted: {res.entities_extracted}\n"
+            f"- Relationships identified: {res.relationships_extracted}\n"
+            f"- Commit: {head_sha or 'N/A'}"
+        )
+
+
+@mcp_server.tool(
+    name="get_project_status",
+    description="Returns comprehensive status of project cognition, entity counts, memory counts, indexing state, and health.",
+)
+async def get_project_status(project_id_or_path: str = ".") -> str:
+    """Report project cognition and indexing status."""
+    await init_db()
+    async with session_scope() as session:
+        project = await _resolve_project(
+            session, project_id_or_path, required_permission=Permission.PROJECT_READ
+        )
+        if not project:
+            return f"Error: Project could not be resolved or access denied for '{project_id_or_path}'."
+
+        source = get_repository_source(project)
+        branch = source.get_current_branch()
+        head = source.get_head_commit()
+
+        total_mems = await session.scalar(
+            select(func.count(Memory.id)).where(Memory.project_id == project.id)
+        )
+        total_entities = await session.scalar(
+            select(func.count(CodeEntity.id)).where(CodeEntity.project_id == project.id)
+        )
+        active_decisions = await session.scalar(
+            select(func.count(Memory.id)).where(
+                Memory.project_id == project.id,
+                Memory.memory_type == "DECISION",
+                Memory.status == "ACTIVE",
+            )
+        )
+        active_failures = await session.scalar(
+            select(func.count(Memory.id)).where(
+                Memory.project_id == project.id,
+                Memory.memory_type == "FAILURE",
+                Memory.status == "ACTIVE",
+            )
+        )
+
+        return (
+            f"# Project Status: {project.name}\n"
+            f"- **Project ID**: `{project.id}`\n"
+            f"- **Source**: `{project.source_type}` (`{project.local_path or project.repository_url}`)\n"
+            f"- **Git**: Branch `{branch}`, HEAD `{head[:8] if head else 'N/A'}`\n"
+            f"- **Last Scanned**: `{project.updated_at.strftime('%Y-%m-%d %H:%M') if project.updated_at else 'Never'}` (Commit: `{project.last_indexed_commit or 'N/A'}`)\n"
+            f"- **Code Entities**: {total_entities}\n"
+            f"- **Memories**: {total_mems} ({active_decisions} active decisions, {active_failures} active failures)\n"
+            f"- **Cognition Status**: READY"
+        )
 
 
 # ==================== 1. PROJECT ARCHITECTURE & CONTEXT TOOLS ====================
@@ -1015,18 +1783,35 @@ async def task_start(
     model_version: str | None = None,
 ) -> str:
     """Start task and generate project cognitive context packet."""
+    caller_ctx = _CURRENT_MCP_CALLER.get() or {}
+    caller_agent_id = caller_ctx.get("agent_id") or os.environ.get(
+        "CORTEX_CALLER_AGENT_ID"
+    )
+    caller_user_id = caller_ctx.get("user_id")
+
+    if caller_agent_id:
+        if agent_id and agent_id != "generic_agent" and agent_id != caller_agent_id:
+            return f"Error: Authenticated agent cannot impersonate different agent '{agent_id}'."
+        effective_agent_id = caller_agent_id
+    else:
+        effective_agent_id = agent_id
+
     await init_db()
     async with session_scope() as session:
+        if (
+            effective_agent_id
+            and effective_agent_id != "generic_agent"
+            and not caller_agent_id
+        ):
+            ag = await session.get(Agent, effective_agent_id)
+            if not ag or ag.status != "ACTIVE":
+                return f"Error: Agent '{effective_agent_id}' is invalid or inactive."
+            if caller_user_id and ag.owner_user_id != caller_user_id:
+                return f"Error: Agent '{effective_agent_id}' does not belong to authenticated caller."
+
         project = await _resolve_project(session, project_id_or_path)
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
-
-        caller_ctx = _CURRENT_MCP_CALLER.get() or {}
-        effective_agent_id = (
-            caller_ctx.get("agent_id")
-            or os.environ.get("CORTEX_CALLER_AGENT_ID")
-            or agent_id
-        )
 
         task, context = await orchestrator.start_task(
             session=session,

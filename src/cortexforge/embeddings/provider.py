@@ -240,6 +240,19 @@ def get_embedding_provider(provider_type: str | None = None) -> EmbeddingProvide
     if ptype == "openai":
         return OpenAIEmbeddingProvider()
     if ptype in ("local", "fast", "deterministic", "hash"):
+        env = (
+            os.environ.get("CORTEX_ENV", os.environ.get("ENVIRONMENT", "development"))
+            .strip()
+            .lower()
+        )
+        if env in ("production", "prod", "staging") and not os.environ.get(
+            "PYTEST_CURRENT_TEST"
+        ):
+            raise RuntimeError(
+                f"Embedding provider '{ptype}' was requested but the environment is '{env}'. "
+                "Deterministic hash embeddings produce token overlap vectors rather than real semantic "
+                "embeddings and must not be used in production or staging."
+            )
         return FastDeterministicEmbeddingProvider()
     raise ValueError(
         f"Unknown embedding provider '{ptype}'. Set one of "

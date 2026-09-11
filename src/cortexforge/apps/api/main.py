@@ -26,6 +26,7 @@ from cortexforge.apps.api.routes import (
 )
 from cortexforge.core.db import init_db
 from cortexforge.core.schemas import HealthResponse
+from cortexforge.security.auth import Principal, get_current_principal
 
 
 @asynccontextmanager
@@ -249,22 +250,23 @@ async def get_traces(
     trace_id: str | None = None,
     project_id: str | None = None,
     limit: int = 50,
-    principal: Any = Depends(lambda: None),
+    principal: Principal = Depends(get_current_principal),
 ):
     """Retrieve collected distributed trace spans with correlation and redacted attributes."""
     from cortexforge.observability.tracing import TraceManager
-    from cortexforge.security.auth import Principal
 
-    caller_principal = principal
-    if (
-        project_id
-        and isinstance(caller_principal, Principal)
-        and not caller_principal.can_access_project(project_id)
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Access denied to traces for project '{project_id}'.",
-        )
+    if project_id:
+        if not principal.can_access_project(project_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Access denied to traces for project '{project_id}'.",
+            )
+    else:
+        if not principal.is_admin:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Global traces access requires administrator privileges. Provide a project_id.",
+            )
 
     spans = TraceManager.get_instance().get_spans(
         trace_id=trace_id, project_id=project_id, limit=limit

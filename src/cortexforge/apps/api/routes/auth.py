@@ -81,6 +81,26 @@ def _get_client_ip(request: Request) -> str:
     return "127.0.0.1"
 
 
+def _is_server_debug_mode_allowed() -> bool:
+    """Return True only if explicitly running in a test/dev environment with server-side test mode enabled.
+
+    In production, prod, or staging, test/debug tokens are NEVER exposed regardless of any client headers.
+    Client headers alone can NEVER enable test/debug behavior.
+    """
+    env = (
+        os.environ.get("CORTEX_ENV", os.environ.get("ENVIRONMENT", "development"))
+        .strip()
+        .lower()
+    )
+    if env in ("production", "prod", "staging"):
+        return False
+    return (
+        os.environ.get("CORTEX_TEST_MODE") == "true"
+        or os.environ.get("ENVIRONMENT") == "test"
+        or bool(os.environ.get("PYTEST_CURRENT_TEST"))
+    )
+
+
 def _set_session_cookie(response: Response, raw_token: str, request: Request) -> None:
     """Set secure, HttpOnly session cookie."""
     is_secure = (
@@ -432,12 +452,7 @@ async def request_email_otp(
     session.add(challenge)
     await session.commit()
 
-    # In test mode, expose OTP in debug_otp for test harness
-    is_test_mode = (
-        os.environ.get("CORTEX_TEST_MODE") == "true"
-        or os.environ.get("ENVIRONMENT") == "test"
-        or request.headers.get("x-cortex-test-mode") == "true"
-    )
+    is_test_mode = _is_server_debug_mode_allowed()
 
     return OTPRequestResponse(
         message="If this email is registered or valid, a 6-digit verification code has been sent.",
@@ -1233,11 +1248,7 @@ async def request_password_reset(
             actor_type="USER",
         )
 
-    is_test_mode = (
-        os.environ.get("CORTEX_TEST_MODE") == "true"
-        or os.environ.get("ENVIRONMENT") == "test"
-        or request.headers.get("x-cortex-test-mode") == "true"
-    )
+    is_test_mode = _is_server_debug_mode_allowed()
 
     return PasswordResetRequestResponse(
         message="If this email is registered, password reset instructions have been sent.",

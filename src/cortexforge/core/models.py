@@ -1,5 +1,4 @@
-"""SQLAlchemy 2.0 Declarative Models for CortexForge."""
-
+import os
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -16,6 +15,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -59,6 +59,9 @@ class User(Base):
     )
     last_login_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    is_admin: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, server_default=text("false")
     )
 
     # Relationships
@@ -410,6 +413,18 @@ class ProjectMembership(Base):
     )
 
 
+def _default_project_owner() -> str | None:
+    """Provide default owner ID only in non-production/test environments for fixture compatibility."""
+    env = (
+        (os.environ.get("CORTEX_ENV", os.environ.get("ENVIRONMENT", "development")))
+        .strip()
+        .lower()
+    )
+    if env in ("production", "prod", "staging"):
+        return None
+    return "00000000-0000-0000-0000-000000000001"
+
+
 class Project(Base):
     __tablename__ = "projects"
 
@@ -421,7 +436,7 @@ class Project(Base):
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
-        default="00000000-0000-0000-0000-000000000001",
+        default=_default_project_owner,
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     source_type: Mapped[str] = mapped_column(

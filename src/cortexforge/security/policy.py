@@ -128,6 +128,20 @@ AGENT_SCOPE_TO_PERMISSIONS: dict[str, set[Permission]] = {
         Permission.JOB_READ,
         Permission.JOB_CREATE,
     },
+    "project:read": {Permission.PROJECT_READ},
+    "project:scan": {Permission.PROJECT_SCAN, Permission.JOB_CREATE},
+    "context:read": {
+        Permission.PROJECT_READ,
+        Permission.MEMORY_READ,
+        Permission.ARCHITECTURE_READ,
+        Permission.GRAPH_READ,
+    },
+    "code:read": {Permission.PROJECT_READ, Permission.GRAPH_READ},
+    "cognition:write": {
+        Permission.MEMORY_CREATE,
+        Permission.MEMORY_UPDATE,
+        Permission.ARCHITECTURE_WRITE,
+    },
     "memory:read": {Permission.MEMORY_READ},
     "memory:write": {
         Permission.MEMORY_READ,
@@ -137,6 +151,8 @@ AGENT_SCOPE_TO_PERMISSIONS: dict[str, set[Permission]] = {
     "memory:verify": {Permission.MEMORY_VERIFY},
     "graph:read": {Permission.GRAPH_READ},
     "scan": {Permission.PROJECT_SCAN, Permission.JOB_CREATE},
+    "scan:read": {Permission.PROJECT_READ, Permission.JOB_READ},
+    "scan:trigger": {Permission.PROJECT_SCAN, Permission.JOB_CREATE},
     "snapshots:read": {Permission.SNAPSHOT_READ},
     "snapshots:create": {Permission.SNAPSHOT_CREATE},
 }

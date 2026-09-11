@@ -37,6 +37,17 @@ from cortexforge.security.policy import (
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 bearer_scheme = HTTPBearer(auto_error=False)
 
+AUTH_REQUIRED_ENVIRONMENTS = frozenset({"production", "prod", "staging"})
+
+
+def is_production_environment() -> bool:
+    env = (
+        os.environ.get("CORTEX_ENV", os.environ.get("ENVIRONMENT", "development"))
+        .strip()
+        .lower()
+    )
+    return env in AUTH_REQUIRED_ENVIRONMENTS
+
 
 @dataclass
 class Principal:
@@ -139,10 +150,20 @@ async def get_current_principal(
         token = api_key.strip()
 
     expected_admin_key = get_configured_api_key()
-    strict_auth = os.environ.get("CORTEX_AUTH_STRICT", "").strip().lower() in (
-        "true",
-        "1",
+    is_prod = is_production_environment()
+    strict_auth = is_prod or (
+        os.environ.get("CORTEX_AUTH_STRICT", "").strip().lower()
+        in (
+            "true",
+            "1",
+        )
     )
+
+    # In production-like environments or when strict auth is enabled,
+    # client identity headers MUST NOT be accepted for privilege or identity selection (§28).
+    if is_prod or strict_auth:
+        user_header = None
+        allowed_projects_header = None
 
     # 1. Master Admin API key
     if token and expected_admin_key and token == expected_admin_key:
@@ -258,17 +279,16 @@ async def get_current_principal(
                         proj_roles[m.project_id] = m.role
                         owned_ids.add(m.project_id)
 
+                    is_admin_user = bool(getattr(user, "is_admin", False))
                     return Principal(
                         principal_id=user.id,
                         actor_type="USER",
                         user_id=user.id,
                         email=user.email,
-                        role="admin"
-                        if user.email == "admin@cortexforge.local"
-                        else "user",
+                        role="admin" if is_admin_user else "user",
                         allowed_project_ids=owned_ids,
                         project_roles=proj_roles,
-                        is_admin=(user.email == "admin@cortexforge.local"),
+                        is_admin=is_admin_user,
                     )
 
             # A credential token was explicitly supplied but failed validation -> Fail Closed (§28)
@@ -277,19 +297,30 @@ async def get_current_principal(
                 detail="Invalid, expired, or revoked authentication credentials.",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-    if strict_auth:
+    if strict_auth or is_prod:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing or invalid authentication credentials.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # 4. Development/Test mode fallback
+    # 4. Development/Test mode fallback (strictly restricted to non-production environments)
+    if is_prod:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required in production environment.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     allowed = set()
     if allowed_projects_header:
         allowed = {p.strip() for p in allowed_projects_header.split(",") if p.strip()}
 
-    is_adm = (user_header != "restricted_user") and not bool(allowed)
+    is_adm = (
+        (user_header != "restricted_user")
+        and not bool(allowed)
+        and (user_header != "00000000-0000-0000-0000-000000000001")
+    )
     default_uid = (
         user_header
         if user_header and user_header != "restricted_user"
@@ -303,7 +334,11 @@ async def get_current_principal(
         email="developer@cortexforge.local",
         role="admin" if is_adm else "user",
         allowed_project_ids=allowed if allowed else {"*"} if is_adm else set(),
-        project_roles={p: "OWNER" for p in allowed} if allowed else {"*": "OWNER"},
+        project_roles={p: "OWNER" for p in allowed}
+        if allowed
+        else {"*": "OWNER"}
+        if is_adm
+        else {},
         is_admin=is_adm,
     )
 

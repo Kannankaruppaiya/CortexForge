@@ -185,6 +185,7 @@ class DirectoryBrowseResponse(BaseModel):
     directories: list[DirectoryEntry]
     is_windows: bool = False
     is_drive_root: bool = False
+    error: str | None = None
 
 
 class GitHubRepoItem(BaseModel):
