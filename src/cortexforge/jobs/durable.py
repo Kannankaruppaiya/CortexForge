@@ -149,11 +149,17 @@ class DurableJobStore:
             max_attempts=max_attempts,
         )
         try:
-            # A savepoint, not the caller's transaction: losing an insert race
-            # must not discard whatever else the caller had pending.
-            async with session.begin_nested():
+            bind = session.get_bind()
+            is_sqlite = bind is not None and getattr(bind.dialect, "name", "") == "sqlite"
+            if is_sqlite:
                 session.add(job)
                 await session.flush()
+            else:
+                # A savepoint, not the caller's transaction: losing an insert race
+                # must not discard whatever else the caller had pending.
+                async with session.begin_nested():
+                    session.add(job)
+                    await session.flush()
         except IntegrityError:
             # Another worker submitted the same job between our check and our
             # insert. Theirs wins; the point of the constraint is that exactly

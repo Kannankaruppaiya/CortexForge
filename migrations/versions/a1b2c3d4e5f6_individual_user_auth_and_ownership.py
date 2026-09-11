@@ -235,16 +235,20 @@ def upgrade() -> None:
         # Default user for existing data backfill if any projects exist
         default_user_id = "00000000-0000-0000-0000-000000000001"
         now = datetime.now(UTC)
-        conn.execute(
-            sa.text(
-                """
-                INSERT INTO users (id, email, display_name, status, created_at, updated_at)
-                SELECT :uid, 'system@cortexforge.local', 'Default System User', 'ACTIVE', :created, :created
-                WHERE NOT EXISTS (SELECT 1 FROM users WHERE id = :uid)
-                """
-            ),
-            {"uid": default_user_id, "created": now},
-        )
+        existing_user = conn.execute(
+            sa.text("SELECT 1 FROM users WHERE id = :uid"),
+            {"uid": default_user_id},
+        ).scalar()
+        if not existing_user:
+            conn.execute(
+                sa.text(
+                    """
+                    INSERT INTO users (id, email, display_name, status, created_at, updated_at)
+                    VALUES (:uid, 'system@cortexforge.local', 'Default System User', 'ACTIVE', :created, :created)
+                    """
+                ),
+                {"uid": default_user_id, "created": now},
+            )
 
         with op.batch_alter_table("projects") as batch_op:
             batch_op.add_column(

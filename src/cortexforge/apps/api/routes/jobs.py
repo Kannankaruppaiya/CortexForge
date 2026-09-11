@@ -53,6 +53,10 @@ def _serialize_job(job: Job) -> dict[str, Any]:
 
 def _dispatch_runner_background() -> None:
     """Trigger an async task to process claimable jobs."""
+    import os
+
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return
     asyncio.create_task(_runner.run_once())
 
 

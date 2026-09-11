@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
 
 from cortexforge.core.models import Base, Job
 from cortexforge.jobs.cache import GenerationCache
@@ -29,7 +30,12 @@ from cortexforge.jobs.runner import JobRunner
 @pytest.fixture
 async def async_db():
     """Create a temporary in-memory database with all models."""
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        echo=False,
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
@@ -72,6 +78,7 @@ async def test_concurrent_claiming_compare_and_swap(async_db):
 
     async with async_db() as session:
         job, _ = await store.submit(session, job_type="INDEX", project_id="proj_concur")
+        await session.commit()
 
     async with async_db() as session_w1, async_db() as session_w2:
         # Worker 1 claims

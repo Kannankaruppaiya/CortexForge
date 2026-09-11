@@ -651,9 +651,21 @@ async def test_browse_directories_reports_platform_and_drives(test_session):
 @pytest.mark.asyncio
 async def test_api_pick_directory_reports_gui_availability(test_session, monkeypatch, local_repo_tmp):
     """POST /projects/pick-directory returns structured result with gui_available flag."""
+    import tkinter
     import tkinter.filedialog
 
-    # Mock askdirectory returning a selected directory without popping GUI dialog
+    class MockTk:
+        def withdraw(self):
+            pass
+
+        def attributes(self, *args, **kwargs):
+            pass
+
+        def destroy(self):
+            pass
+
+    # Mock Tk and askdirectory so headless CI runners without $DISPLAY don't fail
+    monkeypatch.setattr(tkinter, "Tk", lambda: MockTk())
     monkeypatch.setattr(tkinter.filedialog, "askdirectory", lambda **kwargs: local_repo_tmp)
 
     transport = ASGITransport(app=app)
@@ -682,4 +694,30 @@ async def test_api_pick_directory_reports_gui_availability(test_session, monkeyp
         assert data_cancel["gui_available"] is True
         assert data_cancel["canceled"] is True
         assert data_cancel["path"] is None
+
+
+@pytest.mark.asyncio
+async def test_api_pick_directory_headless_fallback(test_session, monkeypatch):
+    """POST /projects/pick-directory gracefully reports gui_available=False on headless systems."""
+    import tkinter
+
+    def _raise_headless():
+        raise RuntimeError("no display name and no $DISPLAY environment variable")
+
+    monkeypatch.setattr(tkinter, "Tk", _raise_headless)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        _user, token = await create_test_authenticated_user(
+            client, f"headless_{uuid.uuid4().hex[:8]}@example.com", "HeadlessUser"
+        )
+        resp = await client.post(
+            "/api/v1/projects/pick-directory",
+            headers={"Cookie": f"cortex_session={token}"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["gui_available"] is False
+        assert data["path"] is None
+        assert "Native folder dialog unavailable" in data["error"]
 
