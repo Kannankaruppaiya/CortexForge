@@ -116,6 +116,8 @@ class AgentWorkflowOrchestrator:
         session.add(
             AgentEvent(
                 task_id=task.id,
+                project_id=project_id,
+                agent_id=agent_id,
                 event_type=ev_start.event_type.value,
                 source=ev_start.source,
                 payload=ev_start.payload,
@@ -168,6 +170,8 @@ class AgentWorkflowOrchestrator:
             session.add(
                 AgentEvent(
                     task_id=task.id,
+                    project_id=project_id,
+                    agent_id=agent_id,
                     event_type=CanonicalEventType.MEMORY_RETRIEVED.value,
                     source=agent_source,
                     payload={
@@ -189,6 +193,8 @@ class AgentWorkflowOrchestrator:
         session.add(
             AgentEvent(
                 task_id=task.id,
+                project_id=project_id,
+                agent_id=agent_id,
                 event_type=ev_ctx.event_type.value,
                 source=ev_ctx.source,
                 payload=ev_ctx.payload,
@@ -225,6 +231,8 @@ class AgentWorkflowOrchestrator:
         )
         event_record = AgentEvent(
             task_id=task_id,
+            project_id=task.project_id if task else None,
+            agent_id=task.agent_id if task else None,
             event_type=ev.event_type.value,
             source=ev.source,
             payload=ev.payload,
@@ -258,6 +266,8 @@ class AgentWorkflowOrchestrator:
         session.add(
             AgentEvent(
                 task_id=task_id,
+                project_id=project_id,
+                agent_id=task.agent_id if task else None,
                 event_type=ev.event_type.value,
                 source=ev.source,
                 payload=ev.payload,
@@ -320,6 +330,8 @@ class AgentWorkflowOrchestrator:
         session.add(
             AgentEvent(
                 task_id=task_id,
+                project_id=task.project_id if task else None,
+                agent_id=task.agent_id if task else None,
                 event_type=ev.event_type.value,
                 source=ev.source,
                 payload=ev.payload,
@@ -762,6 +774,8 @@ class AgentWorkflowOrchestrator:
         session.add(
             AgentEvent(
                 task_id=task_id,
+                project_id=task.project_id if task else None,
+                agent_id=task.agent_id if task else None,
                 event_type=ev.event_type.value,
                 source=ev.source,
                 payload=ev.payload,

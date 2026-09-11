@@ -53,6 +53,7 @@ all = [
 
 [project.scripts]
 cortex = "cortexforge.apps.cli.main:cli"
+cortex-worker = "cortexforge.jobs.worker:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

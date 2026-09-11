@@ -17,6 +17,7 @@ from cortexforge.security.auth import (
     RequireProjectAccess,
     get_current_principal,
 )
+from cortexforge.security.policy import Permission
 
 router = APIRouter(tags=["memories"])
 memory_service = MemoryService()
@@ -46,13 +47,37 @@ async def create_memory(
     project_id: str,
     payload: MemoryCreate,
     session: AsyncSession = Depends(get_db_session),
-    principal: Principal = Depends(RequireProjectAccess("project_id")),
+    principal: Principal = Depends(
+        RequireProjectAccess("project_id", permission=Permission.MEMORY_CREATE)
+    ),
 ) -> MemoryRead:
-    """Create a durable, evidence-grounded project memory."""
-    project = await session.get(Project, project_id)
-    if not project:
+    # Epistemic Security (§18, §4): Non-human actors cannot self-assert human authority or source types
+    if payload.authority:
+        auth_norm = payload.authority.strip().upper()
+        if (
+            auth_norm in ("USER_CONFIRMED", "REVIEW_CONFIRMED")
+            and principal.actor_type != "USER"
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Non-human principals cannot self-assert human-confirmed epistemic authority.",
+            )
+    claimed_source = (payload.source_type or "").strip().lower()
+    if (
+        claimed_source
+        in (
+            "user",
+            "human",
+            "user_confirmed",
+            "review",
+            "review_confirmed",
+            "approved",
+        )
+        and principal.actor_type != "USER"
+    ):
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Non-human principals cannot assert human-confirmed source types.",
         )
 
     memory = await memory_service.create_memory(session, project_id, payload)
@@ -68,7 +93,9 @@ async def list_memories(
     limit: int = 50,
     offset: int = 0,
     session: AsyncSession = Depends(get_db_session),
-    principal: Principal = Depends(RequireProjectAccess("project_id")),
+    principal: Principal = Depends(
+        RequireProjectAccess("project_id", permission=Permission.MEMORY_READ)
+    ),
 ) -> list[MemoryRead]:
     """List project memories with multi-attribute filtering."""
     project = await session.get(Project, project_id)
@@ -101,7 +128,7 @@ async def get_memory(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found"
         )
-    if not principal.can_access_project(memory.project_id):
+    if not principal.has_permission(memory.project_id, Permission.MEMORY_READ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Access denied to project '{memory.project_id}' for this memory.",
@@ -122,10 +149,10 @@ async def update_memory(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found"
         )
-    if not principal.can_access_project(target_mem.project_id):
+    if not principal.has_permission(target_mem.project_id, Permission.MEMORY_UPDATE):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Access denied to project '{target_mem.project_id}'.",
+            detail=f"Access denied to update memory in project '{target_mem.project_id}'.",
         )
 
     try:
@@ -160,10 +187,10 @@ async def verify_memory(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found"
         )
-    if not principal.can_access_project(memory.project_id):
+    if not principal.has_permission(memory.project_id, Permission.MEMORY_VERIFY):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Access denied to project '{memory.project_id}'.",
+            detail=f"Access denied to verify memory in project '{memory.project_id}'.",
         )
 
     project = await session.get(Project, memory.project_id)
@@ -196,10 +223,10 @@ async def deprecate_memory(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found"
         )
-    if not principal.can_access_project(target_mem.project_id):
+    if not principal.has_permission(target_mem.project_id, Permission.MEMORY_UPDATE):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Access denied to project '{target_mem.project_id}'.",
+            detail=f"Access denied to deprecate memory in project '{target_mem.project_id}'.",
         )
 
     deprecated = await memory_service.deprecate_memory(
@@ -219,7 +246,9 @@ async def deprecate_memory(
 async def consolidate_memories(
     project_id: str,
     session: AsyncSession = Depends(get_db_session),
-    principal: Principal = Depends(RequireProjectAccess("project_id")),
+    principal: Principal = Depends(
+        RequireProjectAccess("project_id", permission=Permission.MEMORY_UPDATE)
+    ),
 ) -> dict[str, Any]:
     """Trigger memory consolidation loop."""
     project = await session.get(Project, project_id)

@@ -372,9 +372,10 @@ class MemoryService:
         title: str | None = None,
         summary: str | None = None,
         expected_version: int | None = None,
+        project_id: str | None = None,
     ) -> Memory | None:
         """Mutate memory content and increment version audit trail with optimistic locking."""
-        memory = await self.get_memory(session, memory_id)
+        memory = await self.get_memory(session, memory_id, project_id=project_id)
         if not memory:
             return None
 
@@ -409,6 +410,7 @@ class MemoryService:
 
         version_record = MemoryVersion(
             memory_id=memory.id,
+            project_id=memory.project_id,
             version=memory.version,
             previous_version=prev_version,
             old_state=prev_state,

@@ -23,6 +23,30 @@ services:
       redis:
         condition: service_healthy
 
+  cortexforge-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cortexforge-worker
+    restart: unless-stopped
+    command: ["python", "-m", "cortexforge.jobs.worker"]
+    environment:
+      - CORTEX_DB_URL=postgresql+asyncpg://cortex:cortex_secret@postgres:5432/cortexforge
+      - CORTEX_EMBEDDINGS_PROVIDER=local
+      - CORTEX_LLM_PROVIDER=mock
+      - CORTEX_TELEMETRY=disabled
+      - REDIS_URL=redis://redis:6379/0
+      - PYTHONUNBUFFERED=1
+      - CORTEX_ENV=production
+    volumes:
+      - cortex_data:/root/.cortexforge
+      - .:/workspace:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   postgres:
     image: pgvector/pgvector:pg16
     container_name: cortexforge-postgres

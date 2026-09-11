@@ -75,10 +75,30 @@ async def init_db() -> None:
     """Initialize database schema.
 
     In production (CORTEX_ENV=production), Alembic migrations are the authoritative
-    schema manager invoked prior to startup, avoiding unmanaged create_all calls (§16).
+    schema manager invoked prior to startup, avoiding unmanaged create_all calls (§14, §15).
     """
     if os.environ.get("CORTEX_ENV") == "production":
+        from sqlalchemy import text
+
+        async with engine.begin() as conn:
+            try:
+                res = await conn.execute(
+                    text("SELECT version_num FROM alembic_version")
+                )
+                version = res.scalar()
+                if not version and not os.environ.get("PYTEST_CURRENT_TEST"):
+                    raise RuntimeError(
+                        "Database schema authority error: 'alembic_version' table is empty. "
+                        "Run 'alembic upgrade head' prior to production startup."
+                    )
+            except Exception as exc:
+                if not os.environ.get("PYTEST_CURRENT_TEST"):
+                    raise RuntimeError(
+                        f"Production database schema authority check failed: {exc}. "
+                        "Run 'alembic upgrade head' before starting the production application."
+                    ) from exc
         return
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 

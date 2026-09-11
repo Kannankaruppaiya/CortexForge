@@ -4,6 +4,7 @@ from typing import Any
 
 from sqlalchemy import delete
 
+from cortexforge.code_intelligence.git_service import clone_repository
 from cortexforge.code_intelligence.scanner import RepositoryScanner
 from cortexforge.core.db import session_scope
 from cortexforge.core.models import CodeEntity, Project, Relationship
@@ -170,4 +171,61 @@ async def benchmark_project_task(job: JobContext) -> dict[str, Any]:
         return {
             "scorecards_count": len(scorecards),
             "results": [sc.__dict__ for sc in scorecards],
+        }
+
+
+async def import_and_scan_project_task(job: JobContext) -> dict[str, Any]:
+    """Clones repository if remote, performs AST scan, and initializes cognitive models."""
+    project_id = job.project_id
+    scanner = RepositoryScanner()
+    verification_engine = MemoryVerificationEngine()
+    graph_service = GraphService()
+
+    async with session_scope() as session:
+        project = await session.get(Project, project_id)
+        if not project:
+            raise ValueError(f"Project '{project_id}' not found.")
+
+        # Stage 1: Clone into managed workspace if remote
+        if (
+            project.source_type in ("GITHUB", "GIT_URL")
+            and project.clone_url
+            and not job.already_done("clone")
+        ):
+            await job.checkpoint("cloning", progress=0.15)
+            clone_repository(
+                url=project.clone_url,
+                target_dir=project.local_path,
+                branch=project.default_branch,
+            )
+            await job.checkpoint("cloned", progress=0.35)
+
+        # Stage 2: Scan repository
+        if not job.already_done("scan"):
+            await job.checkpoint("scanning", progress=0.45)
+            scan_res = await scanner.scan_project(session, project, incremental=False)
+            await job.checkpoint(
+                "scanned",
+                progress=0.75,
+                files_scanned=scan_res.files_scanned,
+                entities_extracted=scan_res.entities_extracted,
+                relationships_extracted=scan_res.relationships_extracted,
+            )
+
+        # Stage 3: Verify memories and build architecture
+        if not job.already_done("verify"):
+            await job.checkpoint("verifying", progress=0.85)
+            await verification_engine.verify_project_memories(session, project_id)
+            await graph_service.get_project_architecture(session, project_id, depth=2)
+            await job.checkpoint("verified", progress=0.95)
+
+        project.status = "READY"
+        await session.commit()
+        await job.checkpoint("completed", progress=1.0)
+
+        return {
+            "status": "READY",
+            "files_scanned": job.value("files_scanned", 0),
+            "entities_extracted": job.value("entities_extracted", 0),
+            "relationships_extracted": job.value("relationships_extracted", 0),
         }

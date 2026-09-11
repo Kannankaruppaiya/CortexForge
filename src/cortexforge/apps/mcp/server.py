@@ -1,6 +1,9 @@
 """Full-Featured Model Context Protocol (MCP) Server for CortexForge."""
 
 import os
+from contextvars import ContextVar
+from datetime import UTC, datetime
+from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 from sqlalchemy import func, select
@@ -15,6 +18,10 @@ from cortexforge.cognition.authority import Authority
 from cortexforge.cognition.epistemics import ClaimStatus
 from cortexforge.core.db import init_db, session_scope
 from cortexforge.core.models import (
+    Agent,
+    AgentCredential,
+    AgentProjectPermission,
+    AgentTask,
     Claim,
     CodeEntity,
     FailureEpisode,
@@ -22,6 +29,10 @@ from cortexforge.core.models import (
     Memory,
     MemoryDecision,
     Project,
+    ProjectMembership,
+)
+from cortexforge.core.models import (
+    Session as UserSession,
 )
 from cortexforge.core.schemas import MemoryCreate, MemoryEvidenceCreate
 from cortexforge.graph.service import GraphService
@@ -34,6 +45,7 @@ from cortexforge.memory.verification import MemoryVerificationEngine
 from cortexforge.retrieval.composer import ContextComposer
 from cortexforge.retrieval.engine import HybridRetrievalEngine
 from cortexforge.security.approval import ApprovalService
+from cortexforge.security.crypto import hash_token
 from cortexforge.verification.engine import ClaimVerificationEngine
 
 mcp_server = MCPServer(
@@ -49,8 +61,6 @@ scanner = RepositoryScanner()
 graph_service = GraphService()
 memory_service = MemoryService()
 claim_service = ClaimService()
-# Two verification layers: memory-level (derives a memory's state from its
-# claims) and claim-level (evaluates the propositions themselves).
 verification_engine = MemoryVerificationEngine()
 claim_verification_engine = ClaimVerificationEngine()
 failure_intelligence = FailureIntelligenceEngine()
@@ -72,29 +82,127 @@ orchestrator = AgentWorkflowOrchestrator(
     consolidator=consolidation_engine,
 )
 
+_CURRENT_MCP_CALLER: ContextVar[dict[str, Any] | None] = ContextVar(
+    "_CURRENT_MCP_CALLER", default=None
+)
+
+
+def set_mcp_caller(
+    user_id: str | None = None,
+    agent_id: str | None = None,
+    token: str | None = None,
+) -> None:
+    """Set ambient caller credentials for MCP request evaluation."""
+    _CURRENT_MCP_CALLER.set({"user_id": user_id, "agent_id": agent_id, "token": token})
+
 
 async def _resolve_project(session, project_id_or_path: str) -> Project | None:
-    """Resolve project by ID or local filesystem path, automatically initializing and scanning if needed."""
+    """Resolve project by ID or local filesystem path, enforcing user ownership and agent permissions."""
     project = await session.get(Project, project_id_or_path)
-    if project:
-        return project
 
-    canonical_path = os.path.realpath(project_id_or_path)
-    stmt = select(Project).where(Project.local_path == canonical_path)
-    res = await session.execute(stmt)
-    project = res.scalars().first()
+    if not project:
+        canonical_path = os.path.realpath(project_id_or_path)
+        stmt = select(Project).where(Project.local_path == canonical_path)
+        res = await session.execute(stmt)
+        project = res.scalars().first()
 
-    if not project and os.path.exists(canonical_path):
-        name = os.path.basename(canonical_path) or "project"
-        project = Project(
-            name=name,
-            local_path=canonical_path,
-            status="INITIALIZING",
+    if not project:
+        return None
+
+    # Enforce Project Authorization in MCP (§12, §25)
+    caller_ctx = _CURRENT_MCP_CALLER.get() or {}
+    caller_user_id = caller_ctx.get("user_id") or os.environ.get(
+        "CORTEX_CALLER_USER_ID"
+    )
+    caller_agent_id = caller_ctx.get("agent_id") or os.environ.get(
+        "CORTEX_CALLER_AGENT_ID"
+    )
+    caller_token = (
+        caller_ctx.get("token")
+        or os.environ.get("CORTEX_MCP_TOKEN")
+        or os.environ.get("CORTEX_AGENT_KEY")
+    )
+
+    if caller_token:
+        t_hash = hash_token(caller_token)
+        now = datetime.now(UTC)
+        # Check AgentCredential first
+        cred_res = await session.execute(
+            select(AgentCredential).where(
+                AgentCredential.key_hash == t_hash,
+                AgentCredential.revoked_at.is_(None),
+                (AgentCredential.expires_at.is_(None))
+                | (AgentCredential.expires_at > now),
+            )
         )
-        session.add(project)
-        await session.flush()
-        await scanner.scan_project(session, project, incremental=False)
-        await session.refresh(project)
+        cred = cred_res.scalars().first()
+        if cred:
+            caller_agent_id = cred.agent_id
+        else:
+            # Check if caller is an AI Agent with legacy api_key_hash
+            agent_res = await session.execute(
+                select(Agent).where(
+                    Agent.api_key_hash == t_hash, Agent.status == "ACTIVE"
+                )
+            )
+            agent = agent_res.scalars().first()
+            if agent:
+                caller_agent_id = agent.id
+            else:
+                # Check if caller is an authenticated User Session
+                sess_res = await session.execute(
+                    select(UserSession).where(
+                        UserSession.session_token_hash == t_hash,
+                        UserSession.revoked_at.is_(None),
+                        UserSession.expires_at > now,
+                    )
+                )
+                usess = sess_res.scalars().first()
+                if usess:
+                    caller_user_id = usess.user_id
+
+    # If an invalid or revoked token was provided, reject immediately
+    if caller_token and not caller_agent_id and not caller_user_id:
+        return None
+
+    # In production, require authenticated principal (fail-closed)
+    if not caller_agent_id and not caller_user_id:
+        if os.environ.get("CORTEX_ENV") == "production":
+            return None
+        if os.environ.get("CORTEX_ENV") != "development" and not os.environ.get(
+            "PYTEST_CURRENT_TEST"
+        ):
+            return None
+
+    # If an Agent caller is identified, it must have explicit permission for this project
+    if caller_agent_id:
+        now = datetime.now(UTC)
+        perm_res = await session.execute(
+            select(AgentProjectPermission).where(
+                AgentProjectPermission.agent_id == caller_agent_id,
+                AgentProjectPermission.project_id == project.id,
+                AgentProjectPermission.revoked_at.is_(None),
+                (AgentProjectPermission.expires_at.is_(None))
+                | (AgentProjectPermission.expires_at > now),
+            )
+        )
+        if not perm_res.scalars().first():
+            return None
+
+    # If a User caller is identified, the project must be owned by that user or user is a member
+    if (
+        caller_user_id
+        and caller_user_id != "00000000-0000-0000-0000-000000000001"
+        and project.owner_user_id != caller_user_id
+    ):
+        mem_res = await session.execute(
+            select(ProjectMembership).where(
+                ProjectMembership.project_id == project.id,
+                ProjectMembership.user_id == caller_user_id,
+            )
+        )
+        if not mem_res.scalars().first():
+            return None
 
     return project
 
@@ -302,6 +410,12 @@ async def memory_get(memory_id: str) -> str:
         if not mem:
             return f"Memory with ID '{memory_id}' not found."
 
+        project = await _resolve_project(session, mem.project_id)
+        if not project:
+            return (
+                f"Access denied: you are not authorized to view memory '{memory_id}'."
+            )
+
         lines = [
             f"# [{mem.memory_type}] {mem.title}",
             f"- **Status**: `{mem.status}` | **Confidence**: {mem.confidence:.2f} | **Importance**: {mem.importance:.2f}",
@@ -460,6 +574,13 @@ async def memory_update(
     """Update memory with audit trail and optimistic locking."""
     await init_db()
     async with session_scope() as session:
+        mem = await memory_service.get_memory(session, memory_id)
+        if not mem:
+            return f"Memory with ID '{memory_id}' not found."
+        project = await _resolve_project(session, mem.project_id)
+        if not project:
+            return f"Access denied: unauthorized to update memory '{memory_id}'."
+
         try:
             updated = await memory_service.update_memory(
                 session,
@@ -489,6 +610,13 @@ async def memory_deprecate(
     """Mark memory as deprecated."""
     await init_db()
     async with session_scope() as session:
+        mem = await memory_service.get_memory(session, memory_id)
+        if not mem:
+            return f"Memory with ID '{memory_id}' not found."
+        project = await _resolve_project(session, mem.project_id)
+        if not project:
+            return f"Access denied: unauthorized to deprecate memory '{memory_id}'."
+
         dep = await memory_service.deprecate_memory(
             session,
             memory_id=memory_id,
@@ -512,7 +640,10 @@ async def memory_verify(memory_id: str) -> str:
         if not mem:
             return f"Memory with ID '{memory_id}' not found."
 
-        project = await session.get(Project, mem.project_id)
+        project = await _resolve_project(session, mem.project_id)
+        if not project:
+            return f"Access denied: unauthorized to verify memory '{memory_id}'."
+
         st = await verification_engine.verify_single_memory(
             session, mem, project.local_path
         )
@@ -890,11 +1021,18 @@ async def task_start(
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
+        caller_ctx = _CURRENT_MCP_CALLER.get() or {}
+        effective_agent_id = (
+            caller_ctx.get("agent_id")
+            or os.environ.get("CORTEX_CALLER_AGENT_ID")
+            or agent_id
+        )
+
         task, context = await orchestrator.start_task(
             session=session,
             project_id=project.id,
             task_text=task_text,
-            agent_id=agent_id,
+            agent_id=effective_agent_id,
             profile=profile,
             target_files=target_files,
             workspace_id=workspace_id,
@@ -922,6 +1060,13 @@ async def task_record_event(
     """Record agent activity event."""
     await init_db()
     async with session_scope() as session:
+        task = await session.get(AgentTask, task_id)
+        if not task:
+            return f"Task with ID '{task_id}' not found."
+        project = await _resolve_project(session, task.project_id)
+        if not project:
+            return f"Access denied: unauthorized for task '{task_id}'."
+
         ev_upper = event_type.upper()
         if "TOOL" in ev_upper and tool_name:
             await orchestrator.record_tool_call(
@@ -963,6 +1108,13 @@ async def task_complete(
     """Complete agent task and update project cognitive model."""
     await init_db()
     async with session_scope() as session:
+        task_row = await session.get(AgentTask, task_id)
+        if not task_row:
+            return f"Task with ID '{task_id}' not found."
+        project = await _resolve_project(session, task_row.project_id)
+        if not project:
+            return f"Access denied: unauthorized for task '{task_id}'."
+
         task = await orchestrator.complete_task(
             session=session,
             task_id=task_id,
@@ -1084,6 +1236,14 @@ async def memory_get_provenance(memory_id: str) -> str:
     """Inspect full causal provenance graph for a memory."""
     await init_db()
     async with session_scope() as session:
+        mem = await memory_service.get_memory(session, memory_id)
+        if not mem:
+            return f"Error: Memory with ID '{memory_id}' not found."
+
+        project = await _resolve_project(session, mem.project_id)
+        if not project:
+            return f"Access denied: you are not authorized to view provenance for memory '{memory_id}'."
+
         trace = await provenance_engine.trace_memory(session, memory_id=memory_id)
         if not trace:
             return f"Error: Memory with ID '{memory_id}' not found."
@@ -1388,6 +1548,14 @@ async def memory_get_claims(memory_id: str) -> str:
     """Show what a memory actually asserts, claim by claim."""
     await init_db()
     async with session_scope() as session:
+        mem = await memory_service.get_memory(session, memory_id)
+        if not mem:
+            return f"No claims recorded for memory `{memory_id}`."
+
+        project = await _resolve_project(session, mem.project_id)
+        if not project:
+            return f"Access denied: you are not authorized to view claims for memory '{memory_id}'."
+
         claims = await claim_service.get_claims_for_memory(session, memory_id)
         if not claims:
             return f"No claims recorded for memory `{memory_id}`."

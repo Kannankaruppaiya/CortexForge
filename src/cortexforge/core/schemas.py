@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class CognitiveLayer(str, Enum):
@@ -36,7 +36,9 @@ class MemoryType(str, Enum):
     FAILURE = "FAILURE"
     FIX = "FIX"
     ARCHITECTURE = "ARCHITECTURE"
+    PATTERN = "PATTERN"
     CONVENTION = "CONVENTION"
+    INVARIANT = "INVARIANT"
     GOAL = "GOAL"
     LESSON = "LESSON"
     WARNING = "WARNING"
@@ -45,21 +47,79 @@ class MemoryType(str, Enum):
 
 
 class ProjectBase(BaseModel):
-    name: str = Field(..., max_length=255, description="Project or repository name")
+    name: str = Field(
+        ..., min_length=1, max_length=255, description="Project or repository name"
+    )
+    source_type: str = Field("LOCAL", description="LOCAL, GITHUB, or GIT_URL")
     repository_url: str | None = Field(None, description="Remote Git repository URL")
-    local_path: str = Field(
-        ..., description="Absolute local filesystem path to repository"
+    clone_url: str | None = Field(None, description="Git clone URL")
+    github_repository_id: str | None = Field(None, description="GitHub repository ID")
+    github_owner: str | None = Field(None, description="GitHub repository owner")
+    github_repo: str | None = Field(None, description="GitHub repository name")
+    managed_workspace: bool = Field(
+        False, description="Whether project lives in managed workspace"
+    )
+    local_path: str | None = Field(
+        None,
+        description="Filesystem path to repository (required for LOCAL, server-derived for managed)",
     )
     default_branch: str = Field(
-        "main", max_length=100, description="Default git branch"
+        "main", min_length=1, max_length=100, description="Default git branch"
     )
     language: str | None = Field(
         None, max_length=50, description="Primary detected programming language"
     )
 
 
-class ProjectCreate(ProjectBase):
-    pass
+class ProjectCreate(BaseModel):
+    name: str = Field(
+        ..., min_length=1, max_length=255, description="Project or repository name"
+    )
+    source_type: str = Field(
+        "LOCAL",
+        pattern="^(LOCAL|GITHUB|GIT_URL)$",
+        description="LOCAL, GITHUB, or GIT_URL",
+    )
+    local_path: str | None = Field(
+        None, description="Absolute local filesystem path to repository (for LOCAL)"
+    )
+    clone_url: str | None = Field(None, description="Git clone URL (for GIT_URL)")
+    repository_url: str | None = Field(None, description="Remote repository URL")
+    github_repository_id: str | None = Field(
+        None, description="GitHub repository ID (for GITHUB)"
+    )
+    github_owner: str | None = Field(
+        None, description="GitHub repository owner (for GITHUB)"
+    )
+    github_repo: str | None = Field(
+        None, description="GitHub repository name (for GITHUB)"
+    )
+    default_branch: str = Field(
+        "main", min_length=1, max_length=100, description="Default git branch"
+    )
+    language: str | None = Field(
+        None, max_length=50, description="Primary programming language"
+    )
+
+    @model_validator(mode="after")
+    def validate_source_fields(self) -> "ProjectCreate":
+        src = self.source_type.upper()
+        if src == "LOCAL":
+            if not self.local_path or not self.local_path.strip():
+                raise ValueError("local_path is required when source_type is LOCAL.")
+        elif src == "GIT_URL":
+            if not self.clone_url or not self.clone_url.strip():
+                raise ValueError("clone_url is required when source_type is GIT_URL.")
+        elif (
+            src == "GITHUB"
+            and not self.github_repo
+            and not self.repository_url
+            and not self.clone_url
+        ):
+            raise ValueError(
+                "github_repo, repository_url, or clone_url is required when source_type is GITHUB."
+            )
+        return self
 
 
 class ProjectUpdate(BaseModel):
@@ -71,6 +131,7 @@ class ProjectUpdate(BaseModel):
 
 class ProjectRead(ProjectBase):
     id: str
+    owner_user_id: str | None = None
     last_indexed_commit: str | None = None
     status: str
     created_at: datetime
@@ -78,8 +139,106 @@ class ProjectRead(ProjectBase):
     file_count: int | None = 0
     entity_count: int | None = 0
     memory_count: int | None = 0
+    initial_job_id: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class LocalRepoValidationRequest(BaseModel):
+    path: str | None = Field(
+        None, max_length=1024, description="Candidate local repository path"
+    )
+    local_path: str | None = Field(
+        None, max_length=1024, description="Alternative candidate local repository path"
+    )
+
+    @model_validator(mode="after")
+    def validate_path(self) -> "LocalRepoValidationRequest":
+        effective = self.path or self.local_path
+        if not effective or not effective.strip():
+            raise ValueError("path or local_path is required")
+        self.path = effective.strip()
+        return self
+
+
+class LocalRepoValidationResponse(BaseModel):
+    valid: bool
+    is_git: bool
+    path: str
+    default_branch: str | None = None
+    detected_language: str | None = None
+    languages: dict[str, float] | None = None
+    error: str | None = None
+
+
+class DirectoryEntry(BaseModel):
+    name: str
+    path: str
+    is_dir: bool = True
+    is_git: bool = False
+
+
+class DirectoryBrowseResponse(BaseModel):
+    current_path: str
+    parent_path: str | None = None
+    workspace_root: str
+    directories: list[DirectoryEntry]
+    is_windows: bool = False
+    is_drive_root: bool = False
+
+
+class GitHubRepoItem(BaseModel):
+    id: str
+    name: str
+    full_name: str
+    owner: str
+    default_branch: str = "main"
+    description: str | None = None
+    private: bool = False
+    clone_url: str
+    language: str | None = None
+
+
+class ProjectMembershipCreate(BaseModel):
+    user_id: str
+    role: str = "MEMBER"  # OWNER, ADMIN, MEMBER, VIEWER
+
+
+class ProjectMembershipUpdate(BaseModel):
+    role: str
+
+
+class ProjectMembershipRead(BaseModel):
+    id: str
+    user_id: str
+    project_id: str
+    role: str
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AgentCredentialCreate(BaseModel):
+    name: str = "default"
+    expires_in_days: int | None = None
+
+
+class AgentCredentialRead(BaseModel):
+    id: str
+    agent_id: str
+    key_id: str
+    name: str
+    created_at: datetime
+    expires_at: datetime | None = None
+    revoked_at: datetime | None = None
+    last_used_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AgentCredentialSecretResponse(AgentCredentialRead):
+    raw_api_key: str  # Only returned once upon generation!
 
 
 class CodeEntityRead(BaseModel):
@@ -480,5 +639,130 @@ class FailureEpisodeRead(BaseModel):
     affected_symbols: list[str] = Field(default_factory=list)
     created_at: datetime
     fix_attempts: list[FixAttemptRead] = Field(default_factory=list)
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ==============================================================================
+# Authentication, User & Agent Schemas (Individual-User-First Model)
+# ==============================================================================
+
+
+class UserRead(BaseModel):
+    id: str
+    email: str
+    email_verified_at: datetime | None = None
+    display_name: str | None = None
+    github_user_id: str | None = None
+    github_login: str | None = None
+    avatar_url: str | None = None
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    last_login_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RegisterRequest(BaseModel):
+    email: str = Field(..., max_length=255, description="Valid user email address")
+    password: str = Field(
+        ...,
+        min_length=8,
+        max_length=128,
+        description="Account password (min 8 characters)",
+    )
+    display_name: str | None = Field(
+        None, max_length=100, description="Optional user display name"
+    )
+
+
+class LoginRequest(BaseModel):
+    email: str = Field(..., max_length=255)
+    password: str = Field(..., max_length=128)
+
+
+class OTPRequest(BaseModel):
+    email: str = Field(
+        ..., max_length=255, description="Email to send one-time code to"
+    )
+
+
+class OTPVerifyRequest(BaseModel):
+    email: str = Field(..., max_length=255)
+    otp: str = Field(
+        ..., min_length=6, max_length=6, description="6-digit verification code"
+    )
+
+
+class PasswordResetRequest(BaseModel):
+    email: str = Field(..., max_length=255)
+
+
+class PasswordResetConfirm(BaseModel):
+    token: str = Field(..., description="Cryptographic password reset token")
+    new_password: str = Field(..., min_length=8, max_length=128)
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str = Field(..., max_length=128)
+    new_password: str = Field(..., min_length=8, max_length=128)
+
+
+class SessionRead(BaseModel):
+    id: str
+    user_id: str
+    user_agent: str | None = None
+    ip_address: str | None = None
+    expires_at: datetime
+    created_at: datetime
+    is_current: bool = False
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AgentCreate(BaseModel):
+    name: str = Field(
+        ...,
+        max_length=100,
+        description="Friendly agent name, e.g., Claude Agent, Codex Agent",
+    )
+    type: str = Field(
+        "custom", max_length=50, description="Agent type or model provider"
+    )
+
+
+class AgentRead(BaseModel):
+    id: str
+    owner_user_id: str
+    name: str
+    type: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AgentCreatedResponse(BaseModel):
+    agent: AgentRead
+    api_key: str = Field(..., description="One-time visible agent API key")
+
+
+class AgentPermissionGrant(BaseModel):
+    agent_id: str
+    project_id: str
+    scopes: list[str] = Field(default_factory=lambda: ["read", "write"])
+    expires_in_seconds: int | None = None
+
+
+class AgentPermissionRead(BaseModel):
+    id: str
+    agent_id: str
+    project_id: str
+    scopes: list[str]
+    created_at: datetime
+    expires_at: datetime | None = None
+    revoked_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)

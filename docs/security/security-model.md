@@ -47,3 +47,11 @@ Every memory and evidence citation carries an explicit trust level:
 4. **Agent Pre-Action Governance**:
    - High-risk operations (modifying core auth, database migrations, security middleware) require the agent to complete a pre-action check tool (`change_get_impact` or `project_get_context`).
    - Known previous failures on the target component are highlighted as blocking warnings.
+5. **Authentication & Identity Governance**:
+   - **Unified "Continue with GitHub" Flow**: Dual-purpose Sign In / Sign Up flow rooted in GitHub OAuth 2.0. Users cannot spoof or arbitrarily register accounts; authentication requires active authorization through GitHub.
+   - **RFC 7636 PKCE Enforcement**: Every OAuth flow requires a high-entropy `code_verifier` (64 bytes URL-safe) and SHA-256 `code_challenge`. Downgrade to plain challenges is prohibited.
+   - **Single-Use State Transactions**: Authorization state tokens are cryptographically generated (32 bytes) and stored server-side in `oauth_transactions` with a strict 10-minute expiry. States are atomically burned upon first callback arrival, eliminating replay attacks.
+   - **Numeric Identity Anchoring**: External accounts are bound to GitHub's immutable numeric ID (`github_user_id`), never mutable usernames (`login`). If a user renames their GitHub account, identity continuity is maintained.
+   - **Fail-Closed OAuth Configuration**: In production (`CORTEX_ENV=production`), missing credentials or mock IDs (`mock_github_client_id`) immediately fail closed with HTTP 500. In development, explicit HTTP 503 is returned with clear configuration diagnostics.
+   - **Session Security**: Session tokens are cryptographically random and stored server-side as SHA-256 hashes in `sessions`. Tokens are transmitted exclusively via `HttpOnly`, `SameSite=Lax` cookies (`cortex_session` and `cortexforge_session`) with `Secure` flags automatically enabled in production.
+

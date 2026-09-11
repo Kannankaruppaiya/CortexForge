@@ -28,14 +28,413 @@ class Base(DeclarativeBase):
     pass
 
 
+class User(Base):
+    """An individual authenticated CortexForge user."""
+
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    email: Mapped[str] = mapped_column(
+        String(255), unique=True, nullable=False, index=True
+    )
+    email_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    github_user_id: Mapped[str | None] = mapped_column(
+        String(100), unique=True, nullable=True, index=True
+    )
+    github_login: Mapped[str | None] = mapped_column(
+        String(100), nullable=True, index=True
+    )
+    avatar_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    status: Mapped[str] = mapped_column(String(50), default="ACTIVE", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+    last_login_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # Relationships
+    password_credential: Mapped["PasswordCredential | None"] = relationship(
+        "PasswordCredential",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+    external_identities: Mapped[list["ExternalIdentity"]] = relationship(
+        "ExternalIdentity", back_populates="user", cascade="all, delete-orphan"
+    )
+    sessions: Mapped[list["Session"]] = relationship(
+        "Session", back_populates="user", cascade="all, delete-orphan"
+    )
+    owned_projects: Mapped[list["Project"]] = relationship(
+        "Project", back_populates="owner", cascade="all, delete-orphan"
+    )
+    agents: Mapped[list["Agent"]] = relationship(
+        "Agent", back_populates="owner", cascade="all, delete-orphan"
+    )
+    project_memberships: Mapped[list["ProjectMembership"]] = relationship(
+        "ProjectMembership", back_populates="user", cascade="all, delete-orphan"
+    )
+
+
+class PasswordCredential(Base):
+    """User password hash credentials (Argon2id/Scrypt)."""
+
+    __tablename__ = "password_credentials"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        unique=True,
+        nullable=False,
+    )
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    algorithm: Mapped[str] = mapped_column(String(50), default="scrypt", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+    user: Mapped["User"] = relationship("User", back_populates="password_credential")
+
+
+class ExternalIdentity(Base):
+    """External authenticated identities (e.g. GitHub OAuth)."""
+
+    __tablename__ = "external_identities"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    provider_subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    provider_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+    user: Mapped["User"] = relationship("User", back_populates="external_identities")
+
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_subject", name="uq_provider_subject"),
+        Index("idx_ext_identity_user", "user_id"),
+    )
+
+
+class Session(Base):
+    """Authenticated user sessions."""
+
+    __tablename__ = "sessions"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    session_token_hash: Mapped[str] = mapped_column(
+        String(64), unique=True, nullable=False, index=True
+    )
+    user_agent: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    ip_address: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    last_accessed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    user: Mapped["User"] = relationship("User", back_populates="sessions")
+
+
+class EmailOTPChallenge(Base):
+    """One-time password challenges for passwordless email login."""
+
+    __tablename__ = "email_otp_challenges"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=True
+    )
+    otp_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    attempts_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    consumed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class PasswordResetToken(Base):
+    """Cryptographically secure, single-use password reset tokens."""
+
+    __tablename__ = "password_reset_tokens"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    consumed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class OAuthTransaction(Base):
+    """Secure, single-use OAuth 2.0 transaction holding state and PKCE verifier."""
+
+    __tablename__ = "oauth_transactions"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    provider: Mapped[str] = mapped_column(String(50), default="github", nullable=False)
+    state: Mapped[str] = mapped_column(
+        String(128), unique=True, nullable=False, index=True
+    )
+    code_verifier: Mapped[str] = mapped_column(String(128), nullable=False)
+    redirect_uri: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    ip_address: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (Index("idx_oauth_tx_state_prov", "state", "provider"),)
+
+
+class Agent(Base):
+    """AI Agent principal owned by an individual user."""
+
+    __tablename__ = "agents"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    owner_user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    type: Mapped[str] = mapped_column(String(50), default="custom", nullable=False)
+    status: Mapped[str] = mapped_column(String(50), default="ACTIVE", nullable=False)
+    api_key_hash: Mapped[str] = mapped_column(
+        String(64), unique=True, nullable=False, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+    owner: Mapped["User"] = relationship("User", back_populates="agents")
+    credentials: Mapped[list["AgentCredential"]] = relationship(
+        "AgentCredential", back_populates="agent", cascade="all, delete-orphan"
+    )
+    project_permissions: Mapped[list["AgentProjectPermission"]] = relationship(
+        "AgentProjectPermission", back_populates="agent", cascade="all, delete-orphan"
+    )
+
+
+class AgentCredential(Base):
+    """Hashed credentials for AI Agents, supporting rotation, revocation, and key IDs."""
+
+    __tablename__ = "agent_credentials"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    agent_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("agents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    key_id: Mapped[str] = mapped_column(
+        String(32), unique=True, nullable=False, index=True
+    )  # e.g. "ca_key_..." or UUID hex
+    key_hash: Mapped[str] = mapped_column(
+        String(64), unique=True, nullable=False, index=True
+    )  # SHA-256 hash of the secret
+    name: Mapped[str] = mapped_column(String(100), default="default", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    agent: Mapped["Agent"] = relationship("Agent", back_populates="credentials")
+
+    __table_args__ = (Index("idx_agent_cred_lookup", "key_id", "revoked_at"),)
+
+
+class AgentProjectPermission(Base):
+    """Explicit project authorization grant for an AI Agent."""
+
+    __tablename__ = "agent_project_permissions"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    agent_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("agents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    scopes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    agent: Mapped["Agent"] = relationship("Agent", back_populates="project_permissions")
+
+    __table_args__ = (
+        UniqueConstraint("agent_id", "project_id", name="uq_agent_project_permission"),
+    )
+
+
+class ProjectMembership(Base):
+    """Explicit user membership and role in a project."""
+
+    __tablename__ = "project_memberships"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    role: Mapped[str] = mapped_column(
+        String(50), default="MEMBER", nullable=False
+    )  # OWNER, ADMIN, MEMBER, VIEWER
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+    user: Mapped["User"] = relationship("User", back_populates="project_memberships")
+    project: Mapped["Project"] = relationship("Project", back_populates="memberships")
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "project_id", name="uq_project_membership"),
+        Index("idx_proj_member_user_proj", "user_id", "project_id"),
+    )
+
+
 class Project(Base):
     __tablename__ = "projects"
 
     id: Mapped[str] = mapped_column(
         String(36), primary_key=True, default=lambda: str(uuid.uuid4())
     )
+    owner_user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+        default="00000000-0000-0000-0000-000000000001",
+    )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_type: Mapped[str] = mapped_column(
+        String(50), default="LOCAL", nullable=False, index=True
+    )
     repository_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    clone_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    github_repository_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    github_owner: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    github_repo: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    managed_workspace: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
     local_path: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     default_branch: Mapped[str] = mapped_column(
         String(100), default="main", nullable=False
@@ -51,6 +450,10 @@ class Project(Base):
     )
 
     # Relationships
+    owner: Mapped["User"] = relationship("User", back_populates="owned_projects")
+    memberships: Mapped[list["ProjectMembership"]] = relationship(
+        "ProjectMembership", back_populates="project", cascade="all, delete-orphan"
+    )
     snapshots: Mapped[list["RepositorySnapshot"]] = relationship(
         "RepositorySnapshot", back_populates="project", cascade="all, delete-orphan"
     )
@@ -443,6 +846,9 @@ class MemoryRelation(Base):
     )
 
     __table_args__ = (
+        CheckConstraint(
+            "source_memory_id != target_memory_id", name="ck_memrel_not_self"
+        ),
         Index("idx_memrel_project", "project_id"),
         Index("idx_memrel_source", "source_memory_id"),
         Index("idx_memrel_target", "target_memory_id"),
@@ -457,6 +863,12 @@ class MemoryVersion(Base):
     )
     memory_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("memories.id", ondelete="CASCADE"), nullable=False
+    )
+    project_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     previous_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -526,6 +938,13 @@ class AgentEvent(Base):
     task_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("agent_tasks.id", ondelete="CASCADE"), nullable=False
     )
+    project_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    agent_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
     event_type: Mapped[str] = mapped_column(
         String(50), nullable=False
     )  # observation, tool_call, code_change, test_result, failure, decision, fix, commit, review
@@ -795,6 +1214,8 @@ class FailureEpisode(Base):
     rejected_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     command_or_tool: Mapped[str | None] = mapped_column(String(100), nullable=True)
     root_cause: Mapped[str | None] = mapped_column(Text, nullable=True)
+    candidate_cause: Mapped[str | None] = mapped_column(Text, nullable=True)
+    verified_cause: Mapped[str | None] = mapped_column(Text, nullable=True)
     root_cause_claim_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("claims.id", ondelete="SET NULL"), nullable=True
     )
@@ -849,6 +1270,11 @@ class FixAttempt(Base):
     attempted_fix: Mapped[str] = mapped_column(Text, nullable=False)
     success: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     why_worked_or_failed: Mapped[str | None] = mapped_column(Text, nullable=True)
+    agent_claim: Mapped[str | None] = mapped_column(Text, nullable=True)
+    verified_effect: Mapped[str | None] = mapped_column(Text, nullable=True)
+    verified_by_test_run_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("test_runs.id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
@@ -1595,6 +2021,10 @@ class WebhookDelivery(Base):
     )
 
 
+# Alias for backward compatibility / alternate terminology
+ProcessedWebhookDelivery = WebhookDelivery
+
+
 class SymbolLineage(Base):
     """Durable identity for a logical symbol across renames and moves (section 11).
 
@@ -1667,6 +2097,13 @@ class Job(Base):
     id: Mapped[str] = mapped_column(
         String(36), primary_key=True, default=lambda: str(uuid.uuid4())
     )
+    user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    actor_type: Mapped[str] = mapped_column(
+        String(50), default="USER", server_default="USER", nullable=False
+    )
+    actor_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     project_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=True
     )

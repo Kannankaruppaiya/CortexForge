@@ -33,6 +33,20 @@ async def get_dependencies(
             status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
         )
 
+    status_code, start_ent, candidates = await graph_service.resolve_entity(
+        session, project_id, entity
+    )
+    if status_code == "AMBIGUOUS":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Ambiguous symbol '{entity}'. Multiple candidate matches: {candidates}. Please use the fully-qualified symbol name.",
+        )
+    if status_code == "NOT_FOUND" or not start_ent:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Symbol '{entity}' not found in project {project_id}.",
+        )
+
     return await graph_service.get_dependencies(
         session, project_id=project_id, entity_name_or_id=entity, depth=depth
     )
@@ -50,6 +64,20 @@ async def get_dependents(
     if not project:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
+
+    status_code, start_ent, candidates = await graph_service.resolve_entity(
+        session, project_id, entity
+    )
+    if status_code == "AMBIGUOUS":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Ambiguous symbol '{entity}'. Multiple candidate matches: {candidates}. Please use the fully-qualified symbol name.",
+        )
+    if status_code == "NOT_FOUND" or not start_ent:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Symbol '{entity}' not found in project {project_id}.",
         )
 
     return await graph_service.get_dependents(

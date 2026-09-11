@@ -1,10 +1,17 @@
-import { ArchitectureResponse, ChangeImpactReport, Memory, Project } from './types';
+import { AgentCredential, ArchitectureResponse, ChangeImpactReport, Memory, Project, ProjectMembership } from './types';
 
 const API_BASE = '/api/v1';
 
+async function authFetch(url: string, options: RequestInit = {}): Promise<Response> {
+  return fetch(url, {
+    ...options,
+    credentials: 'include',
+  });
+}
+
 export async function fetchProjects(): Promise<Project[]> {
   try {
-    const res = await fetch(`${API_BASE}/projects`);
+    const res = await authFetch(`${API_BASE}/projects`);
     if (!res.ok) return [];
     return await res.json();
   } catch {
@@ -14,7 +21,7 @@ export async function fetchProjects(): Promise<Project[]> {
 
 export async function fetchArchitecture(projectId: string): Promise<ArchitectureResponse | null> {
   try {
-    const res = await fetch(`${API_BASE}/projects/${projectId}/architecture`);
+    const res = await authFetch(`${API_BASE}/projects/${projectId}/architecture`);
     if (!res.ok) return null;
     return await res.json();
   } catch {
@@ -31,7 +38,7 @@ export async function fetchMemories(
     const params = new URLSearchParams();
     if (type && type !== 'ALL') params.set('type', type);
     if (status && status !== 'ALL') params.set('status', status);
-    const res = await fetch(`${API_BASE}/projects/${projectId}/memories?${params.toString()}`);
+    const res = await authFetch(`${API_BASE}/projects/${projectId}/memories?${params.toString()}`);
     if (!res.ok) return [];
     return await res.json();
   } catch {
@@ -41,7 +48,7 @@ export async function fetchMemories(
 
 export async function triggerScan(projectId: string): Promise<boolean> {
   try {
-    const res = await fetch(`${API_BASE}/projects/${projectId}/scan`, {
+    const res = await authFetch(`${API_BASE}/projects/${projectId}/scan`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ incremental: true }),
@@ -54,7 +61,7 @@ export async function triggerScan(projectId: string): Promise<boolean> {
 
 export async function verifyMemory(memoryId: string): Promise<boolean> {
   try {
-    const res = await fetch(`${API_BASE}/memories/${memoryId}/verify`, { method: 'POST' });
+    const res = await authFetch(`${API_BASE}/memories/${memoryId}/verify`, { method: 'POST' });
     return res.ok;
   } catch {
     return false;
@@ -63,7 +70,7 @@ export async function verifyMemory(memoryId: string): Promise<boolean> {
 
 export async function deprecateMemory(memoryId: string): Promise<boolean> {
   try {
-    const res = await fetch(`${API_BASE}/memories/${memoryId}/deprecate`, {
+    const res = await authFetch(`${API_BASE}/memories/${memoryId}/deprecate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ reason: 'Manual deprecation via web dashboard' }),
@@ -76,7 +83,7 @@ export async function deprecateMemory(memoryId: string): Promise<boolean> {
 
 export async function triggerConsolidate(projectId: string): Promise<any> {
   try {
-    const res = await fetch(`${API_BASE}/projects/${projectId}/consolidate`, { method: 'POST' });
+    const res = await authFetch(`${API_BASE}/projects/${projectId}/consolidate`, { method: 'POST' });
     return await res.json();
   } catch {
     return null;
@@ -88,7 +95,7 @@ export async function checkImpact(
   modifiedFiles: string[]
 ): Promise<ChangeImpactReport | null> {
   try {
-    const res = await fetch(`${API_BASE}/projects/${projectId}/impact`, {
+    const res = await authFetch(`${API_BASE}/projects/${projectId}/impact`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ modified_files: modifiedFiles, mark_stale: false }),
@@ -102,7 +109,7 @@ export async function checkImpact(
 
 export async function runBenchmark(projectId: string): Promise<any> {
   try {
-    const res = await fetch(`${API_BASE}/projects/${projectId}/benchmark`, {
+    const res = await authFetch(`${API_BASE}/projects/${projectId}/benchmark`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
     });
@@ -115,7 +122,7 @@ export async function runBenchmark(projectId: string): Promise<any> {
 
 export async function fetchTokenEconomics(projectId: string): Promise<any> {
   try {
-    const res = await fetch(`${API_BASE}/projects/${projectId}/economics`);
+    const res = await authFetch(`${API_BASE}/projects/${projectId}/economics`);
     if (!res.ok) return null;
     return await res.json();
   } catch {
@@ -125,7 +132,7 @@ export async function fetchTokenEconomics(projectId: string): Promise<any> {
 
 export async function fetchArchitectureRules(projectId: string): Promise<any[]> {
   try {
-    const res = await fetch(`${API_BASE}/projects/${projectId}/architecture/rules`);
+    const res = await authFetch(`${API_BASE}/projects/${projectId}/architecture/rules`);
     if (!res.ok) return [];
     return await res.json();
   } catch {
@@ -144,7 +151,7 @@ export async function createArchitectureRule(
   }
 ): Promise<any> {
   try {
-    const res = await fetch(`${API_BASE}/projects/${projectId}/architecture/rules`, {
+    const res = await authFetch(`${API_BASE}/projects/${projectId}/architecture/rules`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(rule),
@@ -158,7 +165,7 @@ export async function createArchitectureRule(
 
 export async function fetchArchitectureViolations(projectId: string): Promise<any[]> {
   try {
-    const res = await fetch(`${API_BASE}/projects/${projectId}/architecture/violations`);
+    const res = await authFetch(`${API_BASE}/projects/${projectId}/architecture/violations`);
     if (!res.ok) return [];
     return await res.json();
   } catch {
@@ -168,7 +175,7 @@ export async function fetchArchitectureViolations(projectId: string): Promise<an
 
 export async function fetchProvenance(memoryId: string): Promise<any> {
   try {
-    const res = await fetch(`${API_BASE}/memories/${memoryId}/provenance`);
+    const res = await authFetch(`${API_BASE}/memories/${memoryId}/provenance`);
     if (!res.ok) return null;
     return await res.json();
   } catch {
@@ -178,7 +185,7 @@ export async function fetchProvenance(memoryId: string): Promise<any> {
 
 export async function fetchSnapshots(projectId: string): Promise<any[]> {
   try {
-    const res = await fetch(`${API_BASE}/projects/${projectId}/snapshots`);
+    const res = await authFetch(`${API_BASE}/projects/${projectId}/snapshots`);
     if (!res.ok) return [];
     return await res.json();
   } catch {
@@ -188,7 +195,7 @@ export async function fetchSnapshots(projectId: string): Promise<any[]> {
 
 export async function takeSnapshot(projectId: string, commitSha: string): Promise<any> {
   try {
-    const res = await fetch(`${API_BASE}/projects/${projectId}/snapshots?commit_sha=${encodeURIComponent(commitSha)}`, {
+    const res = await authFetch(`${API_BASE}/projects/${projectId}/snapshots?commit_sha=${encodeURIComponent(commitSha)}`, {
       method: 'POST',
     });
     if (!res.ok) return null;
@@ -200,7 +207,7 @@ export async function takeSnapshot(projectId: string, commitSha: string): Promis
 
 export async function replaySnapshot(projectId: string, commitSha: string): Promise<any> {
   try {
-    const res = await fetch(`${API_BASE}/projects/${projectId}/snapshots/${encodeURIComponent(commitSha)}/replay`, {
+    const res = await authFetch(`${API_BASE}/projects/${projectId}/snapshots/${encodeURIComponent(commitSha)}/replay`, {
       method: 'POST',
     });
     if (!res.ok) return null;
@@ -212,7 +219,7 @@ export async function replaySnapshot(projectId: string, commitSha: string): Prom
 
 export async function fetchTestRuns(projectId: string): Promise<any[]> {
   try {
-    const res = await fetch(`${API_BASE}/projects/${projectId}/tests`);
+    const res = await authFetch(`${API_BASE}/projects/${projectId}/tests`);
     if (!res.ok) return [];
     return await res.json();
   } catch {
@@ -222,7 +229,7 @@ export async function fetchTestRuns(projectId: string): Promise<any[]> {
 
 export async function fetchFailureEpisodes(projectId: string): Promise<any[]> {
   try {
-    const res = await fetch(`${API_BASE}/projects/${projectId}/failures`);
+    const res = await authFetch(`${API_BASE}/projects/${projectId}/failures`);
     if (!res.ok) return [];
     return await res.json();
   } catch {
@@ -232,7 +239,7 @@ export async function fetchFailureEpisodes(projectId: string): Promise<any[]> {
 
 export async function runMutationBenchmark(projectId: string): Promise<any> {
   try {
-    const res = await fetch(`${API_BASE}/projects/${projectId}/mutations/benchmark`, {
+    const res = await authFetch(`${API_BASE}/projects/${projectId}/mutations/benchmark`, {
       method: 'POST',
     });
     if (!res.ok) return null;
@@ -242,3 +249,98 @@ export async function runMutationBenchmark(projectId: string): Promise<any> {
   }
 }
 
+export async function fetchAgentCredentials(agentId: string): Promise<AgentCredential[]> {
+  try {
+    const res = await authFetch(`${API_BASE}/agents/${agentId}/credentials`);
+    if (!res.ok) return [];
+    return await res.json();
+  } catch {
+    return [];
+  }
+}
+
+export async function createAgentCredential(
+  agentId: string,
+  name = 'default',
+  expiresInDays?: number
+): Promise<{ key_id: string; secret: string; name: string } | null> {
+  try {
+    const res = await authFetch(`${API_BASE}/agents/${agentId}/credentials`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, expires_in_days: expiresInDays }),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function revokeAgentCredential(agentId: string, keyId: string): Promise<boolean> {
+  try {
+    const res = await authFetch(`${API_BASE}/agents/${agentId}/credentials/${keyId}`, {
+      method: 'DELETE',
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function fetchProjectMembers(projectId: string): Promise<ProjectMembership[]> {
+  try {
+    const res = await authFetch(`${API_BASE}/projects/${projectId}/members`);
+    if (!res.ok) return [];
+    return await res.json();
+  } catch {
+    return [];
+  }
+}
+
+export async function addProjectMember(
+  projectId: string,
+  userId: string,
+  role = 'MEMBER'
+): Promise<ProjectMembership | null> {
+  try {
+    const res = await authFetch(`${API_BASE}/projects/${projectId}/members`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: userId, role }),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function updateProjectMemberRole(
+  projectId: string,
+  userId: string,
+  role: string
+): Promise<ProjectMembership | null> {
+  try {
+    const res = await authFetch(`${API_BASE}/projects/${projectId}/members/${userId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role }),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function removeProjectMember(projectId: string, userId: string): Promise<boolean> {
+  try {
+    const res = await authFetch(`${API_BASE}/projects/${projectId}/members/${userId}`, {
+      method: 'DELETE',
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}

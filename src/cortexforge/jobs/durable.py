@@ -93,6 +93,9 @@ class DurableJobStore:
         project_id: str | None = None,
         parameters: dict[str, Any] | None = None,
         max_attempts: int = 3,
+        user_id: str | None = None,
+        actor_type: str | None = None,
+        actor_id: str | None = None,
     ) -> tuple[Job, bool]:
         """Enqueue work, returning the job and whether it was newly created.
 
@@ -136,6 +139,9 @@ class DurableJobStore:
 
         job = Job(
             project_id=project_id,
+            user_id=user_id,
+            actor_type=actor_type,
+            actor_id=actor_id,
             job_type=job_type,
             status=STATUS_PENDING,
             idempotency_key=effective_key,

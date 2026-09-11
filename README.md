@@ -135,6 +135,44 @@ Open `http://localhost:8000` in your browser to view the interactive Developer W
 
 ---
 
+## 🔐 Authentication & GitHub OAuth Setup
+
+CortexForge features a production-grade, unified GitHub OAuth 2.0 authentication flow with **PKCE (RFC 7636)** and server-side state security.
+
+A single user interface action—**"Continue with GitHub"**—handles both:
+1. **New Users**: Automatic account provisioning (Sign Up) with verified email retrieval.
+2. **Existing Users**: Seamless session resumption (Sign In) and profile synchronization.
+
+### 1. Register GitHub OAuth Application
+
+1. In GitHub, go to **Settings** > **Developer Settings** > **OAuth Apps** > **New OAuth App**.
+2. Set **Application Name**: `CortexForge`
+3. Set **Homepage URL**: `http://localhost:8000` (or your domain in production)
+4. Set **Authorization callback URL**: `http://localhost:8000/api/v1/auth/github/callback`
+5. Generate a **Client Secret**.
+
+### 2. Configure Environment Variables
+
+```bash
+# Required GitHub OAuth Configuration
+export GITHUB_OAUTH_CLIENT_ID="<your_github_client_id>"
+export GITHUB_OAUTH_CLIENT_SECRET="<your_github_client_secret>"
+export GITHUB_OAUTH_REDIRECT_URI="http://localhost:8000/api/v1/auth/github/callback"
+
+# Optional: Custom frontend redirect target on login completion (defaults to /dashboard)
+export FRONTEND_URL="/dashboard"
+```
+
+### 3. Security Invariants
+
+- **PKCE with S256**: Every OAuth transaction generates a high-entropy `code_verifier` (64 bytes URL-safe) and SHA-256 `code_challenge`.
+- **Single-Use State Tokens**: Cryptographic state tokens are stored in the database (`oauth_transactions`) with a 10-minute TTL and burned immediately upon first callback arrival to prevent replay attacks.
+- **Immutable Numeric GitHub ID**: User accounts are linked via GitHub's permanent numeric `id` (`github_user_id`), making authentication immune to GitHub username changes.
+- **Secure Sessions**: User sessions are stored hashed (SHA-256) in the database and issued via `HttpOnly`, `SameSite=Lax` cookies (`cortex_session` and `cortexforge_session`).
+- **Fail-Closed in Production**: `mock_github_client_id` is strictly banned. In production (`CORTEX_ENV=production`), missing credentials fail closed with HTTP 500.
+
+---
+
 ## 🔌 Model Context Protocol (MCP 2.x) Integration
 
 CortexForge exposes a standards-compliant MCP 2.x server over `stdio`, ready to plug into Claude Desktop, Cursor, Gemini Antigravity, or any MCP-compatible agent.

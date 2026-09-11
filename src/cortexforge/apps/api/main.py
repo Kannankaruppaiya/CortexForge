@@ -5,13 +5,16 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from cortexforge.apps.api.routes import (
+    agents,
+    auth,
     cognition,
     cognitive,
     github,
@@ -138,6 +141,8 @@ async def tracing_middleware(request: Request, call_next):
 
 
 # Mount API routers under /api/v1
+app.include_router(auth.router, prefix="/api/v1")
+app.include_router(agents.router, prefix="/api/v1")
 app.include_router(projects.router, prefix="/api/v1")
 app.include_router(graph.router, prefix="/api/v1")
 app.include_router(memories.router, prefix="/api/v1")
@@ -149,6 +154,43 @@ app.include_router(cognition.router)
 app.include_router(retrieval.router, prefix="/api/v1")
 app.include_router(github.router, prefix="/api/v1")
 app.include_router(jobs.router, prefix="/api/v1")
+
+
+@app.get("/health/live", tags=["health"])
+@app.get("/api/v1/health/live", tags=["health"])
+async def liveness_check() -> dict[str, Any]:
+    """Process liveness probe (§15)."""
+    return {"status": "alive", "timestamp": datetime.now(UTC).isoformat()}
+
+
+@app.get("/health/ready", tags=["health"])
+@app.get("/api/v1/health/ready", tags=["health"])
+async def readiness_check() -> dict[str, Any]:
+    """Service readiness probe checking database connection (§15). Returns 503 if not ready."""
+    import asyncio
+
+    from sqlalchemy import text
+
+    from cortexforge.core.db import session_scope
+
+    try:
+        async with asyncio.timeout(2.0):
+            async with session_scope() as session:
+                res = await session.execute(text("SELECT 1"))
+                if res.scalar() != 1:
+                    raise RuntimeError("Unexpected database response")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Service not ready: database connection check failed ({exc})",
+        )
+
+    return {
+        "status": "ready",
+        "database": "connected",
+        "version": "0.1.0",
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
 
 
 @app.get("/health", response_model=HealthResponse, tags=["health"])
@@ -170,9 +212,9 @@ async def health_check() -> HealthResponse:
     except Exception:
         database_connected = False
 
-    status = "healthy" if database_connected else "degraded"
+    status_str = "healthy" if database_connected else "degraded"
     return HealthResponse(
-        status=status,
+        status=status_str,
         database_connected=database_connected,
         version="0.1.0",
         timestamp=datetime.now(UTC),
@@ -207,9 +249,22 @@ async def get_traces(
     trace_id: str | None = None,
     project_id: str | None = None,
     limit: int = 50,
+    principal: Any = Depends(lambda: None),
 ):
     """Retrieve collected distributed trace spans with correlation and redacted attributes."""
     from cortexforge.observability.tracing import TraceManager
+    from cortexforge.security.auth import Principal
+
+    caller_principal = principal
+    if (
+        project_id
+        and isinstance(caller_principal, Principal)
+        and not caller_principal.can_access_project(project_id)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied to traces for project '{project_id}'.",
+        )
 
     spans = TraceManager.get_instance().get_spans(
         trace_id=trace_id, project_id=project_id, limit=limit

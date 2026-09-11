@@ -22,6 +22,7 @@ from cortexforge.code_intelligence.scanner import RepositoryScanner
 from cortexforge.core.db import get_db_session
 from cortexforge.core.models import Project, WebhookDelivery
 from cortexforge.observability.audit import AuditAction, record_audit
+from cortexforge.security.auth import Principal, get_current_principal
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,9 @@ def verify_github_signature(payload_bytes: bytes, signature_header: str | None) 
     return hmac.compare_digest(expected_sig, signature_header)
 
 
+MAX_WEBHOOK_PAYLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
 @router.post("/webhooks")
 async def handle_github_webhook(
     request: Request,
@@ -76,7 +80,24 @@ async def handle_github_webhook(
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     """Ingest a GitHub event and trigger incremental cognitive updates, once."""
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_WEBHOOK_PAYLOAD_BYTES:
+                raise HTTPException(
+                    status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                    detail=f"Webhook payload exceeds maximum size limit of {MAX_WEBHOOK_PAYLOAD_BYTES} bytes",
+                )
+        except ValueError:
+            pass
+
     body_bytes = await request.body()
+    if len(body_bytes) > MAX_WEBHOOK_PAYLOAD_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=f"Webhook payload exceeds maximum size limit of {MAX_WEBHOOK_PAYLOAD_BYTES} bytes",
+        )
+
     if not verify_github_signature(body_bytes, x_hub_signature_256):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -189,7 +210,26 @@ async def handle_github_webhook(
         after=result,
         reason=f"GitHub {x_github_event} event for {repo_name}",
     )
-    await session.commit()
+    try:
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        already = await session.execute(
+            select(WebhookDelivery).where(
+                WebhookDelivery.provider == "github",
+                WebhookDelivery.delivery_id == delivery_id,
+            )
+        )
+        previous = already.scalars().first()
+        if previous is not None:
+            logger.info("Ignoring duplicate concurrent delivery %s", delivery_id)
+            return {
+                **previous.result,
+                "status": "duplicate_ignored",
+                "original_status": previous.result.get("status"),
+                "delivery_id": delivery_id,
+            }
+        raise
     return result
 
 
@@ -212,3 +252,169 @@ async def _record_delivery(
             result=result,
         )
     )
+
+
+@router.get("/repositories")
+@router.get("/user/repositories")
+async def get_user_github_repositories(
+    session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(get_current_principal),
+) -> dict[str, Any]:
+    """Retrieve user repositories from GitHub integration (§5, §6)."""
+    import httpx
+
+    from cortexforge.core.models import ExternalIdentity, User
+
+    if not principal.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required to access GitHub repositories.",
+        )
+
+    user = await session.get(User, principal.user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found."
+        )
+
+    gh_login = user.github_login
+    if not gh_login:
+        ext_stmt = select(ExternalIdentity).where(
+            ExternalIdentity.user_id == user.id,
+            ExternalIdentity.provider == "github",
+        )
+        ext_res = await session.execute(ext_stmt)
+        ext = ext_res.scalars().first()
+        if ext and ext.metadata_json:
+            gh_login = ext.metadata_json.get("login")
+
+    if not gh_login:
+        return {
+            "connected": False,
+            "login": None,
+            "repositories": [],
+            "message": "GitHub account not connected. Connect GitHub to import repositories.",
+        }
+
+    gh_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GITHUB_ACCESS_TOKEN")
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "CortexForge-App",
+    }
+    if gh_token:
+        headers["Authorization"] = f"Bearer {gh_token}"
+
+    repos: list[dict[str, Any]] = []
+    error_msg: str | None = None
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            if gh_token:
+                api_url = "https://api.github.com/user/repos?sort=updated&per_page=100"
+            else:
+                api_url = f"https://api.github.com/users/{gh_login}/repos?sort=updated&per_page=100"
+
+            resp = await client.get(api_url, headers=headers)
+            if resp.status_code == 200:
+                raw_data = resp.json()
+                if isinstance(raw_data, list):
+                    for r in raw_data:
+                        repos.append(
+                            {
+                                "id": str(r.get("id")),
+                                "name": r.get("name"),
+                                "full_name": r.get("full_name"),
+                                "owner": r.get("owner", {}).get("login", gh_login)
+                                if isinstance(r.get("owner"), dict)
+                                else gh_login,
+                                "default_branch": r.get("default_branch", "main"),
+                                "description": r.get("description"),
+                                "private": r.get("private", False),
+                                "clone_url": r.get("clone_url"),
+                                "language": r.get("language"),
+                            }
+                        )
+            else:
+                error_msg = (
+                    f"GitHub returned status {resp.status_code}: {resp.text[:100]}"
+                )
+    except Exception as exc:
+        logger.warning("Failed to fetch repositories from GitHub API: %s", exc)
+        error_msg = str(exc)
+
+    return {
+        "connected": True,
+        "login": gh_login,
+        "repositories": repos,
+        "error": error_msg,
+    }
+
+
+@router.get("/repositories/branches")
+async def get_github_repository_branches(
+    owner: str,
+    repo: str,
+    session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(get_current_principal),
+) -> dict[str, Any]:
+    """Retrieve branches for a specified GitHub repository (§10)."""
+    import re
+
+    import httpx
+
+    if not principal.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required.",
+        )
+
+    clean_owner = owner.strip()
+    clean_repo = repo.strip()
+    if not re.match(r"^[a-zA-Z0-9_.-]+$", clean_owner) or not re.match(
+        r"^[a-zA-Z0-9_.-]+$", clean_repo
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid repository owner or repository name.",
+        )
+
+    gh_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GITHUB_ACCESS_TOKEN")
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "CortexForge-App",
+    }
+    if gh_token:
+        headers["Authorization"] = f"Bearer {gh_token}"
+
+    branches: list[str] = []
+    default_branch = "main"
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"https://api.github.com/repos/{clean_owner}/{clean_repo}/branches?per_page=100",
+                headers=headers,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, list):
+                    branches = [b.get("name") for b in data if b.get("name")]
+            # Also get repo default branch
+            r_resp = await client.get(
+                f"https://api.github.com/repos/{clean_owner}/{clean_repo}",
+                headers=headers,
+            )
+            if r_resp.status_code == 200:
+                r_data = r_resp.json()
+                if isinstance(r_data, dict) and r_data.get("default_branch"):
+                    default_branch = r_data["default_branch"]
+    except Exception as exc:
+        logger.warning("Failed to fetch branches from GitHub API: %s", exc)
+
+    if not branches:
+        branches = [default_branch]
+
+    return {
+        "branches": branches,
+        "default_branch": default_branch,
+    }

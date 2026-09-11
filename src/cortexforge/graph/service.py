@@ -144,9 +144,12 @@ class GraphService:
             CodeEntity.project_id == project_id,
             CodeEntity.qualified_name == entity_name_or_id,
         )
-        exact_qn = (await session.execute(qn_stmt)).scalars().first()
-        if exact_qn:
-            return "RESOLVED", exact_qn, []
+        exact_qn = list((await session.execute(qn_stmt)).scalars().all())
+        if len(exact_qn) == 1:
+            return "RESOLVED", exact_qn[0], []
+        elif len(exact_qn) > 1:
+            candidates = [f"{m.file_path}:{m.qualified_name}" for m in exact_qn]
+            return "AMBIGUOUS", None, candidates
 
         # 3. Short name or suffix match -- check for ambiguity
         name_stmt = select(CodeEntity).where(

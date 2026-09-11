@@ -1,6 +1,13 @@
 export interface Project {
   id: string;
   name: string;
+  source_type?: 'LOCAL' | 'GITHUB' | 'GIT_URL';
+  repository_url?: string;
+  clone_url?: string;
+  github_repository_id?: string;
+  github_owner?: string;
+  github_repo?: string;
+  managed_workspace?: boolean;
   local_path: string;
   default_branch: string;
   language?: string;
@@ -11,6 +18,7 @@ export interface Project {
   file_count?: number;
   entity_count?: number;
   memory_count?: number;
+  initial_job_id?: string;
 }
 
 export interface ComponentSummary {
@@ -244,4 +252,66 @@ export interface MutationBenchmarkResult {
   all_passed: boolean;
 }
 
+export interface User {
+  id: string;
+  email: string;
+  display_name?: string;
+  github_user_id?: string;
+  github_login?: string;
+  avatar_url?: string;
+  email_verified_at?: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  last_login_at?: string;
+}
 
+export interface UserSession {
+  id: string;
+  user_id: string;
+  user_agent?: string;
+  ip_address?: string;
+  expires_at: string;
+  created_at: string;
+  is_current: boolean;
+}
+
+export interface Agent {
+  id: string;
+  owner_user_id: string;
+  name: string;
+  type: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentPermission {
+  id: string;
+  agent_id: string;
+  project_id: string;
+  scopes: string[];
+  created_at: string;
+  expires_at?: string;
+  revoked_at?: string;
+}
+
+export interface AgentCredential {
+  id: string;
+  agent_id: string;
+  key_id: string;
+  name: string;
+  created_at: string;
+  expires_at?: string;
+  revoked_at?: string;
+  last_used_at?: string;
+}
+
+export interface ProjectMembership {
+  id: string;
+  user_id: string;
+  project_id: string;
+  role: 'OWNER' | 'ADMIN' | 'MEMBER' | 'VIEWER' | string;
+  created_at: string;
+  updated_at: string;
+}

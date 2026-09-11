@@ -5,6 +5,21 @@
 
 ## Endpoints Overview
 
+### Authentication & Identity
+- `GET /api/v1/auth/github`: Initiate unified GitHub OAuth 2.0 PKCE authorization flow.
+  - Query params: `format: Optional[str]` ("json" returns `{ "authorization_url": str }`; omitted returns HTTP 307 redirect)
+  - Security: Generates RFC 7636 PKCE `code_challenge` (S256) and stores single-use state in `oauth_transactions` table with 10-minute expiry.
+- `GET /api/v1/auth/github/callback`: Process GitHub OAuth redirect and complete authentication.
+  - Query params: `code: str`, `state: str`
+  - Mechanism: Atomically burns state to prevent replay attacks, exchanges authorization code via server-side PKCE verification, retrieves user identity from GitHub (`/user` and verified primary email from `/user/emails`).
+  - Account Logic: Unifies Sign Up and Sign In behind a single flow. Matches on immutable numeric `github_user_id`. Automatically provisions a new `User` record if new, or signs in and updates profile metadata (`github_login`, `avatar_url`) if existing.
+  - Session: Creates a SHA-256 hashed session in the `sessions` table and issues HttpOnly, SameSite=Lax session cookies (`cortex_session` and `cortexforge_session`).
+- `GET /api/v1/auth/me`: Get current authenticated user profile and active session details.
+  - Authentication: Requires valid session cookie or `Authorization: Bearer <session_token>`.
+  - Response: `200 OK` with `{ "id": UUID, "email": str, "github_user_id": str, "github_login": str, "avatar_url": str, "user": UserRead }`. Returns `401 Unauthorized` if unauthenticated.
+- `POST /api/v1/auth/logout`: Terminate active session.
+  - Revokes active database session and clears session cookies with expired `Max-Age=0`.
+
 ### Projects
 - `POST /api/v1/projects`: Register a new project for cognitive tracking.
   - Body: `{ "name": str, "local_path": str, "repository_url": Optional[str], "default_branch": str }`

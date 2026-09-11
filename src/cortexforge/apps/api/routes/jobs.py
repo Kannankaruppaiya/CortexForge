@@ -12,6 +12,7 @@ from cortexforge.jobs.runner import JobRunner
 from cortexforge.jobs.tasks import (
     benchmark_project_task,
     consolidate_project_task,
+    import_and_scan_project_task,
     rebuild_project_task,
     scan_project_task,
 )
@@ -27,6 +28,7 @@ job_store = DurableJobStore()
 _runner = JobRunner(store=job_store)
 _runner.register("REBUILD", rebuild_project_task)
 _runner.register("SCAN", scan_project_task)
+_runner.register("IMPORT_AND_SCAN", import_and_scan_project_task)
 _runner.register("CONSOLIDATE", consolidate_project_task)
 _runner.register("BENCHMARK", benchmark_project_task)
 
@@ -113,15 +115,20 @@ async def cancel_job(
 
 @router.post(
     "/projects/{project_id}/rebuild",
-    dependencies=[Depends(RequireProjectAccess())],
 )
-async def trigger_rebuild_job(project_id: str) -> dict[str, Any]:
+async def trigger_rebuild_job(
+    project_id: str,
+    principal: Principal = Depends(RequireProjectAccess("project_id")),
+) -> dict[str, Any]:
     """Trigger background clean rebuild and recovery of project cognitive model."""
     async with session_scope() as session:
         job, _ = await job_store.submit(
             session,
             job_type="REBUILD",
             project_id=project_id,
+            user_id=principal.user_id,
+            actor_type=principal.actor_type,
+            actor_id=principal.agent_id,
         )
         data = _serialize_job(job)
     _dispatch_runner_background()
@@ -130,11 +137,11 @@ async def trigger_rebuild_job(project_id: str) -> dict[str, Any]:
 
 @router.post(
     "/projects/{project_id}/scan",
-    dependencies=[Depends(RequireProjectAccess())],
 )
 async def trigger_scan_job(
     project_id: str,
     incremental: bool = True,
+    principal: Principal = Depends(RequireProjectAccess("project_id")),
 ) -> dict[str, Any]:
     """Trigger background AST scanner job."""
     async with session_scope() as session:
@@ -143,6 +150,9 @@ async def trigger_scan_job(
             job_type="SCAN",
             project_id=project_id,
             parameters={"incremental": incremental},
+            user_id=principal.user_id,
+            actor_type=principal.actor_type,
+            actor_id=principal.agent_id,
         )
         data = _serialize_job(job)
     _dispatch_runner_background()
@@ -151,15 +161,20 @@ async def trigger_scan_job(
 
 @router.post(
     "/projects/{project_id}/consolidate",
-    dependencies=[Depends(RequireProjectAccess())],
 )
-async def trigger_consolidation_job(project_id: str) -> dict[str, Any]:
+async def trigger_consolidation_job(
+    project_id: str,
+    principal: Principal = Depends(RequireProjectAccess("project_id")),
+) -> dict[str, Any]:
     """Trigger background memory consolidation job."""
     async with session_scope() as session:
         job, _ = await job_store.submit(
             session,
             job_type="CONSOLIDATE",
             project_id=project_id,
+            user_id=principal.user_id,
+            actor_type=principal.actor_type,
+            actor_id=principal.agent_id,
         )
         data = _serialize_job(job)
     _dispatch_runner_background()

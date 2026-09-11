@@ -1,17 +1,32 @@
 """REST API routes for Projects and Repository Scanning."""
 
+import logging
 import os
+import uuid
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from cortexforge.code_intelligence.git_service import (
+    inspect_local_repository,
+    validate_git_url,
+)
 from cortexforge.code_intelligence.scanner import RepositoryScanner
 from cortexforge.core.db import get_db_session
-from cortexforge.core.models import CodeEntity, Memory, Project
+from cortexforge.core.models import CodeEntity, Memory, Project, ProjectMembership, User
 from cortexforge.core.schemas import (
     ArchitectureResponse,
+    DirectoryBrowseResponse,
+    DirectoryEntry,
+    LocalRepoValidationRequest,
+    LocalRepoValidationResponse,
     ProjectCreate,
+    ProjectMembershipCreate,
+    ProjectMembershipRead,
+    ProjectMembershipUpdate,
     ProjectRead,
     ScanRequest,
     ScanResponse,
@@ -20,12 +35,15 @@ from cortexforge.evaluation.runner import EvaluationRunner
 from cortexforge.graph.service import GraphService
 from cortexforge.retrieval.composer import ContextComposer
 from cortexforge.retrieval.engine import HybridRetrievalEngine
+from cortexforge.security.audit import AuditService
 from cortexforge.security.auth import (
     Principal,
     RequireProjectAccess,
     get_current_principal,
-    verify_workspace_path_allowed,
+    validate_local_registration_path,
 )
+from cortexforge.security.managed_workspace import get_managed_workspace_service
+from cortexforge.security.policy import Permission
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 scanner = RepositoryScanner()
@@ -41,42 +59,328 @@ evaluation_runner = EvaluationRunner(
 )
 
 
+@router.post("/validate-local", response_model=LocalRepoValidationResponse)
+async def validate_local_project_path(
+    payload: LocalRepoValidationRequest,
+    principal: Principal = Depends(get_current_principal),
+) -> LocalRepoValidationResponse:
+    """Validate a candidate local repository path across the host filesystem."""
+    try:
+        canonical = validate_local_registration_path(payload.path)
+    except HTTPException as exc:
+        return LocalRepoValidationResponse(
+            valid=False,
+            is_git=False,
+            path=payload.path,
+            error=exc.detail,
+        )
+    info = inspect_local_repository(canonical)
+    return LocalRepoValidationResponse(**info)
+
+
+@router.get("/browse-directories", response_model=DirectoryBrowseResponse)
+async def browse_workspace_directories(
+    path: str | None = None,
+    principal: Principal = Depends(get_current_principal),
+) -> DirectoryBrowseResponse:
+    """List subdirectories across the host filesystem for interactive local repository selection."""
+    import string
+    from pathlib import Path
+
+    is_windows = os.name == "nt"
+
+    # Handle special Windows root listing
+    if is_windows and path in ("__DRIVES__", "DRIVES"):
+        entries: list[DirectoryEntry] = []
+        for letter in string.ascii_uppercase:
+            drive_path = f"{letter}:\\"
+            if os.path.exists(drive_path):
+                entries.append(
+                    DirectoryEntry(
+                        name=f"{letter}:",
+                        path=drive_path,
+                        is_dir=True,
+                        is_git=(Path(drive_path) / ".git").exists(),
+                    )
+                )
+        return DirectoryBrowseResponse(
+            current_path="DRIVES",
+            parent_path=None,
+            workspace_root="DRIVES",
+            directories=entries,
+            is_windows=True,
+            is_drive_root=True,
+        )
+
+    # Normalize Windows drive letter only (e.g. "C:" -> "C:\")
+    clean_path = path.strip() if path else None
+    if clean_path and is_windows and len(clean_path) == 2 and clean_path[1] == ":" and clean_path[0].isalpha():
+        clean_path = f"{clean_path}\\"
+
+    # Determine starting/target directory
+    if clean_path:
+        try:
+            target = Path(clean_path).resolve()
+            if not target.exists() or not target.is_dir():
+                target = Path.home().resolve()
+        except Exception:
+            target = Path.home().resolve()
+    else:
+        # Default to user home or current working dir if home fails
+        try:
+            target = Path.home().resolve()
+        except Exception:
+            target = Path(os.getcwd()).resolve()
+
+    # Determine parent path and drive root status
+    parent_path: str | None = None
+    is_drive_root = False
+    if is_windows:
+        if target.parent == target or str(target) == target.anchor:
+            parent_path = "DRIVES"
+            is_drive_root = True
+        else:
+            parent_path = str(target.parent)
+    else:
+        if target.parent != target and str(target) != "/":
+            parent_path = str(target.parent)
+
+    entries: list[DirectoryEntry] = []
+    try:
+        with os.scandir(target) as it:
+            for entry in it:
+                if entry.name.startswith((".", "$")):
+                    continue
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        is_git = (Path(entry.path) / ".git").exists()
+                        entries.append(
+                            DirectoryEntry(
+                                name=entry.name,
+                                path=str(Path(entry.path).resolve()),
+                                is_dir=True,
+                                is_git=is_git,
+                            )
+                        )
+                except (PermissionError, OSError):
+                    continue
+    except (PermissionError, OSError) as e:
+        logger.warning("Error scanning directory %s: %s", target, e)
+
+    entries.sort(key=lambda d: (not d.is_git, d.name.lower()))
+
+    return DirectoryBrowseResponse(
+        current_path=str(target),
+        parent_path=parent_path,
+        workspace_root=str(target),
+        directories=entries,
+        is_windows=is_windows,
+        is_drive_root=is_drive_root,
+    )
+
+
+@router.post("/pick-directory")
+async def open_os_directory_picker(
+    principal: Principal = Depends(get_current_principal),
+) -> dict:
+    """Attempt to open native OS directory picker dialog on the host machine."""
+    import asyncio
+
+    gui_error: str | None = None
+
+    def _pick():
+        nonlocal gui_error
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            folder_selected = filedialog.askdirectory(
+                title="Select Local Repository Folder for CortexForge"
+            )
+            root.destroy()
+            return folder_selected
+        except Exception as exc:
+            logger.warning("Native directory picker failed: %s", exc)
+            gui_error = str(exc)
+            return None
+
+    try:
+        selected = await asyncio.to_thread(_pick)
+        if selected:
+            try:
+                canonical = validate_local_registration_path(selected)
+                info = inspect_local_repository(canonical)
+                return {
+                    "path": canonical,
+                    "valid": info.get("valid", True),
+                    "info": info,
+                    "gui_available": True,
+                }
+            except HTTPException as he:
+                return {"path": selected, "valid": False, "error": he.detail, "gui_available": True}
+        if gui_error is not None:
+            return {
+                "path": None,
+                "canceled": False,
+                "gui_available": False,
+                "error": f"Native folder dialog unavailable ({gui_error}). Please use the folder browser below.",
+            }
+        return {"path": None, "canceled": True, "gui_available": True}
+    except Exception as exc:
+        return {"path": None, "error": str(exc), "gui_available": False}
+
+
 @router.post("", response_model=ProjectRead, status_code=status.HTTP_201_CREATED)
 async def create_project(
     payload: ProjectCreate,
     session: AsyncSession = Depends(get_db_session),
     principal: Principal = Depends(get_current_principal),
 ) -> ProjectRead:
-    """Register a new repository with CortexForge."""
-    # Enforce workspace allowlist security boundary (Blocker 2)
-    canonical_path = verify_workspace_path_allowed(payload.local_path)
-    if not os.path.exists(canonical_path):
+    """Register a new repository with CortexForge across LOCAL, GITHUB, or GIT_URL sources."""
+    if principal.actor_type != "USER":
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Local path does not exist: {payload.local_path}",
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only authenticated human users can create projects.",
         )
 
-    # Check if project already registered at this path
-    existing_stmt = select(Project).where(Project.local_path == canonical_path)
-    existing_res = await session.execute(existing_stmt)
-    if existing_res.scalars().first():
+    owner_id = principal.user_id or "00000000-0000-0000-0000-000000000001"
+    proj_id = str(uuid.uuid4())
+    src_type = payload.source_type.upper()
+
+    if src_type == "LOCAL":
+        if not payload.local_path:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="local_path is required when source_type is LOCAL",
+            )
+        # Securely validate local registration path
+        canonical_path = validate_local_registration_path(payload.local_path)
+
+        existing_stmt = select(Project).where(Project.local_path == canonical_path)
+        existing_res = await session.execute(existing_stmt)
+        if existing_res.scalars().first():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Project already registered at {canonical_path}",
+            )
+
+        managed_ws = False
+        clone_url = None
+        gh_owner = None
+        gh_repo = None
+        gh_id = None
+        repo_url = payload.repository_url
+    elif src_type in ("GITHUB", "GIT_URL"):
+        ws_service = get_managed_workspace_service()
+        target_dir = ws_service.prepare_project_workspace(owner_id, proj_id)
+        canonical_path = str(target_dir)
+        managed_ws = True
+
+        if src_type == "GIT_URL":
+            if not payload.clone_url or not validate_git_url(payload.clone_url):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid or unsafe Git clone URL: {payload.clone_url}",
+                )
+            clone_url = payload.clone_url.strip()
+            repo_url = clone_url
+            gh_owner = None
+            gh_repo = None
+            gh_id = None
+        else:  # GITHUB
+            clone_url = payload.clone_url or payload.repository_url
+            if not clone_url and payload.github_owner and payload.github_repo:
+                clone_url = f"https://github.com/{payload.github_owner}/{payload.github_repo}.git"
+            if not clone_url or not validate_git_url(clone_url):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid or missing GitHub repository clone URL",
+                )
+            repo_url = clone_url
+            gh_owner = payload.github_owner
+            gh_repo = payload.github_repo
+            gh_id = payload.github_repository_id
+    else:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Project already registered at {canonical_path}",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported source_type: '{payload.source_type}'",
         )
 
     project = Project(
+        id=proj_id,
         name=payload.name,
-        repository_url=payload.repository_url,
+        source_type=src_type,
+        repository_url=repo_url,
+        clone_url=clone_url,
+        github_owner=gh_owner,
+        github_repo=gh_repo,
+        github_repository_id=gh_id,
+        managed_workspace=managed_ws,
         local_path=canonical_path,
         default_branch=payload.default_branch,
         language=payload.language,
+        owner_user_id=owner_id,
         status="INITIALIZING",
     )
     session.add(project)
+    await session.flush()
+
+    # Create explicit OWNER membership for creator
+    membership = ProjectMembership(
+        user_id=owner_id,
+        project_id=project.id,
+        role="OWNER",
+    )
+    session.add(membership)
+
+    # Submit background scan job
+    from cortexforge.apps.api.routes.jobs import _dispatch_runner_background, job_store
+
+    job_type = "IMPORT_AND_SCAN" if managed_ws else "SCAN"
+    bg_job, _ = await job_store.submit(
+        session=session,
+        job_type=job_type,
+        project_id=project.id,
+        parameters={"source_type": src_type, "incremental": False},
+        user_id=owner_id,
+        actor_type=principal.actor_type,
+        actor_id=principal.agent_id,
+    )
+
     await session.commit()
     await session.refresh(project)
-    return ProjectRead.model_validate(project)
+
+    _dispatch_runner_background()
+
+    if principal.allowed_project_ids is not None and principal.allowed_project_ids != {
+        "*"
+    }:
+        principal.allowed_project_ids.add(project.id)
+        principal.project_roles[project.id] = "OWNER"
+
+    await AuditService.record(
+        db_session=session,
+        action="PROJECT_CREATE",
+        target_type="project",
+        target_id=project.id,
+        user_id=principal.user_id,
+        actor_type=principal.actor_type,
+        actor_id=principal.agent_id,
+        project_id=project.id,
+        details={
+            "name": project.name,
+            "source_type": src_type,
+            "path": canonical_path,
+            "managed_workspace": managed_ws,
+        },
+    )
+
+    resp = ProjectRead.model_validate(project)
+    resp.initial_job_id = bg_job.id
+    return resp
 
 
 @router.get("", response_model=list[ProjectRead])
@@ -84,26 +388,63 @@ async def list_projects(
     session: AsyncSession = Depends(get_db_session),
     principal: Principal = Depends(get_current_principal),
 ) -> list[ProjectRead]:
-    """List all registered projects."""
-    stmt = select(Project).order_by(Project.created_at.desc())
+    """List registered projects belonging to the authenticated user."""
+    if principal.is_admin or principal.allowed_project_ids == {"*"}:
+        stmt = select(Project).order_by(Project.created_at.desc())
+    elif principal.actor_type == "AGENT":
+        allowed_list = (
+            list(principal.allowed_project_ids)
+            if principal.allowed_project_ids
+            else ["__none__"]
+        )
+        stmt = (
+            select(Project)
+            .where(Project.id.in_(allowed_list))
+            .order_by(Project.created_at.desc())
+        )
+    else:
+        # Individual User: list owned projects OR membership projects
+        allowed_list = (
+            list(principal.allowed_project_ids) if principal.allowed_project_ids else []
+        )
+        stmt = (
+            select(Project)
+            .where(
+                (Project.owner_user_id == principal.user_id)
+                | (Project.id.in_(allowed_list) if allowed_list else False)
+            )
+            .order_by(Project.created_at.desc())
+        )
+
     res = await session.execute(stmt)
     projects = res.scalars().all()
+    accessible_projects = [p for p in projects if principal.can_access_project(p.id)]
     results: list[ProjectRead] = []
 
-    for p in projects:
-        if not principal.can_access_project(p.id):
-            continue
-        # Count entities & memories
-        entity_count = await session.scalar(
-            select(func.count(CodeEntity.id)).where(CodeEntity.project_id == p.id)
+    if accessible_projects:
+        p_ids = [p.id for p in accessible_projects]
+
+        # Batch count entities in a single aggregate query (solves N+1 problem §30)
+        ent_rows = await session.execute(
+            select(CodeEntity.project_id, func.count(CodeEntity.id))
+            .where(CodeEntity.project_id.in_(p_ids))
+            .group_by(CodeEntity.project_id)
         )
-        memory_count = await session.scalar(
-            select(func.count(Memory.id)).where(Memory.project_id == p.id)
+        entity_counts = dict(ent_rows.all())
+
+        # Batch count memories in a single aggregate query (solves N+1 problem §30)
+        mem_rows = await session.execute(
+            select(Memory.project_id, func.count(Memory.id))
+            .where(Memory.project_id.in_(p_ids))
+            .group_by(Memory.project_id)
         )
-        read_obj = ProjectRead.model_validate(p)
-        read_obj.entity_count = entity_count or 0
-        read_obj.memory_count = memory_count or 0
-        results.append(read_obj)
+        memory_counts = dict(mem_rows.all())
+
+        for p in accessible_projects:
+            read_obj = ProjectRead.model_validate(p)
+            read_obj.entity_count = entity_counts.get(p.id, 0)
+            read_obj.memory_count = memory_counts.get(p.id, 0)
+            results.append(read_obj)
 
     return results
 
@@ -112,7 +453,9 @@ async def list_projects(
 async def get_project(
     project_id: str,
     session: AsyncSession = Depends(get_db_session),
-    principal: Principal = Depends(RequireProjectAccess("project_id")),
+    principal: Principal = Depends(
+        RequireProjectAccess("project_id", permission=Permission.PROJECT_READ)
+    ),
 ) -> ProjectRead:
     """Retrieve details for a registered project."""
     project = await session.get(Project, project_id)
@@ -137,15 +480,161 @@ async def get_project(
 async def delete_project(
     project_id: str,
     session: AsyncSession = Depends(get_db_session),
-    principal: Principal = Depends(RequireProjectAccess("project_id")),
+    principal: Principal = Depends(
+        RequireProjectAccess("project_id", permission=Permission.PROJECT_DELETE)
+    ),
 ) -> None:
-    """Unregister and remove a project and all associated entities."""
+    """Unregister and remove a project and all associated entities (Owner/Admin only)."""
     project = await session.get(Project, project_id)
     if not project:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
         )
+    owner_user_id = project.owner_user_id
+    is_managed = project.managed_workspace
+
     await session.delete(project)
+    await session.commit()
+
+    if is_managed and owner_user_id:
+        from cortexforge.security.managed_workspace import get_managed_workspace_service
+
+        try:
+            get_managed_workspace_service().cleanup_project_workspace(
+                owner_user_id, project_id
+            )
+        except Exception:
+            logger.warning(
+                "Failed to clean up managed workspace for project %s",
+                project_id,
+                exc_info=True,
+            )
+
+
+@router.get("/{project_id}/members", response_model=list[ProjectMembershipRead])
+async def list_project_members(
+    project_id: str,
+    session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(
+        RequireProjectAccess("project_id", permission=Permission.PROJECT_READ)
+    ),
+) -> list[ProjectMembershipRead]:
+    """List all members and roles for a project."""
+    res = await session.execute(
+        select(ProjectMembership).where(ProjectMembership.project_id == project_id)
+    )
+    members = res.scalars().all()
+    return [ProjectMembershipRead.model_validate(m) for m in members]
+
+
+@router.post(
+    "/{project_id}/members",
+    response_model=ProjectMembershipRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_project_member(
+    project_id: str,
+    payload: ProjectMembershipCreate,
+    session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(
+        RequireProjectAccess("project_id", permission=Permission.PROJECT_UPDATE)
+    ),
+) -> ProjectMembershipRead:
+    """Add a member to a project with a specific role."""
+    target_user = await session.get(User, payload.user_id)
+    if not target_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User '{payload.user_id}' not found.",
+        )
+    existing = await session.execute(
+        select(ProjectMembership).where(
+            ProjectMembership.project_id == project_id,
+            ProjectMembership.user_id == payload.user_id,
+        )
+    )
+    if existing.scalars().first():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="User is already a member of this project.",
+        )
+    membership = ProjectMembership(
+        user_id=payload.user_id,
+        project_id=project_id,
+        role=payload.role.upper(),
+    )
+    session.add(membership)
+    await session.commit()
+    await session.refresh(membership)
+    return ProjectMembershipRead.model_validate(membership)
+
+
+@router.put("/{project_id}/members/{user_id}", response_model=ProjectMembershipRead)
+async def update_project_member(
+    project_id: str,
+    user_id: str,
+    payload: ProjectMembershipUpdate,
+    session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(
+        RequireProjectAccess("project_id", permission=Permission.PROJECT_UPDATE)
+    ),
+) -> ProjectMembershipRead:
+    """Update a project member's role."""
+    existing = await session.execute(
+        select(ProjectMembership).where(
+            ProjectMembership.project_id == project_id,
+            ProjectMembership.user_id == user_id,
+        )
+    )
+    membership = existing.scalars().first()
+    if not membership:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Member not found in project.",
+        )
+    project = await session.get(Project, project_id)
+    if project and project.owner_user_id == user_id and payload.role.upper() != "OWNER":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot demote project owner.",
+        )
+    membership.role = payload.role.upper()
+    await session.commit()
+    await session.refresh(membership)
+    return ProjectMembershipRead.model_validate(membership)
+
+
+@router.delete(
+    "/{project_id}/members/{user_id}", status_code=status.HTTP_204_NO_CONTENT
+)
+async def remove_project_member(
+    project_id: str,
+    user_id: str,
+    session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(
+        RequireProjectAccess("project_id", permission=Permission.PROJECT_UPDATE)
+    ),
+) -> None:
+    """Remove a member from a project."""
+    project = await session.get(Project, project_id)
+    if project and project.owner_user_id == user_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot remove project owner from members.",
+        )
+    existing = await session.execute(
+        select(ProjectMembership).where(
+            ProjectMembership.project_id == project_id,
+            ProjectMembership.user_id == user_id,
+        )
+    )
+    membership = existing.scalars().first()
+    if not membership:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Member not found in project.",
+        )
+    await session.delete(membership)
     await session.commit()
 
 
@@ -154,7 +643,9 @@ async def scan_project(
     project_id: str,
     payload: ScanRequest | None = None,
     session: AsyncSession = Depends(get_db_session),
-    principal: Principal = Depends(RequireProjectAccess("project_id")),
+    principal: Principal = Depends(
+        RequireProjectAccess("project_id", permission=Permission.PROJECT_SCAN)
+    ),
 ) -> ScanResponse:
     """Trigger AST scan of the project repository."""
     project = await session.get(Project, project_id)
@@ -176,7 +667,9 @@ async def get_project_architecture(
     project_id: str,
     depth: int = 2,
     session: AsyncSession = Depends(get_db_session),
-    principal: Principal = Depends(RequireProjectAccess("project_id")),
+    principal: Principal = Depends(
+        RequireProjectAccess("project_id", permission=Permission.ARCHITECTURE_READ)
+    ),
 ) -> ArchitectureResponse:
     """Retrieve synthesized structural architecture of the project."""
     arch = await graph_service.get_project_architecture(
@@ -193,7 +686,9 @@ async def get_project_architecture(
 async def run_project_benchmark(
     project_id: str,
     session: AsyncSession = Depends(get_db_session),
-    principal: Principal = Depends(RequireProjectAccess("project_id")),
+    principal: Principal = Depends(
+        RequireProjectAccess("project_id", permission=Permission.PROJECT_SCAN)
+    ),
 ) -> list[dict]:
     """Run real empirical benchmark suite on project."""
     project = await session.get(Project, project_id)
@@ -260,7 +755,11 @@ async def run_project_benchmark(
 
 @router.get("/{project_id}/economics")
 async def get_project_economics(
-    project_id: str, session: AsyncSession = Depends(get_db_session)
+    project_id: str,
+    session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(
+        RequireProjectAccess("project_id", permission=Permission.PROJECT_READ)
+    ),
 ) -> dict:
     """Compute live token economics, context budget allocation, and cost savings for the project."""
     project = await session.get(Project, project_id)

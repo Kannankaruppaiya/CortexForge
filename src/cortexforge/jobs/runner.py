@@ -19,7 +19,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cortexforge.core.db import session_scope
-from cortexforge.core.models import Job
+from cortexforge.core.models import Job, Project
 from cortexforge.jobs.context import JobContext
 from cortexforge.jobs.durable import ClaimedJob, DurableJobStore
 
@@ -111,6 +111,25 @@ class JobRunner:
                 if failed_job is None:
                     raise RuntimeError(f"Could not record failure for job {job_id}")
                 return failed_job
+
+        if claimed.job.project_id:
+            async with self._scoped_session() as session:
+                proj = await session.get(Project, claimed.job.project_id)
+                if not proj:
+                    err_msg = f"Project '{claimed.job.project_id}' does not exist or has been deleted."
+                    logger.error(
+                        "Job %s failed pre-execution check: %s", job_id, err_msg
+                    )
+                    failed_job = await self.store.fail(
+                        session,
+                        job_id,
+                        self.worker_id,
+                        error=err_msg,
+                        retry=False,
+                    )
+                    if failed_job is None:
+                        raise RuntimeError(f"Could not record failure for job {job_id}")
+                    return failed_job
 
         async def _checkpoint_writer(state: dict[str, Any], progress: float) -> None:
             async with self._scoped_session() as session:

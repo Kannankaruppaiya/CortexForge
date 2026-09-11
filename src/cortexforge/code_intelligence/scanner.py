@@ -22,6 +22,10 @@ from cortexforge.core.models import (
     RepositorySnapshot,
 )
 from cortexforge.core.schemas import ScanResponse
+from cortexforge.security.path_safety import (
+    PathSecurity,
+    SafeFileReader,
+)
 
 # Hard resource limits to prevent denial-of-service from hostile repositories (§25)
 MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB per file
@@ -128,6 +132,8 @@ class RepositoryScanner:
 
                 # Store path relative to canonical_root for consistency across platforms
                 rel_path = os.path.relpath(full_path, canonical_root).replace("\\", "/")
+                if not PathSecurity.is_safe_subpath(canonical_root, rel_path):
+                    continue
                 matched_files.append(rel_path)
 
                 if len(matched_files) >= effective_max:
@@ -352,11 +358,10 @@ class RepositoryScanner:
             existing_by_qualified
         )
 
+        safe_reader = SafeFileReader()
         for rel_path in rel_files:
-            abs_path = os.path.join(canonical_root, rel_path)
             try:
-                with open(abs_path, "rb") as f:
-                    content = f.read()
+                content = safe_reader.read_bytes(canonical_root, rel_path)
             except Exception as e:
                 errors.append(f"Failed to read file {rel_path}: {e}")
                 continue

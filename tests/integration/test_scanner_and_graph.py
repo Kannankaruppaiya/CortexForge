@@ -208,6 +208,27 @@ async def test_rest_api_endpoints(sample_repo, test_session: AsyncSession):
 @pytest.mark.asyncio
 async def test_mcp_tools(sample_repo):
     """Verify MCP tools format architecture and components."""
+    from cortexforge.core.db import init_db, session_scope
+
+    await init_db()
+    async with session_scope() as session:
+        stmt = select(Project).where(
+            Project.local_path == os.path.realpath(sample_repo)
+        )
+        res = await session.execute(stmt)
+        project = res.scalars().first()
+        if not project:
+            project = Project(
+                name="TestApp",
+                local_path=os.path.realpath(sample_repo),
+                status="INITIALIZING",
+            )
+            session.add(project)
+            await session.commit()
+            await session.refresh(project)
+            scanner = RepositoryScanner()
+            await scanner.scan_project(session, project, incremental=False)
+
     # project_get_architecture tool
     arch_text = await project_get_architecture(sample_repo)
     assert "# Project Architecture:" in arch_text
