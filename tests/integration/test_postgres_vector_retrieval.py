@@ -56,6 +56,13 @@ async def pg_session():
         await connection.execute(text("CREATE SCHEMA public"))
         await connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await connection.run_sync(Base.metadata.create_all)
+        await connection.execute(
+            text(
+                "INSERT INTO users (id, email, display_name, status, created_at, updated_at) "
+                "VALUES ('00000000-0000-0000-0000-000000000001', 'system@cortexforge.local', 'Default System User', 'ACTIVE', NOW(), NOW()) "
+                "ON CONFLICT (id) DO NOTHING"
+            )
+        )
         # The vector column is not mapped in the ORM -- it exists only on
         # PostgreSQL -- so it is created here the way the migration creates it.
         await connection.execute(

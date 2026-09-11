@@ -649,7 +649,9 @@ async def test_browse_directories_reports_platform_and_drives(test_session):
 
 
 @pytest.mark.asyncio
-async def test_api_pick_directory_reports_gui_availability(test_session, monkeypatch, local_repo_tmp):
+async def test_api_pick_directory_reports_gui_availability(
+    test_session, monkeypatch, local_repo_tmp
+):
     """POST /projects/pick-directory returns structured result with gui_available flag."""
     import tkinter
     import tkinter.filedialog
@@ -666,7 +668,9 @@ async def test_api_pick_directory_reports_gui_availability(test_session, monkeyp
 
     # Mock Tk and askdirectory so headless CI runners without $DISPLAY don't fail
     monkeypatch.setattr(tkinter, "Tk", lambda: MockTk())
-    monkeypatch.setattr(tkinter.filedialog, "askdirectory", lambda **kwargs: local_repo_tmp)
+    monkeypatch.setattr(
+        tkinter.filedialog, "askdirectory", lambda **kwargs: local_repo_tmp
+    )
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -720,4 +724,3 @@ async def test_api_pick_directory_headless_fallback(test_session, monkeypatch):
         assert data["gui_available"] is False
         assert data["path"] is None
         assert "Native folder dialog unavailable" in data["error"]
-

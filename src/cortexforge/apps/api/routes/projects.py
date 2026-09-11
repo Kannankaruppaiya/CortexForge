@@ -114,7 +114,13 @@ async def browse_workspace_directories(
 
     # Normalize Windows drive letter only (e.g. "C:" -> "C:\")
     clean_path = path.strip() if path else None
-    if clean_path and is_windows and len(clean_path) == 2 and clean_path[1] == ":" and clean_path[0].isalpha():
+    if (
+        clean_path
+        and is_windows
+        and len(clean_path) == 2
+        and clean_path[1] == ":"
+        and clean_path[0].isalpha()
+    ):
         clean_path = f"{clean_path}\\"
 
     # Determine starting/target directory
@@ -220,7 +226,12 @@ async def open_os_directory_picker(
                     "gui_available": True,
                 }
             except HTTPException as he:
-                return {"path": selected, "valid": False, "error": he.detail, "gui_available": True}
+                return {
+                    "path": selected,
+                    "valid": False,
+                    "error": he.detail,
+                    "gui_available": True,
+                }
         if gui_error is not None:
             return {
                 "path": None,

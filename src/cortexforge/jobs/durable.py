@@ -150,7 +150,9 @@ class DurableJobStore:
         )
         try:
             bind = session.get_bind()
-            is_sqlite = bind is not None and getattr(bind.dialect, "name", "") == "sqlite"
+            is_sqlite = (
+                bind is not None and getattr(bind.dialect, "name", "") == "sqlite"
+            )
             if is_sqlite:
                 session.add(job)
                 await session.flush()
