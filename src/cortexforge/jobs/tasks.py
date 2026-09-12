@@ -123,15 +123,15 @@ async def scan_project_task(job: JobContext) -> dict[str, Any]:
             session, project, incremental=incremental, max_files=max_files
         )
 
-        await job.checkpoint("completed", progress=1.0)
+    await job.checkpoint("completed", progress=1.0)
 
-        return {
-            "files_scanned": scan_res.files_scanned,
-            "entities_extracted": scan_res.entities_extracted,
-            "relationships_extracted": scan_res.relationships_extracted,
-            "duration_ms": scan_res.duration_ms,
-            "status": scan_res.status,
-        }
+    return {
+        "files_scanned": scan_res.files_scanned,
+        "entities_extracted": scan_res.entities_extracted,
+        "relationships_extracted": scan_res.relationships_extracted,
+        "duration_ms": scan_res.duration_ms,
+        "status": scan_res.status,
+    }
 
 
 async def consolidate_project_task(job: JobContext) -> dict[str, Any]:
@@ -144,8 +144,9 @@ async def consolidate_project_task(job: JobContext) -> dict[str, Any]:
 
     async with session_scope() as session:
         result = await consolidation_engine.consolidate_project(session, project_id)
-        await job.checkpoint("completed", progress=1.0)
-        return result
+
+    await job.checkpoint("completed", progress=1.0)
+    return result
 
 
 async def benchmark_project_task(job: JobContext) -> dict[str, Any]:
@@ -167,11 +168,12 @@ async def benchmark_project_task(job: JobContext) -> dict[str, Any]:
 
     async with session_scope() as session:
         scorecards = await runner.run_benchmark(session, project_id)
-        await job.checkpoint("completed", progress=1.0)
-        return {
-            "scorecards_count": len(scorecards),
-            "results": [sc.__dict__ for sc in scorecards],
-        }
+
+    await job.checkpoint("completed", progress=1.0)
+    return {
+        "scorecards_count": len(scorecards),
+        "results": [sc.__dict__ for sc in scorecards],
+    }
 
 
 async def import_and_scan_project_task(job: JobContext) -> dict[str, Any]:

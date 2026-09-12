@@ -5,6 +5,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -49,12 +50,26 @@ def create_cortex_engine(
     """Create async engine and session factory with driver-specific tuning."""
     engine_kwargs: dict[str, Any] = {"echo": False, "future": True}
     if "sqlite" in url:
-        engine_kwargs["connect_args"] = {"check_same_thread": False}
+        engine_kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30.0}
     else:
         engine_kwargs["pool_size"] = 10
         engine_kwargs["max_overflow"] = 20
 
     eng = create_async_engine(url, **engine_kwargs)
+
+    if "sqlite" in url:
+        @event.listens_for(eng.sync_engine, "connect")
+        def _configure_sqlite_pragmas(dbapi_connection: Any, connection_record: Any) -> None:
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL;")
+                cursor.execute("PRAGMA busy_timeout=30000;")
+                cursor.execute("PRAGMA synchronous=NORMAL;")
+            except Exception:
+                pass
+            finally:
+                cursor.close()
+
     factory = async_sessionmaker(bind=eng, class_=AsyncSession, expire_on_commit=False)
     return eng, factory
 

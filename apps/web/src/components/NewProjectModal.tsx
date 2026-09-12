@@ -66,12 +66,14 @@ interface GitHubRepoItem {
 
 interface JobStatusData {
   id: string;
-  status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
+  status: 'PENDING' | 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
   progress?: number;
   result?: {
     files_scanned?: number;
     entities_found?: number;
+    entities_extracted?: number;
     relationships_built?: number;
+    relationships_extracted?: number;
     memories_created?: number;
     [key: string]: any;
   };
@@ -120,6 +122,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [createdProject, setCreatedProject] = useState<Project | null>(null);
   const [jobData, setJobData] = useState<JobStatusData | null>(null);
+  const isJobSuccess = jobData?.status === 'COMPLETED' || jobData?.status === 'SUCCEEDED';
 
   const pollIntervalRef = useRef<any>(null);
 
@@ -317,7 +320,12 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
         if (res.ok) {
           const data: JobStatusData = await res.json();
           setJobData(data);
-          if (data.status === 'SUCCEEDED' || data.status === 'FAILED') {
+          if (
+            data.status === 'COMPLETED' ||
+            data.status === 'SUCCEEDED' ||
+            data.status === 'FAILED' ||
+            data.status === 'CANCELLED'
+          ) {
             if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
           }
         }
@@ -483,7 +491,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                 {createdProject?.name || 'Processing Project'}
               </h3>
               <p className="text-xs text-slate-400">
-                {jobData?.status === 'SUCCEEDED'
+                {isJobSuccess
                   ? 'Knowledge graph synthesized and memory verified'
                   : jobData?.status === 'FAILED'
                   ? 'Ingestion or scanning encountered an issue'
@@ -511,7 +519,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
 
               <div className="flex items-center justify-between text-xs">
                 <div className="flex items-center gap-2 text-slate-300">
-                  {jobData?.status === 'SUCCEEDED' ? (
+                  {isJobSuccess ? (
                     <CheckCircle2 className="w-4 h-4 text-emerald-400" />
                   ) : jobData?.status === 'FAILED' ? (
                     <AlertCircle className="w-4 h-4 text-rose-400" />
@@ -521,9 +529,9 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                   <span>AST parsing & symbol extraction</span>
                 </div>
                 <span className="text-slate-400 font-mono text-[11px]">
-                  {jobData?.result?.entities_found
-                    ? `${jobData.result.entities_found} symbols`
-                    : jobData?.status === 'SUCCEEDED'
+                  {(jobData?.result?.entities_extracted ?? jobData?.result?.entities_found)
+                    ? `${jobData?.result?.entities_extracted ?? jobData?.result?.entities_found} symbols`
+                    : isJobSuccess
                     ? 'Done'
                     : 'Running'}
                 </span>
@@ -531,7 +539,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
 
               <div className="flex items-center justify-between text-xs">
                 <div className="flex items-center gap-2 text-slate-300">
-                  {jobData?.status === 'SUCCEEDED' ? (
+                  {isJobSuccess ? (
                     <CheckCircle2 className="w-4 h-4 text-emerald-400" />
                   ) : jobData?.status === 'FAILED' ? (
                     <AlertCircle className="w-4 h-4 text-rose-400" />
@@ -543,7 +551,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                 <span className="text-slate-400 font-mono text-[11px]">
                   {jobData?.result?.memories_created
                     ? `${jobData.result.memories_created} memories`
-                    : jobData?.status === 'SUCCEEDED'
+                    : isJobSuccess
                     ? 'Linked'
                     : 'Queued'}
                 </span>
@@ -551,7 +559,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
             </div>
 
             {/* Results Card on Success */}
-            {jobData?.status === 'SUCCEEDED' && (
+            {isJobSuccess && (
               <div className="bg-emerald-950/30 border border-emerald-800/40 rounded-xl p-4">
                 <div className="flex items-center gap-2 text-emerald-400 text-sm font-semibold mb-3">
                   <CheckCircle2 className="w-4 h-4" />
@@ -561,25 +569,25 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                   <div className="bg-slate-900/80 p-2.5 rounded-lg border border-slate-800">
                     <div className="text-[11px] text-slate-400">Files</div>
                     <div className="text-base font-bold text-white">
-                      {jobData.result?.files_scanned ?? 0}
+                      {jobData?.result?.files_scanned ?? 0}
                     </div>
                   </div>
                   <div className="bg-slate-900/80 p-2.5 rounded-lg border border-slate-800">
                     <div className="text-[11px] text-slate-400">Symbols</div>
                     <div className="text-base font-bold text-indigo-400">
-                      {jobData.result?.entities_found ?? 0}
+                      {jobData?.result?.entities_extracted ?? jobData?.result?.entities_found ?? 0}
                     </div>
                   </div>
                   <div className="bg-slate-900/80 p-2.5 rounded-lg border border-slate-800">
                     <div className="text-[11px] text-slate-400">Relations</div>
                     <div className="text-base font-bold text-cyan-400">
-                      {jobData.result?.relationships_built ?? 0}
+                      {jobData?.result?.relationships_extracted ?? jobData?.result?.relationships_built ?? 0}
                     </div>
                   </div>
                   <div className="bg-slate-900/80 p-2.5 rounded-lg border border-slate-800">
                     <div className="text-[11px] text-slate-400">Memories</div>
                     <div className="text-base font-bold text-emerald-400">
-                      {jobData.result?.memories_created ?? 0}
+                      {jobData?.result?.memories_created ?? 0}
                     </div>
                   </div>
                 </div>
@@ -619,7 +627,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                     <span>Retry Scan</span>
                   </button>
                 </>
-              ) : jobData?.status === 'SUCCEEDED' ? (
+              ) : isJobSuccess ? (
                 <button
                   type="button"
                   onClick={() => {
