@@ -169,6 +169,9 @@ class LocalRepoValidationResponse(BaseModel):
     detected_language: str | None = None
     languages: dict[str, float] | None = None
     error: str | None = None
+    # Set when the path is already registered as a CortexForge project
+    existing_project_id: str | None = None
+    existing_project_name: str | None = None
 
 
 class DirectoryEntry(BaseModel):

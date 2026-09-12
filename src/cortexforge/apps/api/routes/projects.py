@@ -70,6 +70,7 @@ def _is_hosted_mode() -> bool:
 @router.post("/validate-local", response_model=LocalRepoValidationResponse)
 async def validate_local_project_path(
     payload: LocalRepoValidationRequest,
+    session: AsyncSession = Depends(get_db_session),
     principal: Principal = Depends(get_current_principal),
 ) -> LocalRepoValidationResponse:
     """Validate a candidate local repository path across the host filesystem."""
@@ -90,6 +91,19 @@ async def validate_local_project_path(
             path=payload.path,
             error=exc.detail,
         )
+
+    # Check if the path is already registered as a project
+    existing_stmt = select(Project).where(Project.local_path == canonical)
+    existing_result = await session.execute(existing_stmt)
+    existing_project = existing_result.scalars().first()
+    if existing_project:
+        info = inspect_local_repository(canonical)
+        return LocalRepoValidationResponse(
+            **info,
+            existing_project_id=existing_project.id,
+            existing_project_name=existing_project.name,
+        )
+
     info = inspect_local_repository(canonical)
     return LocalRepoValidationResponse(**info)
 
@@ -214,66 +228,21 @@ async def browse_workspace_directories(
 async def open_os_directory_picker(
     principal: Principal = Depends(get_current_principal),
 ) -> dict:
-    """Attempt to open native OS directory picker dialog on the host machine."""
+    """Signal that the client should use the in-browser folder explorer.
+
+    Native OS pickers (tkinter) cannot run in an async web server thread.
+    This endpoint always returns gui_available=False to instruct the frontend
+    to open the built-in interactive folder browser instead.
+    """
     if _is_hosted_mode():
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="OS directory picker is disabled in hosted environment. Connect via CortexForge Local Bridge or import a GitHub repository.",
         )
-
-    import asyncio
-
-    gui_error: str | None = None
-
-
-    def _pick():
-        nonlocal gui_error
-        try:
-            import tkinter as tk
-            from tkinter import filedialog
-
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-            folder_selected = filedialog.askdirectory(
-                title="Select Local Repository Folder for CortexForge"
-            )
-            root.destroy()
-            return folder_selected
-        except Exception as exc:
-            logger.warning("Native directory picker failed: %s", exc)
-            gui_error = str(exc)
-            return None
-
-    try:
-        selected = await asyncio.to_thread(_pick)
-        if selected:
-            try:
-                canonical = validate_local_registration_path(selected)
-                info = inspect_local_repository(canonical)
-                return {
-                    "path": canonical,
-                    "valid": info.get("valid", True),
-                    "info": info,
-                    "gui_available": True,
-                }
-            except HTTPException as he:
-                return {
-                    "path": selected,
-                    "valid": False,
-                    "error": he.detail,
-                    "gui_available": True,
-                }
-        if gui_error is not None:
-            return {
-                "path": None,
-                "canceled": False,
-                "gui_available": False,
-                "error": f"Native folder dialog unavailable ({gui_error}). Please use the folder browser below.",
-            }
-        return {"path": None, "canceled": True, "gui_available": True}
-    except Exception as exc:
-        return {"path": None, "error": str(exc), "gui_available": False}
+    # Native GUI dialogs (tkinter, wx, etc.) cannot be opened from an async
+    # web server process. Return gui_available=False immediately so the
+    # frontend opens its in-browser folder explorer without any error message.
+    return {"path": None, "canceled": False, "gui_available": False}
 
 
 @router.post("", response_model=ProjectRead, status_code=status.HTTP_201_CREATED)

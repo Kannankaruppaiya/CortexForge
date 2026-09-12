@@ -97,7 +97,8 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
   const [showFolderBrowser, setShowFolderBrowser] = useState(false);
   const [browseData, setBrowseData] = useState<DirectoryBrowseResponse | null>(null);
   const [isLoadingDirectories, setIsLoadingDirectories] = useState(false);
-  const [isOpeningNativePicker, setIsOpeningNativePicker] = useState(false);
+  // Existing project detected at path
+  const [existingProject, setExistingProject] = useState<{ id: string; name: string } | null>(null);
 
   // GitHub Flow State
   const [ghRepos, setGhRepos] = useState<GitHubRepoItem[]>([]);
@@ -136,6 +137,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
       setName('');
       setLocalPath('');
       setValidationResult(null);
+      setExistingProject(null);
       setSelectedGhRepo(null);
       setCloneUrl('');
       setFormError(null);
@@ -166,6 +168,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
 
     setIsValidatingPath(true);
     setFormError(null);
+    setExistingProject(null);
     try {
       const res = await fetch('/api/v1/projects/validate-local', {
         method: 'POST',
@@ -173,8 +176,17 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
         credentials: 'include',
         body: JSON.stringify({ local_path: targetPath }),
       });
-      const data: LocalValidationResult = await res.json();
+      const data: LocalValidationResult & {
+        existing_project_id?: string;
+        existing_project_name?: string;
+      } = await res.json();
       setValidationResult(data);
+
+      // Existing project at this path — surface inline info, not a form error
+      if (data.existing_project_id) {
+        setExistingProject({ id: data.existing_project_id, name: data.existing_project_name || 'Existing Project' });
+        return;
+      }
 
       if (data.valid) {
         // If user entered relative path (e.g. "." or "./"), update input with full canonical path
@@ -227,41 +239,10 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
     }
   };
 
-  const handleOpenNativePicker = async () => {
-    setIsOpeningNativePicker(true);
-    try {
-      const res = await fetch('/api/v1/projects/pick-directory', {
-        method: 'POST',
-        credentials: 'include',
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.path) {
-          setLocalPath(data.path);
-          if (!name.trim() || name === '.') {
-            const folderName = data.path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '';
-            if (folderName && folderName !== '.') {
-              setName(folderName);
-            }
-          }
-          handleValidateLocalPath(data.path);
-          setShowFolderBrowser(false);
-        } else if (data.error) {
-          setFormError(data.error);
-          setShowFolderBrowser(true);
-          if (!browseData) fetchDirectories(localPath || null);
-        } else if (data.gui_available === false) {
-          setShowFolderBrowser(true);
-          if (!browseData) fetchDirectories(localPath || null);
-        }
-      }
-    } catch (err) {
-      console.error('Failed to open native picker', err);
-      setShowFolderBrowser(true);
-      if (!browseData) fetchDirectories(localPath || null);
-    } finally {
-      setIsOpeningNativePicker(false);
-    }
+  // Open the in-browser folder explorer directly (no native OS picker attempt)
+  const handleOpenFolderBrowser = () => {
+    setShowFolderBrowser(true);
+    if (!browseData) fetchDirectories(localPath || null);
   };
 
   const handleSelectDirectory = (dirPath: string, dirName: string) => {
@@ -756,7 +737,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                           className="text-[11px] text-indigo-400 hover:text-indigo-300 flex items-center gap-1 font-medium transition-colors"
                         >
                           <FolderOpen className="w-3.5 h-3.5" />
-                          <span>{showFolderBrowser ? 'Close Explorer' : 'Explorer Fallback'}</span>
+                          <span>{showFolderBrowser ? 'Close Explorer' : 'Browse Folders'}</span>
                         </button>
                         <button
                           type="button"
@@ -788,16 +769,11 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                       />
                       <button
                         type="button"
-                        onClick={handleOpenNativePicker}
-                        disabled={isOpeningNativePicker}
-                        className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold flex items-center gap-2 transition-all shrink-0 shadow-md shadow-indigo-600/20 disabled:opacity-60"
+                        onClick={handleOpenFolderBrowser}
+                        className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold flex items-center gap-2 transition-all shrink-0 shadow-md shadow-indigo-600/20"
                         title="Browse folders on your computer"
                       >
-                        {isOpeningNativePicker ? (
-                          <RefreshCw className="w-4 h-4 animate-spin" />
-                        ) : (
-                          <FolderOpen className="w-4 h-4" />
-                        )}
+                        <FolderOpen className="w-4 h-4" />
                         <span>Browse Folder</span>
                       </button>
                     </div>
@@ -932,8 +908,30 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                     )}
                   </div>
 
+                  {/* Existing Project Detected */}
+                  {existingProject && (
+                    <div className="bg-amber-950/30 border border-amber-700/50 rounded-xl p-3.5 flex items-start gap-3">
+                      <FolderGit2 className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+                      <div className="flex-1 min-w-0">
+                        <div className="text-xs font-semibold text-amber-300 mb-0.5">
+                          Already registered as <span className="font-mono text-amber-200">{existingProject.name}</span>
+                        </div>
+                        <p className="text-[11px] text-slate-400">
+                          This folder is already a CortexForge project. Open it from the sidebar or your project list.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={onClose}
+                        className="shrink-0 px-3 py-1.5 rounded-lg bg-amber-700/40 hover:bg-amber-700/70 text-amber-300 text-xs font-semibold transition-colors whitespace-nowrap"
+                      >
+                        Got it
+                      </button>
+                    </div>
+                  )}
+
                   {/* Local Path Status & Language Area */}
-                  {validationResult && (
+                  {validationResult && !existingProject && (
                     <div className="bg-slate-950/90 border border-slate-800 rounded-xl p-3.5 space-y-2.5">
                       <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
                         Repository Status
