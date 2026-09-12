@@ -117,12 +117,17 @@ async def cancel_job(
         return _serialize_job(cancelled or job)
 
 
+from cortexforge.security.policy import Permission
+
+
 @router.post(
     "/projects/{project_id}/rebuild",
 )
 async def trigger_rebuild_job(
     project_id: str,
-    principal: Principal = Depends(RequireProjectAccess("project_id")),
+    principal: Principal = Depends(
+        RequireProjectAccess("project_id", permission=Permission.PROJECT_SCAN)
+    ),
 ) -> dict[str, Any]:
     """Trigger background clean rebuild and recovery of project cognitive model."""
     async with session_scope() as session:
@@ -145,7 +150,9 @@ async def trigger_rebuild_job(
 async def trigger_scan_job(
     project_id: str,
     incremental: bool = True,
-    principal: Principal = Depends(RequireProjectAccess("project_id")),
+    principal: Principal = Depends(
+        RequireProjectAccess("project_id", permission=Permission.PROJECT_SCAN)
+    ),
 ) -> dict[str, Any]:
     """Trigger background AST scanner job."""
     async with session_scope() as session:
@@ -168,7 +175,9 @@ async def trigger_scan_job(
 )
 async def trigger_consolidation_job(
     project_id: str,
-    principal: Principal = Depends(RequireProjectAccess("project_id")),
+    principal: Principal = Depends(
+        RequireProjectAccess("project_id", permission=Permission.MEMORY_UPDATE)
+    ),
 ) -> dict[str, Any]:
     """Trigger background memory consolidation job."""
     async with session_scope() as session:

@@ -27,6 +27,8 @@ from cortexforge.core.schemas import (
     ProjectMembershipCreate,
     ProjectMembershipRead,
     ProjectMembershipUpdate,
+    ProjectOwnershipTransferRequest,
+    ProjectOwnershipTransferResponse,
     ProjectRead,
     ScanRequest,
     ScanResponse,
@@ -610,10 +612,34 @@ async def add_project_member(
     payload: ProjectMembershipCreate,
     session: AsyncSession = Depends(get_db_session),
     principal: Principal = Depends(
-        RequireProjectAccess("project_id", permission=Permission.PROJECT_UPDATE)
+        RequireProjectAccess(
+            "project_id", permission=Permission.PROJECT_MEMBERS_MANAGE
+        )
     ),
 ) -> ProjectMembershipRead:
     """Add a member to a project with a specific role."""
+    caller_role = principal.project_roles.get(project_id, "VIEWER")
+    is_caller_owner = (caller_role == "OWNER") or principal.is_admin
+
+    target_role = payload.role.upper()
+    if target_role not in ("ADMIN", "MEMBER", "VIEWER"):
+        if target_role == "OWNER":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot assign OWNER role directly. Use ownership transfer endpoint.",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid role '{payload.role}'. Must be ADMIN, MEMBER, or VIEWER.",
+        )
+
+    # Admins cannot grant ADMIN role; only project owner or system admin can
+    if not is_caller_owner and target_role == "ADMIN":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Project admins cannot grant ADMIN role. Only the project owner can assign ADMIN.",
+        )
+
     target_user = await session.get(User, payload.user_id)
     if not target_user:
         raise HTTPException(
@@ -634,7 +660,7 @@ async def add_project_member(
     membership = ProjectMembership(
         user_id=payload.user_id,
         project_id=project_id,
-        role=payload.role.upper(),
+        role=target_role,
     )
     session.add(membership)
     await session.commit()
@@ -649,10 +675,15 @@ async def update_project_member(
     payload: ProjectMembershipUpdate,
     session: AsyncSession = Depends(get_db_session),
     principal: Principal = Depends(
-        RequireProjectAccess("project_id", permission=Permission.PROJECT_UPDATE)
+        RequireProjectAccess(
+            "project_id", permission=Permission.PROJECT_MEMBERS_MANAGE
+        )
     ),
 ) -> ProjectMembershipRead:
     """Update a project member's role."""
+    caller_role = principal.project_roles.get(project_id, "VIEWER")
+    is_caller_owner = (caller_role == "OWNER") or principal.is_admin
+
     existing = await session.execute(
         select(ProjectMembership).where(
             ProjectMembership.project_id == project_id,
@@ -666,12 +697,38 @@ async def update_project_member(
             detail="Member not found in project.",
         )
     project = await session.get(Project, project_id)
-    if project and project.owner_user_id == user_id and payload.role.upper() != "OWNER":
+    if project and project.owner_user_id == user_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot demote project owner.",
+            detail="Cannot modify project owner's role directly. Use ownership transfer endpoint.",
         )
-    membership.role = payload.role.upper()
+
+    target_role = payload.role.upper()
+    if target_role not in ("ADMIN", "MEMBER", "VIEWER"):
+        if target_role == "OWNER":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot promote to OWNER directly. Use ownership transfer endpoint.",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid role '{payload.role}'. Must be ADMIN, MEMBER, or VIEWER.",
+        )
+
+    # Admins cannot modify roles of other admins, nor promote anyone to ADMIN
+    if not is_caller_owner:
+        if membership.role in ("OWNER", "ADMIN"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Project admins cannot modify roles of other admins or the project owner.",
+            )
+        if target_role == "ADMIN":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Project admins cannot promote members to ADMIN. Only the project owner can assign ADMIN.",
+            )
+
+    membership.role = target_role
     await session.commit()
     await session.refresh(membership)
     return ProjectMembershipRead.model_validate(membership)
@@ -685,10 +742,15 @@ async def remove_project_member(
     user_id: str,
     session: AsyncSession = Depends(get_db_session),
     principal: Principal = Depends(
-        RequireProjectAccess("project_id", permission=Permission.PROJECT_UPDATE)
+        RequireProjectAccess(
+            "project_id", permission=Permission.PROJECT_MEMBERS_MANAGE
+        )
     ),
 ) -> None:
     """Remove a member from a project."""
+    caller_role = principal.project_roles.get(project_id, "VIEWER")
+    is_caller_owner = (caller_role == "OWNER") or principal.is_admin
+
     project = await session.get(Project, project_id)
     if project and project.owner_user_id == user_id:
         raise HTTPException(
@@ -707,8 +769,100 @@ async def remove_project_member(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Member not found in project.",
         )
+
+    # Admins cannot remove other admins or owner
+    if not is_caller_owner and membership.role in ("OWNER", "ADMIN"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Project admins cannot remove other admins or the project owner.",
+        )
+
     await session.delete(membership)
     await session.commit()
+
+
+@router.post(
+    "/{project_id}/transfer-ownership",
+    response_model=ProjectOwnershipTransferResponse,
+)
+async def transfer_project_ownership(
+    project_id: str,
+    payload: ProjectOwnershipTransferRequest,
+    session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(
+        RequireProjectAccess(
+            "project_id", permission=Permission.PROJECT_MEMBERS_MANAGE
+        )
+    ),
+) -> ProjectOwnershipTransferResponse:
+    """Explicit, audited transfer of project ownership to another member."""
+    project = await session.get(Project, project_id)
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found."
+        )
+
+    # Only current owner or system admin can transfer ownership
+    is_owner = (project.owner_user_id == principal.user_id) or principal.is_admin
+    if not is_owner:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the current project owner can transfer project ownership.",
+        )
+
+    if payload.new_owner_user_id == project.owner_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Target user is already the project owner.",
+        )
+
+    target_user = await session.get(User, payload.new_owner_user_id)
+    if not target_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Target user '{payload.new_owner_user_id}' not found.",
+        )
+
+    # Target user must be an existing member of the project
+    target_mem_stmt = select(ProjectMembership).where(
+        ProjectMembership.project_id == project_id,
+        ProjectMembership.user_id == payload.new_owner_user_id,
+    )
+    target_mem_res = await session.execute(target_mem_stmt)
+    target_membership = target_mem_res.scalars().first()
+    if not target_membership:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Target user must be an existing member of the project before ownership can be transferred.",
+        )
+
+    # Demote old owner's membership
+    old_owner_id = project.owner_user_id
+    old_mem_stmt = select(ProjectMembership).where(
+        ProjectMembership.project_id == project_id,
+        ProjectMembership.user_id == old_owner_id,
+    )
+    old_mem_res = await session.execute(old_mem_stmt)
+    old_membership = old_mem_res.scalars().first()
+    prev_role = payload.previous_owner_role.upper()
+    if prev_role not in ("ADMIN", "MEMBER", "VIEWER"):
+        prev_role = "ADMIN"
+
+    if old_membership:
+        old_membership.role = prev_role
+
+    # Promote new owner
+    target_membership.role = "OWNER"
+    project.owner_user_id = payload.new_owner_user_id
+
+    await session.commit()
+
+    return ProjectOwnershipTransferResponse(
+        project_id=project_id,
+        previous_owner_user_id=old_owner_id,
+        new_owner_user_id=payload.new_owner_user_id,
+        message=f"Project ownership successfully transferred to user '{payload.new_owner_user_id}'.",
+    )
 
 
 @router.post("/{project_id}/scan", response_model=ScanResponse)

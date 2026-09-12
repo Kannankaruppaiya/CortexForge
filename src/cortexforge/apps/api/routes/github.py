@@ -20,9 +20,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from cortexforge.code_intelligence.change_propagator import SemanticChangePropagator
 from cortexforge.code_intelligence.scanner import RepositoryScanner
 from cortexforge.core.db import get_db_session
-from cortexforge.core.models import Project, WebhookDelivery
+from cortexforge.core.models import ExternalIdentity, Project, User, WebhookDelivery
 from cortexforge.observability.audit import AuditAction, record_audit
 from cortexforge.security.auth import Principal, get_current_principal
+from cortexforge.security.crypto import decrypt_token
 
 logger = logging.getLogger(__name__)
 
@@ -147,18 +148,22 @@ async def handle_github_webhook(
         res = await session.execute(stmt)
         project = res.scalars().first()
 
-    # 2. Secondary match: exact repository URL match (never loose project name match)
+    # 2. Secondary match: exact repository URL match ONLY for legacy projects where github_repository_id IS NULL (§16)
+    # Never allow URL fallback to match a project that already has a different immutable repository ID bound.
     if not project:
         urls_to_match = [u.strip() for u in (clone_url, html_url, ssh_url) if u and u.strip()]
         if urls_to_match:
             stmt = select(Project).where(
-                (Project.repository_url.in_(urls_to_match))
-                | (Project.clone_url.in_(urls_to_match))
+                Project.github_repository_id.is_(None),
+                (
+                    (Project.repository_url.in_(urls_to_match))
+                    | (Project.clone_url.in_(urls_to_match))
+                ),
             )
             res = await session.execute(stmt)
             project = res.scalars().first()
 
-    # Bind immutable github_repository_id if matched via URL but ID not yet recorded
+    # Bind immutable github_repository_id if matched via legacy URL fallback
     if project and not project.github_repository_id and repo_id_str:
         project.github_repository_id = repo_id_str
 
@@ -278,21 +283,59 @@ async def _record_delivery(
     )
 
 
+def get_user_github_token(ext: ExternalIdentity | None) -> str | None:
+    """Extract and decrypt user's GitHub OAuth token from ExternalIdentity metadata."""
+    if not ext or not ext.metadata_json or not isinstance(ext.metadata_json, dict):
+        return None
+    encrypted_tok = ext.metadata_json.get("encrypted_access_token")
+    if encrypted_tok:
+        try:
+            return decrypt_token(encrypted_tok)
+        except Exception as exc:
+            logger.warning("Failed to decrypt GitHub access token: %s", exc)
+            return None
+    legacy_tok = ext.metadata_json.get("access_token")
+    if legacy_tok:
+        return legacy_tok
+    return None
+
+
+@router.delete("/disconnect", status_code=status.HTTP_204_NO_CONTENT)
+async def disconnect_github(
+    principal: Principal = Depends(get_current_principal),
+    session: AsyncSession = Depends(get_db_session),
+) -> None:
+    """Disconnect and revoke GitHub external identity for the current user."""
+    if not principal.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated."
+        )
+    stmt = select(ExternalIdentity).where(
+        ExternalIdentity.user_id == principal.user_id,
+        ExternalIdentity.provider == "github",
+    )
+    res = await session.execute(stmt)
+    ext = res.scalars().first()
+    if ext:
+        await session.delete(ext)
+        await session.commit()
+
+
 @router.get("/repositories")
 @router.get("/user/repositories")
-async def get_user_github_repositories(
-    session: AsyncSession = Depends(get_db_session),
+async def list_user_github_repositories(
     principal: Principal = Depends(get_current_principal),
+    session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
-    """Retrieve user repositories from GitHub integration (§5, §6)."""
+    """List accessible repositories for the authenticated user via their GitHub OAuth token (§14)."""
     import httpx
 
-    from cortexforge.core.models import ExternalIdentity, User
+    from cortexforge.core.models import ExternalIdentity
 
     if not principal.user_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required to access GitHub repositories.",
+            detail="Authentication required to list GitHub repositories.",
         )
 
     user = await session.get(User, principal.user_id)
@@ -313,7 +356,7 @@ async def get_user_github_repositories(
     if ext and ext.metadata_json and isinstance(ext.metadata_json, dict):
         if not gh_login:
             gh_login = ext.metadata_json.get("login")
-        user_gh_token = ext.metadata_json.get("access_token")
+        user_gh_token = get_user_github_token(ext)
 
     if not gh_login:
         return {
@@ -382,6 +425,9 @@ async def get_user_github_repositories(
     }
 
 
+get_user_github_repositories = list_user_github_repositories
+
+
 @router.get("/repositories/branches")
 async def get_github_repository_branches(
     owner: str,
@@ -418,9 +464,7 @@ async def get_github_repository_branches(
     )
     ext_res = await session.execute(ext_stmt)
     ext = ext_res.scalars().first()
-    gh_token = None
-    if ext and ext.metadata_json and isinstance(ext.metadata_json, dict):
-        gh_token = ext.metadata_json.get("access_token")
+    gh_token = get_user_github_token(ext)
 
     if not gh_token:
         raise HTTPException(

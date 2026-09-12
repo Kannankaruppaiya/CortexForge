@@ -89,13 +89,19 @@ def set_engine(new_engine: AsyncEngine) -> None:
     )
 
 
+def is_managed_environment() -> bool:
+    """Check if the current runtime environment is a managed environment requiring Alembic migrations."""
+    env = os.environ.get("CORTEX_ENV", os.environ.get("ENVIRONMENT", "")).strip().lower()
+    return env in ("production", "prod", "staging")
+
+
 async def init_db() -> None:
     """Initialize database schema.
 
-    In production (CORTEX_ENV=production), Alembic migrations are the authoritative
-    schema manager invoked prior to startup, avoiding unmanaged create_all calls (§14, §15).
+    In managed environments (production, prod, staging), Alembic migrations are the
+    authoritative schema manager invoked prior to startup, avoiding unmanaged create_all calls (§14, §15).
     """
-    if os.environ.get("CORTEX_ENV") == "production":
+    if is_managed_environment():
         from sqlalchemy import text
 
         async with engine.begin() as conn:
@@ -107,13 +113,13 @@ async def init_db() -> None:
                 if not version and not os.environ.get("PYTEST_CURRENT_TEST"):
                     raise RuntimeError(
                         "Database schema authority error: 'alembic_version' table is empty. "
-                        "Run 'alembic upgrade head' prior to production startup."
+                        "Run 'alembic upgrade head' prior to managed environment startup."
                     )
             except Exception as exc:
                 if not os.environ.get("PYTEST_CURRENT_TEST"):
                     raise RuntimeError(
-                        f"Production database schema authority check failed: {exc}. "
-                        "Run 'alembic upgrade head' before starting the production application."
+                        f"Managed environment database schema authority check failed: {exc}. "
+                        "Run 'alembic upgrade head' before starting in staging/production."
                     ) from exc
         return
 

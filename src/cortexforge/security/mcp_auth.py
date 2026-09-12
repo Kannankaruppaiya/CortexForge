@@ -113,27 +113,23 @@ class CortexForgeOAuthProvider(
             )
 
             if existing:
-                existing.client_name = client_info.client_name
-                existing.redirect_uris = redirect_uris
-                existing.grant_types = grant_types
-                existing.response_types = response_types
-                existing.token_endpoint_auth_method = auth_method
-                existing.scopes = scopes
-                if secret_hash:
-                    existing.client_secret_hash = secret_hash
-            else:
-                client_row = MCPOAuthClient(
-                    id=str(uuid.uuid4()),
-                    client_id=client_info.client_id,
-                    client_name=client_info.client_name,
-                    client_secret_hash=secret_hash,
-                    redirect_uris=redirect_uris,
-                    grant_types=grant_types,
-                    response_types=response_types,
-                    token_endpoint_auth_method=auth_method,
-                    scopes=scopes,
+                raise ValueError(
+                    f"OAuth client_id '{client_info.client_id}' is already registered. "
+                    "Overwriting registered OAuth clients without authenticated client management is prohibited."
                 )
-                session.add(client_row)
+
+            client_row = MCPOAuthClient(
+                id=str(uuid.uuid4()),
+                client_id=client_info.client_id,
+                client_name=client_info.client_name,
+                client_secret_hash=secret_hash,
+                redirect_uris=redirect_uris,
+                grant_types=grant_types,
+                response_types=response_types,
+                token_endpoint_auth_method=auth_method,
+                scopes=scopes,
+            )
+            session.add(client_row)
 
     async def authorize(
         self,
@@ -146,7 +142,7 @@ class CortexForgeOAuthProvider(
 
         async with session_scope() as session:
             if req:
-                # 1. Check session cookie
+                # 1. Check HttpOnly session cookie
                 cookie_token = req.cookies.get("cortex_session") or req.cookies.get(
                     "cortexforge_session"
                 )
@@ -161,16 +157,6 @@ class CortexForgeOAuthProvider(
                     if auth_hdr and auth_hdr.lower().startswith("bearer "):
                         tok = auth_hdr[7:].strip()
                         principal = await resolve_principal_from_token(session, tok)
-                        if principal and principal.user_id:
-                            user = await session.get(User, principal.user_id)
-
-                # 3. Check query param session token (e.g. redirected from login page)
-                if not user:
-                    query_tok = req.query_params.get("session_token") or req.query_params.get(
-                        "cortex_session"
-                    )
-                    if query_tok:
-                        principal = await resolve_principal_from_token(session, query_tok)
                         if principal and principal.user_id:
                             user = await session.get(User, principal.user_id)
 

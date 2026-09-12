@@ -194,6 +194,9 @@ async def take_snapshot(
     project_id: str,
     commit_sha: str,
     session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(
+        RequireProjectAccess("project_id", permission=Permission.SNAPSHOT_CREATE)
+    ),
 ) -> CognitiveSnapshotRead:
     """Capture a deterministic cognitive snapshot of project state at a commit."""
     project = await session.get(Project, project_id)
@@ -232,6 +235,9 @@ async def replay_state_at_commit(
     project_id: str,
     commit_sha: str,
     session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(
+        RequireProjectAccess("project_id", permission=Permission.SNAPSHOT_READ)
+    ),
 ) -> dict[str, Any]:
     """Reconstruct exact cognitive and architectural state at a given commit."""
     project = await session.get(Project, project_id)
@@ -304,7 +310,11 @@ async def list_failure_episodes(
 
 @router.post("/projects/{project_id}/mutations/benchmark")
 async def run_mutation_benchmark(
-    project_id: str, session: AsyncSession = Depends(get_db_session)
+    project_id: str,
+    session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(
+        RequireProjectAccess("project_id", permission=Permission.JOB_CREATE)
+    ),
 ) -> dict[str, Any]:
     """Run deterministic repository mutation benchmark evaluating cognitive update accuracy."""
     project = await session.get(Project, project_id)

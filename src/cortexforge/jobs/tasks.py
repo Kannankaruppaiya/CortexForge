@@ -195,10 +195,26 @@ async def import_and_scan_project_task(job: JobContext) -> dict[str, Any]:
             and not job.already_done("clone")
         ):
             await job.checkpoint("cloning", progress=0.15)
+            auth_token = None
+            if project.owner_user_id and project.source_type == "GITHUB":
+                from sqlalchemy import select
+
+                from cortexforge.apps.api.routes.github import get_user_github_token
+                from cortexforge.core.models import ExternalIdentity
+
+                stmt = select(ExternalIdentity).where(
+                    ExternalIdentity.user_id == project.owner_user_id,
+                    ExternalIdentity.provider == "github",
+                )
+                ext_res = await session.execute(stmt)
+                ext = ext_res.scalars().first()
+                auth_token = get_user_github_token(ext)
+
             clone_repository(
                 url=project.clone_url,
                 target_dir=project.local_path,
                 branch=project.default_branch,
+                auth_token=auth_token,
             )
             await job.checkpoint("cloned", progress=0.35)
 

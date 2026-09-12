@@ -24,6 +24,7 @@ class Permission(str, Enum):
     PROJECT_UPDATE = "project.update"
     PROJECT_DELETE = "project.delete"
     PROJECT_SCAN = "project.scan"
+    PROJECT_MEMBERS_MANAGE = "project.members.manage"
 
     MEMORY_READ = "memory.read"
     MEMORY_CREATE = "memory.create"
@@ -79,6 +80,7 @@ ROLE_PERMISSIONS: dict[ProjectRole, set[Permission]] = {
         Permission.AGENT_MANAGE,
         Permission.WEBHOOK_MANAGE,
         Permission.SETTINGS_MANAGE,
+        Permission.PROJECT_MEMBERS_MANAGE,
     },
     ProjectRole.MEMBER: {
         Permission.PROJECT_READ,
@@ -104,9 +106,8 @@ ROLE_PERMISSIONS: dict[ProjectRole, set[Permission]] = {
     },
 }
 
-# Scope mapping for AI Agents (translating high-level scopes to permissions)
+# Scope mapping for AI Agents and MCP Bearer Tokens (least-privilege scopes to permissions)
 AGENT_SCOPE_TO_PERMISSIONS: dict[str, set[Permission]] = {
-    "*": set(Permission),
     "read": {
         Permission.PROJECT_READ,
         Permission.MEMORY_READ,

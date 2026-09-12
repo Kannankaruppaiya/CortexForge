@@ -35,6 +35,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     import asyncio
     import logging
 
+    from cortexforge.security.auth import assert_startup_auth_safety
+
+    assert_startup_auth_safety(os.environ.get("CORTEX_HOST", "127.0.0.1"))
     await init_db()
     from cortexforge.core.db import session_scope
     from cortexforge.jobs.durable import DurableJobStore
@@ -284,8 +287,12 @@ async def health_check() -> HealthResponse:
 
 @app.get("/metrics", tags=["observability"])
 @app.get("/api/v1/metrics", tags=["observability"])
-async def get_metrics(request: Request, format: str | None = None):
-    """Retrieve runtime performance telemetry and counters (§21)."""
+async def get_metrics(
+    request: Request,
+    format: str | None = None,
+    principal: Principal = Depends(get_current_principal),
+):
+    """Retrieve runtime performance telemetry and counters (§21). Requires authenticated principal."""
     from fastapi.responses import PlainTextResponse
 
     from cortexforge.observability.metrics import MetricsCollector

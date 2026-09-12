@@ -351,7 +351,8 @@ class GeminiProvider(LLMProvider):
             return await MockLLMProvider().generate(prompt, system_prompt, chosen_model)
 
         start = time.perf_counter()
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{chosen_model}:generateContent?key={self._api_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{chosen_model}:generateContent"
+        headers = {"x-goog-api-key": self._api_key}
         parts = []
         if system_prompt:
             parts.append({"text": f"System Instructions: {system_prompt}\n\n"})
@@ -366,7 +367,7 @@ class GeminiProvider(LLMProvider):
         }
 
         async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(url, json=payload)
+            resp = await client.post(url, json=payload, headers=headers)
             resp.raise_for_status()
             data = resp.json()
             latency = (time.perf_counter() - start) * 1000

@@ -57,6 +57,7 @@ from cortexforge.security.auth import (
 )
 from cortexforge.security.crypto import (
     PasswordHasher,
+    encrypt_token,
     generate_otp,
     generate_session_token,
     hash_token,
@@ -1120,7 +1121,7 @@ async def github_callback(
     ext_record = ext_res.scalars().first()
     ext_metadata = {
         "login": gh_login,
-        "access_token": access_token,
+        "encrypted_access_token": encrypt_token(access_token),
         "scope": token_scope,
         "connected_at": now.isoformat(),
     }
@@ -1563,3 +1564,26 @@ async def revoke_session(
 
     target.revoked_at = datetime.now(UTC)
     await session.commit()
+
+
+@router.delete("/github/disconnect", status_code=status.HTTP_204_NO_CONTENT)
+async def disconnect_github(
+    principal: Principal = Depends(get_current_principal),
+    session: AsyncSession = Depends(get_db_session),
+) -> None:
+    """Disconnect and revoke GitHub external identity for the current authenticated user."""
+    if not principal.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated."
+        )
+
+    stmt = select(ExternalIdentity).where(
+        ExternalIdentity.user_id == principal.user_id,
+        ExternalIdentity.provider == "github",
+    )
+    res = await session.execute(stmt)
+    ext = res.scalars().first()
+    if ext:
+        await session.delete(ext)
+        await session.commit()
+

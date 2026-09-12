@@ -47,8 +47,38 @@ EXTENSION_LANGUAGE_MAP = {
 }
 
 
+import ipaddress
+import socket
+from urllib.parse import urlparse
+
+DEFAULT_ALLOWED_GIT_HOSTS = frozenset(
+    {"github.com", "gitlab.com", "bitbucket.org"}
+)
+
+
+NAT64_PREFIX = ipaddress.IPv6Network("64:ff9b::/96")
+
+
+def _is_ip_disallowed(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Check if an IP address belongs to private, loopback, link-local, multicast, or cloud metadata ranges."""
+    if (
+        ip.is_loopback
+        or ip.is_private
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_unspecified
+    ):
+        return True
+    if str(ip) == "169.254.169.254":
+        return True
+    if ip.is_reserved:
+        # Allow RFC 6052 Well-Known Prefix NAT64 IPv6 addresses
+        return not (isinstance(ip, ipaddress.IPv6Address) and ip in NAT64_PREFIX)
+    return False
+
+
 def validate_git_url(url: str) -> bool:
-    """Validate Git clone URL to prevent SSRF and argument injection."""
+    """Validate Git clone URL to prevent SSRF, argument injection, and hostname manipulation."""
     if not url or len(url) > 1024:
         return False
     stripped = url.strip()
@@ -58,10 +88,76 @@ def validate_git_url(url: str) -> bool:
     # Prohibit file://, custom schemes, or unapproved protocols
     if any(
         stripped.lower().startswith(proto)
-        for proto in ("file:", "ftp:", "smb:", "nfs:")
+        for proto in ("file:", "ftp:", "smb:", "nfs:", "gopher:", "dict:", "ldap:")
     ):
         return False
-    return bool(SAFE_GIT_URL_REGEX.match(stripped))
+    if not SAFE_GIT_URL_REGEX.match(stripped):
+        return False
+
+    hostname = ""
+    if stripped.startswith("git@"):
+        after_at = stripped[4:]
+        hostname = after_at.split(":")[0].strip().lower()
+    else:
+        try:
+            parsed = urlparse(stripped)
+            hostname = (parsed.hostname or "").strip().lower()
+        except Exception:
+            return False
+
+    if not hostname:
+        return False
+
+    # Reject loopback or private hostnames immediately
+    if hostname in ("localhost", "127.0.0.1", "::1") or hostname.endswith(
+        (".local", ".internal", ".arpa", ".lan")
+    ):
+        return False
+
+    # Check if direct IP address literal
+    try:
+        ip = ipaddress.ip_address(hostname)
+        if _is_ip_disallowed(ip):
+            return False
+    except ValueError:
+        pass
+
+    allowed_env = os.environ.get("CORTEX_ALLOWED_GIT_HOSTS", "").strip()
+    configured_hosts = (
+        {h.strip().lower() for h in allowed_env.split(",") if h.strip()}
+        if allowed_env
+        else set()
+    )
+    all_allowed = DEFAULT_ALLOWED_GIT_HOSTS | configured_hosts
+
+    is_known_host = any(
+        hostname == allowed or hostname.endswith("." + allowed)
+        for allowed in all_allowed
+    )
+
+    strict_hosts = os.environ.get("CORTEX_GIT_STRICT_HOSTS", "1").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    if strict_hosts and not is_known_host:
+        return False
+
+    # Resolve DNS to check for SSRF and DNS rebinding attacks
+    try:
+        addr_info = socket.getaddrinfo(hostname, None)
+        for _family, _socktype, _proto, _canonname, sockaddr in addr_info:
+            ip_str = sockaddr[0]
+            ip = ipaddress.ip_address(ip_str)
+            if _is_ip_disallowed(ip):
+                return False
+    except socket.gaierror:
+        if not is_known_host:
+            return False
+    except Exception:
+        return False
+
+    return True
 
 
 def hardened_git_env() -> dict[str, str]:
@@ -83,6 +179,7 @@ def clone_repository(
     url: str,
     target_dir: str | Path,
     branch: str | None = None,
+    auth_token: str | None = None,
     timeout: int = 120,
 ) -> None:
     """Safely clone a remote Git repository into target_dir."""
@@ -98,9 +195,20 @@ def clone_repository(
         "core.hooksPath=",
         "-c",
         "safe.directory=*",
+        "-c",
+        "http.followRedirects=false",
+    ]
+    if auth_token:
+        parsed = urlparse(url)
+        host = parsed.hostname or "github.com"
+        cmd.extend(
+            ["-c", f"http.https://{host}/.extraHeader=AUTHORIZATION: bearer {auth_token}"]
+        )
+
+    cmd.extend([
         "clone",
         "--depth=1",
-    ]
+    ])
     if branch and branch.strip():
         cmd.extend(["-b", branch.strip()])
 
@@ -119,6 +227,9 @@ def clone_repository(
             error_msg = res.stderr.strip() or res.stdout.strip() or "Git clone failed"
             # Redact any tokens or credentials that might be in stderr
             sanitized_err = re.sub(r"://[^@]+@", "://[REDACTED]@", error_msg)
+            sanitized_err = re.sub(
+                r"(bearer\s+)[^\s]+", r"\1[REDACTED]", sanitized_err, flags=re.IGNORECASE
+            )
             raise RuntimeError(f"Clone failed: {sanitized_err}")
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"Git clone timed out after {timeout} seconds")

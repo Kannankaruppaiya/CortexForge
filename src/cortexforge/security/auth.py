@@ -39,16 +39,60 @@ from cortexforge.security.policy import (
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 bearer_scheme = HTTPBearer(auto_error=False)
 
+VALID_ENVIRONMENTS = frozenset({"development", "test", "staging", "production", "prod"})
 AUTH_REQUIRED_ENVIRONMENTS = frozenset({"production", "prod", "staging"})
 
 
+def validate_runtime_environment() -> str:
+    """Validate and return normalized CORTEX_ENV setting."""
+    raw_env = os.environ.get("CORTEX_ENV", os.environ.get("ENVIRONMENT"))
+    if raw_env is None:
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            return "test"
+        raise ValueError(
+            "CORTEX_ENV is not set. Deployment must explicitly define CORTEX_ENV as one of: "
+            f"{', '.join(sorted(VALID_ENVIRONMENTS))}."
+        )
+    norm = raw_env.strip().lower()
+    if norm not in VALID_ENVIRONMENTS:
+        raise ValueError(
+            f"Invalid CORTEX_ENV '{raw_env}'. Must explicitly be one of: "
+            f"{', '.join(sorted(VALID_ENVIRONMENTS))}."
+        )
+    return norm
+
+
 def is_production_environment() -> bool:
-    env = (
-        os.environ.get("CORTEX_ENV", os.environ.get("ENVIRONMENT", "development"))
-        .strip()
-        .lower()
-    )
+    env = validate_runtime_environment()
     return env in AUTH_REQUIRED_ENVIRONMENTS
+
+
+def is_dev_unauthenticated_allowed() -> bool:
+    """Check if unauthenticated dev fallback is explicitly opted-in."""
+    return os.environ.get("CORTEX_DEV_ALLOW_UNAUTHENTICATED", "").strip().lower() in (
+        "true",
+        "1",
+        "yes",
+    )
+
+
+def assert_startup_auth_safety(bind_host: str = "127.0.0.1") -> None:
+    """Startup safety guard: refuse to start with disabled or permissive fallback auth on public interfaces."""
+    env = validate_runtime_environment()
+    is_public = bind_host in ("0.0.0.0", "::", "") or not (
+        bind_host.startswith("127.") or bind_host in ("localhost", "::1")
+    )
+    if is_public:
+        if is_auth_disabled():
+            raise RuntimeError(
+                f"FATAL SECURITY MISCONFIGURATION: Authentication is disabled (CORTEX_AUTH_DISABLED) "
+                f"while listening on public interface '{bind_host}'. Server refused to start."
+            )
+        if env not in AUTH_REQUIRED_ENVIRONMENTS and is_dev_unauthenticated_allowed():
+            raise RuntimeError(
+                f"FATAL SECURITY MISCONFIGURATION: Development unauthenticated fallback is enabled "
+                f"while listening on public interface '{bind_host}'. Server refused to start."
+            )
 
 
 @dataclass
@@ -64,6 +108,7 @@ class Principal:
     allowed_project_ids: set[str] = field(default_factory=set)
     project_roles: dict[str, str] = field(default_factory=dict)
     agent_scopes: dict[str, list[str]] = field(default_factory=dict)
+    token_scopes: set[str] | None = None
     is_admin: bool = False
 
     def can_access_project(self, project_id: str) -> bool:
@@ -76,6 +121,16 @@ class Principal:
 
     def has_permission(self, project_id: str, permission: Permission) -> bool:
         """Check if principal has permission in project."""
+        if self.token_scopes is not None:
+            # Token is restricted by explicit OAuth/bearer scopes (§30)
+            from cortexforge.security.policy import AGENT_SCOPE_TO_PERMISSIONS
+
+            mapped_perms: set[Permission] = set()
+            for s in self.token_scopes:
+                mapped_perms |= AGENT_SCOPE_TO_PERMISSIONS.get(s, set())
+            if permission not in mapped_perms:
+                return False
+
         if self.is_admin:
             return True
         if "*" in self.allowed_project_ids:
@@ -275,6 +330,7 @@ async def resolve_principal_from_token(
                 owned_ids.add(m.project_id)
 
             is_admin_user = bool(getattr(user, "is_admin", False))
+            scopes = set(mcp_tok.scope.split()) if mcp_tok.scope else set()
             return Principal(
                 principal_id=user.id,
                 actor_type="USER",
@@ -283,6 +339,7 @@ async def resolve_principal_from_token(
                 role="admin" if is_admin_user else "user",
                 allowed_project_ids=owned_ids,
                 project_roles=proj_roles,
+                token_scopes=scopes,
                 is_admin=is_admin_user,
             )
 
@@ -364,19 +421,19 @@ async def get_current_principal(
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-    if strict_auth or is_prod:
+    runtime_env = validate_runtime_environment()
+    if strict_auth or is_prod or runtime_env in AUTH_REQUIRED_ENVIRONMENTS:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing or invalid authentication credentials.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-
-    # 4. Development/Test mode fallback (strictly restricted to non-production environments)
-    if is_prod:
+    # In development mode, unauthenticated fallback requires explicit opt-in
+    if runtime_env == "development" and not is_dev_unauthenticated_allowed():
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required in production environment.",
+            detail="Authentication required in development unless CORTEX_DEV_ALLOW_UNAUTHENTICATED=true is explicitly set.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 

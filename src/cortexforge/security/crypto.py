@@ -139,3 +139,70 @@ def generate_agent_key() -> tuple[str, str]:
     raw_key = f"cortex_agent_{secrets.token_urlsafe(32)}"
     key_hash = hash_token(raw_key)
     return raw_key, key_hash
+
+
+def _get_encryption_key(explicit_key: str | bytes | None = None) -> bytes:
+    """Derive 256-bit encryption key from CORTEX_GITHUB_TOKEN_ENCRYPTION_KEY or SECRET_KEY."""
+    import os
+
+    if explicit_key:
+        raw = (
+            explicit_key.encode("utf-8")
+            if isinstance(explicit_key, str)
+            else explicit_key
+        )
+    else:
+        raw = (
+            os.environ.get("CORTEX_GITHUB_TOKEN_ENCRYPTION_KEY")
+            or os.environ.get("CORTEX_ENCRYPTION_KEY")
+            or os.environ.get("SECRET_KEY")
+            or "cortexforge_default_envelope_key_do_not_use_in_production"
+        ).encode("utf-8")
+    return hashlib.sha256(raw).digest()
+
+
+def encrypt_token(plaintext: str, key: str | bytes | None = None) -> str:
+    """Encrypt a sensitive token at rest using AES-256-GCM.
+
+    Returns URL-safe string prefixed with 'v1:enc:' followed by base64-encoded nonce+ciphertext.
+    """
+    if not plaintext:
+        return ""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    aes_key = _get_encryption_key(key)
+    aesgcm = AESGCM(aes_key)
+    nonce = secrets.token_bytes(12)  # 96-bit standard GCM nonce
+    ciphertext = aesgcm.encrypt(nonce, plaintext.encode("utf-8"), None)
+    encoded = base64.urlsafe_b64encode(nonce + ciphertext).decode("ascii")
+    return f"v1:enc:{encoded}"
+
+
+def decrypt_token(ciphertext: str, key: str | bytes | None = None) -> str:
+    """Decrypt a token encrypted with encrypt_token.
+
+    If the token does not have 'v1:enc:' prefix, it is treated as a legacy plaintext token
+    for seamless backward compatibility.
+    """
+    if not ciphertext:
+        return ""
+    if not ciphertext.startswith("v1:enc:"):
+        # Legacy unencrypted token
+        return ciphertext
+
+    raw_b64 = ciphertext[7:]
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    aes_key = _get_encryption_key(key)
+    aesgcm = AESGCM(aes_key)
+    try:
+        combined = base64.urlsafe_b64decode(raw_b64.encode("ascii"))
+        if len(combined) < 12:
+            raise ValueError("Invalid encrypted payload length")
+        nonce = combined[:12]
+        ct = combined[12:]
+        decrypted = aesgcm.decrypt(nonce, ct, None)
+        return decrypted.decode("utf-8")
+    except Exception as exc:
+        raise ValueError(f"Failed to decrypt token: {exc}") from exc
+

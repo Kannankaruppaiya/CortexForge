@@ -223,6 +223,18 @@ class ProjectMembershipRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class ProjectOwnershipTransferRequest(BaseModel):
+    new_owner_user_id: str
+    previous_owner_role: str = "ADMIN"
+
+
+class ProjectOwnershipTransferResponse(BaseModel):
+    project_id: str
+    previous_owner_user_id: str
+    new_owner_user_id: str
+    message: str
+
+
 class AgentCredentialCreate(BaseModel):
     name: str = "default"
     expires_in_days: int | None = None
