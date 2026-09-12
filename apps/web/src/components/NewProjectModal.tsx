@@ -453,10 +453,10 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
   );
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-xl overflow-hidden shadow-2xl transition-all">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 md:p-6 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200 overflow-y-auto">
+      <div className="bg-slate-900 border border-slate-800/90 rounded-2xl w-full max-w-xl shadow-2xl transition-all max-h-[90vh] flex flex-col overflow-hidden my-auto">
         {/* Modal Header */}
-        <div className="flex items-center justify-between p-5 border-b border-slate-800">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 shrink-0 bg-slate-900">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
               <FolderGit2 className="w-5 h-5" />
@@ -479,7 +479,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
 
         {/* In-Modal Job Progress View */}
         {activeJobId ? (
-          <div className="p-6 space-y-6">
+          <div className="p-6 space-y-5 overflow-y-auto flex-1 custom-scrollbar">
             <div className="text-center space-y-2">
               <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-indigo-500/10 text-indigo-400 border border-indigo-500/30">
                 {sourceType === 'LOCAL' && <FolderGit2 className="w-3.5 h-3.5" />}
@@ -648,10 +648,10 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
             </div>
           </div>
         ) : (
-          <>
+          <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0 overflow-hidden">
             {/* Source Selector Tabs */}
-            <div className="p-5 pb-0">
-              <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
+            <div className="px-6 pt-4 pb-3 shrink-0 bg-slate-900 border-b border-slate-800/40">
+              <label className="block text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-2">
                 Repository Source
               </label>
               <div className="grid grid-cols-3 gap-2">
@@ -661,7 +661,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                     setSourceType('LOCAL');
                     setFormError(null);
                   }}
-                  className={`flex items-center justify-center gap-2 p-3 rounded-xl border text-xs font-semibold transition-all ${
+                  className={`flex items-center justify-center gap-2 p-2.5 rounded-xl border text-xs font-semibold transition-all ${
                     sourceType === 'LOCAL'
                       ? 'bg-indigo-600/20 border-indigo-500 text-indigo-300 shadow-md shadow-indigo-500/10'
                       : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-300 hover:border-slate-700'
@@ -677,7 +677,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                     setSourceType('GITHUB');
                     setFormError(null);
                   }}
-                  className={`flex items-center justify-center gap-2 p-3 rounded-xl border text-xs font-semibold transition-all ${
+                  className={`flex items-center justify-center gap-2 p-2.5 rounded-xl border text-xs font-semibold transition-all ${
                     sourceType === 'GITHUB'
                       ? 'bg-indigo-600/20 border-indigo-500 text-indigo-300 shadow-md shadow-indigo-500/10'
                       : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-300 hover:border-slate-700'
@@ -693,7 +693,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                     setSourceType('GIT_URL');
                     setFormError(null);
                   }}
-                  className={`flex items-center justify-center gap-2 p-3 rounded-xl border text-xs font-semibold transition-all ${
+                  className={`flex items-center justify-center gap-2 p-2.5 rounded-xl border text-xs font-semibold transition-all ${
                     sourceType === 'GIT_URL'
                       ? 'bg-indigo-600/20 border-indigo-500 text-indigo-300 shadow-md shadow-indigo-500/10'
                       : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-300 hover:border-slate-700'
@@ -705,8 +705,8 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
               </div>
             </div>
 
-            {/* Source-Specific Form */}
-            <form onSubmit={handleSubmit} className="p-5 space-y-4">
+            {/* Scrollable Form Body */}
+            <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4 custom-scrollbar">
               {formError && (
                 <div className="p-3.5 rounded-xl bg-rose-950/40 border border-rose-800/60 text-rose-300 text-xs flex items-center gap-2">
                   <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
@@ -729,36 +729,25 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
 
                   <div>
                     <div className="flex items-center justify-between mb-1.5">
-                      <label className="text-xs font-semibold text-slate-300 uppercase tracking-wider">
-                        Repository Folder *
+                      <label className="text-[11px] font-semibold text-slate-300 uppercase tracking-wider">
+                        Repository Folder <span className="text-indigo-400">*</span>
                       </label>
-                      <div className="flex items-center gap-2.5">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const nextState = !showFolderBrowser;
-                            setShowFolderBrowser(nextState);
-                            if (nextState && !browseData) {
-                              fetchDirectories(localPath || null);
-                            }
-                          }}
-                          className="text-[11px] text-indigo-400 hover:text-indigo-300 flex items-center gap-1 font-medium transition-colors"
-                        >
-                          <FolderOpen className="w-3.5 h-3.5" />
-                          <span>{showFolderBrowser ? 'Close Explorer' : 'Browse Folders'}</span>
-                        </button>
+                      <div className="flex items-center gap-2">
+                        {isValidatingPath && (
+                          <span className="text-[11px] text-indigo-400 flex items-center gap-1 font-mono">
+                            <RefreshCw className="w-3 h-3 animate-spin" />
+                            <span>Validating...</span>
+                          </span>
+                        )}
                         <button
                           type="button"
                           onClick={() => handleValidateLocalPath()}
                           disabled={isValidatingPath || !localPath.trim()}
-                          className="text-[11px] text-slate-400 hover:text-slate-200 disabled:opacity-50 flex items-center gap-1 transition-colors"
+                          className="text-[11px] text-slate-400 hover:text-slate-200 disabled:opacity-50 flex items-center gap-1 transition-colors px-2 py-0.5 rounded bg-slate-800/80 border border-slate-700/60"
+                          title="Re-validate repository path"
                         >
-                          {isValidatingPath ? (
-                            <RefreshCw className="w-3 h-3 animate-spin" />
-                          ) : (
-                            <ShieldCheck className="w-3 h-3" />
-                          )}
-                          <span>Validate</span>
+                          <ShieldCheck className="w-3 h-3 text-indigo-400" />
+                          <span>Check</span>
                         </button>
                       </div>
                     </div>
@@ -772,13 +761,13 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                           setValidationResult(null);
                         }}
                         onBlur={() => handleValidateLocalPath()}
-                        placeholder="e.g. /home/user/projects/my-repo or C:\Projects\MyRepo"
+                        placeholder="e.g. C:\Projects\MyRepo or /home/user/projects/my-repo"
                         className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm font-mono text-white placeholder-slate-600 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-colors"
                       />
                       <button
                         type="button"
                         onClick={handleOpenFolderBrowser}
-                        className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold flex items-center gap-2 transition-all shrink-0 shadow-md shadow-indigo-600/20"
+                        className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold flex items-center gap-2 transition-all shrink-0 shadow-md shadow-indigo-600/20 active:scale-[0.98]"
                         title="Browse folders on your computer"
                       >
                         <FolderOpen className="w-4 h-4" />
@@ -940,68 +929,81 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
 
                   {/* Local Path Status & Language Area */}
                   {validationResult && !existingProject && (
-                    <div className="bg-slate-950/90 border border-slate-800 rounded-xl p-3.5 space-y-2.5">
-                      <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
-                        Repository Status
+                    <div className="bg-slate-950/70 border border-slate-800/90 rounded-xl p-3.5 space-y-3 shadow-inner">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                          Repository Status
+                        </span>
+                        {validationResult.is_git && (
+                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 font-semibold flex items-center gap-1">
+                            <CheckCircle2 className="w-3 h-3" />
+                            Git Initialized
+                          </span>
+                        )}
                       </div>
+
                       <div className="grid grid-cols-3 gap-2 text-xs">
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex items-center gap-1.5 p-2 rounded-lg bg-slate-900/60 border border-slate-800/60">
                           {validationResult.valid ? (
-                            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                           ) : (
-                            <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                            <AlertCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
                           )}
                           <span
-                            className={
-                              validationResult.valid ? 'text-slate-200' : 'text-rose-300'
-                            }
+                            className={`text-[11px] truncate ${
+                              validationResult.valid ? 'text-slate-300' : 'text-rose-300'
+                            }`}
                           >
-                            {validationResult.valid ? 'Folder exists' : 'Folder does not exist'}
+                            {validationResult.valid ? 'Folder Exists' : 'Invalid Path'}
                           </span>
                         </div>
-                        <div className="flex items-center gap-1.5">
+
+                        <div className="flex items-center gap-1.5 p-2 rounded-lg bg-slate-900/60 border border-slate-800/60">
                           {validationResult.is_git ? (
-                            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                           ) : (
-                            <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
+                            <AlertCircle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
                           )}
                           <span
-                            className={
-                              validationResult.is_git ? 'text-slate-200' : 'text-amber-300'
-                            }
+                            className={`text-[11px] truncate ${
+                              validationResult.is_git ? 'text-slate-300' : 'text-amber-300'
+                            }`}
                           >
-                            {validationResult.is_git ? 'Git repository detected' : 'Git repository not detected'}
+                            {validationResult.is_git ? 'Git Repo' : 'No Git'}
                           </span>
                         </div>
-                        <div className="flex items-center gap-1.5">
+
+                        <div className="flex items-center gap-1.5 p-2 rounded-lg bg-slate-900/60 border border-slate-800/60">
                           {validationResult.valid ? (
-                            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                           ) : (
-                            <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                            <AlertCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
                           )}
                           <span
-                            className={
-                              validationResult.valid ? 'text-slate-200' : 'text-rose-300'
-                            }
+                            className={`text-[11px] truncate ${
+                              validationResult.valid ? 'text-slate-300' : 'text-rose-300'
+                            }`}
                           >
-                            {validationResult.valid ? 'Repository accessible' : 'Not accessible'}
+                            {validationResult.valid ? 'Accessible' : 'No Access'}
                           </span>
                         </div>
                       </div>
 
                       {validationResult.languages &&
                         Object.keys(validationResult.languages).length > 0 && (
-                          <div className="pt-2 border-t border-slate-800/80">
-                            <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5">
+                          <div className="pt-2.5 border-t border-slate-800/80">
+                            <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">
                               Detected Languages
                             </div>
                             <div className="flex flex-wrap gap-1.5">
                               {Object.entries(validationResult.languages).map(([lang, pct]) => (
                                 <span
                                   key={lang}
-                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-mono bg-indigo-950/60 border border-indigo-800/40 text-indigo-300"
+                                  className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-mono bg-indigo-500/10 border border-indigo-500/25 text-indigo-300"
                                 >
-                                  {lang} {pct}%
+                                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
+                                  <span>{lang}</span>
+                                  <span className="text-slate-400 text-[10px]">{pct}%</span>
                                 </span>
                               ))}
                             </div>
@@ -1055,23 +1057,18 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                   </div>
 
                   {/* Explicit User Consent (§15) */}
-                  <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800/80 text-[11px] text-slate-400 space-y-1">
-                    <div className="font-semibold text-slate-300 flex items-center gap-1.5">
-                      <Lock className="w-3.5 h-3.5 text-indigo-400" />
-                      <span>Repository Analysis Confirmation</span>
+                  <div className="p-3 rounded-xl bg-indigo-950/20 border border-indigo-500/20 text-[11px] text-slate-400 flex items-start gap-2.5">
+                    <div className="w-6 h-6 rounded-md bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center shrink-0 mt-0.5 text-indigo-400">
+                      <Lock className="w-3.5 h-3.5" />
                     </div>
-                    <div>
-                      {localPath ? (
-                        <span>
-                          Repository: <code className="text-indigo-300 font-mono">{localPath}</code>
-                        </span>
-                      ) : (
-                        <span>Select a local repository from your computer.</span>
-                      )}
+                    <div className="space-y-0.5 min-w-0 flex-1">
+                      <div className="font-semibold text-slate-200 text-xs">
+                        Repository Analysis & Indexing
+                      </div>
+                      <p className="text-slate-400 text-[11px] leading-relaxed">
+                        CortexForge will parse AST symbols, map dependencies, and synthesize verified memory for <code className="text-indigo-300 font-mono text-[10px] bg-slate-950/60 px-1.5 py-0.5 rounded border border-indigo-500/20">{localPath || 'selected repository'}</code>.
+                      </p>
                     </div>
-                    <p className="text-slate-500">
-                      CortexForge will analyze this repository and build its project memory, architecture graph, evidence, and retrieval context. Select any accessible folder on your computer.
-                    </p>
                   </div>
                 </>
               )}
@@ -1364,36 +1361,37 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                 </>
               )}
 
-              {/* Modal Actions */}
-              <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-800 mt-6">
-                <button
-                  type="button"
-                  onClick={onClose}
-                  className="px-4 py-2 rounded-xl text-sm font-medium text-slate-400 hover:text-white transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={isSubmitting}
-                  className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-sm transition-all shadow-md shadow-indigo-600/20 active:scale-[0.99] disabled:opacity-60"
-                >
-                  {isSubmitting ? (
-                    <RefreshCw className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <span>
-                      {sourceType === 'LOCAL'
-                        ? 'Create & Scan'
-                        : sourceType === 'GITHUB'
-                        ? 'Import & Scan'
-                        : 'Clone & Scan'}
-                    </span>
-                  )}
-                </button>
-              </div>
-            </form>
-          </>
-        )}
+                </div>
+
+                {/* Modal Actions (Sticky Pinned Footer) */}
+                <div className="flex items-center justify-end gap-3 px-6 py-3.5 border-t border-slate-800 shrink-0 bg-slate-900/95 backdrop-blur">
+                  <button
+                    type="button"
+                    onClick={onClose}
+                    className="px-4 py-2 rounded-xl text-sm font-medium text-slate-400 hover:text-white transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isSubmitting}
+                    className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-sm transition-all shadow-md shadow-indigo-600/20 active:scale-[0.99] disabled:opacity-60"
+                  >
+                    {isSubmitting ? (
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <span>
+                        {sourceType === 'LOCAL'
+                          ? 'Create & Scan'
+                          : sourceType === 'GITHUB'
+                          ? 'Import & Scan'
+                          : 'Clone & Scan'}
+                      </span>
+                    )}
+                  </button>
+                </div>
+              </form>
+            )}
       </div>
     </div>
   );
