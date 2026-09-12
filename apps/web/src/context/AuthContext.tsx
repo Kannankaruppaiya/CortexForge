@@ -49,6 +49,14 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     refreshUser();
   }, []);
 
+  const safeJson = async (res: Response) => {
+    try {
+      return await res.json();
+    } catch {
+      return null;
+    }
+  };
+
   const loginWithPassword = async (email: string, password: string) => {
     try {
       const res = await fetch(`${API_BASE}/auth/login`, {
@@ -57,9 +65,15 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         credentials: 'include',
         body: JSON.stringify({ email, password }),
       });
-      const data = await res.json();
+      const data = await safeJson(res);
       if (!res.ok) {
-        return { success: false, error: data.detail || 'Failed to sign in' };
+        if (res.status === 502 || res.status === 504) {
+          return { success: false, error: 'Backend server is not running on port 8000 or unreachable.' };
+        }
+        return { success: false, error: data?.detail || res.statusText || 'Failed to sign in' };
+      }
+      if (!data) {
+        return { success: false, error: 'Invalid response from server.' };
       }
       setUser(data.user);
       setAuthStatus('authenticated');
@@ -78,9 +92,15 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         credentials: 'include',
         body: JSON.stringify({ email, password, display_name: displayName }),
       });
-      const data = await res.json();
+      const data = await safeJson(res);
       if (!res.ok) {
-        return { success: false, error: data.detail || 'Registration failed' };
+        if (res.status === 502 || res.status === 504) {
+          return { success: false, error: 'Backend server is not running on port 8000 or unreachable.' };
+        }
+        return { success: false, error: data?.detail || res.statusText || 'Registration failed' };
+      }
+      if (!data) {
+        return { success: false, error: 'Invalid response from server.' };
       }
       setUser(data.user);
       setAuthStatus('authenticated');
@@ -99,9 +119,15 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         credentials: 'include',
         body: JSON.stringify({ email }),
       });
-      const data = await res.json();
+      const data = await safeJson(res);
       if (!res.ok) {
-        return { success: false, error: data.detail || 'Failed to send OTP' };
+        if (res.status === 502 || res.status === 504) {
+          return { success: false, error: 'Backend server is not running on port 8000 or unreachable.' };
+        }
+        return { success: false, error: data?.detail || res.statusText || 'Failed to send OTP' };
+      }
+      if (!data) {
+        return { success: false, error: 'Invalid response from server.' };
       }
       return { success: true, message: data.message, debugOtp: data.debug_otp };
     } catch (err: any) {
@@ -117,9 +143,15 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         credentials: 'include',
         body: JSON.stringify({ email, otp }),
       });
-      const data = await res.json();
+      const data = await safeJson(res);
       if (!res.ok) {
-        return { success: false, error: data.detail || 'Failed to verify OTP' };
+        if (res.status === 502 || res.status === 504) {
+          return { success: false, error: 'Backend server is not running on port 8000 or unreachable.' };
+        }
+        return { success: false, error: data?.detail || res.statusText || 'Failed to verify OTP' };
+      }
+      if (!data) {
+        return { success: false, error: 'Invalid response from server.' };
       }
       setUser(data.user);
       setAuthStatus('authenticated');

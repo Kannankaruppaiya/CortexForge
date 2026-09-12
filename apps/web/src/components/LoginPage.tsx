@@ -157,10 +157,19 @@ export const LoginPage: React.FC = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email }),
       });
-      const data = await res.json();
+      let data: any = null;
+      try {
+        data = await res.json();
+      } catch {
+        // non-JSON response
+      }
+      if (!res.ok) {
+        setError(data?.detail || res.statusText || 'Failed to request password reset.');
+        return;
+      }
       setResetSent(true);
-      setSuccessMsg(data.message || 'Password reset link sent.');
-      if (data.debug_token) {
+      setSuccessMsg(data?.message || 'Password reset link sent.');
+      if (data?.debug_token) {
         setResetToken(data.debug_token);
         setSuccessMsg(`Test Mode Reset Token: ${data.debug_token}`);
       }
@@ -189,13 +198,18 @@ export const LoginPage: React.FC = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token: resetToken, new_password: newPassword }),
       });
-      const data = await res.json();
+      let data: any = null;
+      try {
+        data = await res.json();
+      } catch {
+        // non-JSON response
+      }
       if (res.ok) {
         setSuccessMsg('Password updated successfully! Please sign in.');
         setView('signin');
         setPassword('');
       } else {
-        setError(data.detail || 'Failed to reset password.');
+        setError(data?.detail || res.statusText || 'Failed to reset password.');
       }
     } catch {
       setError('Network error resetting password.');
