@@ -11,15 +11,15 @@ services:
       - public_net
       - internal_net
     environment:
-      - CORTEX_ENV=${CORTEX_ENV:-production}
-      - CORTEX_AUTH_STRICT=${CORTEX_AUTH_STRICT:-true}
-      - "CORTEX_DB_URL=postgresql+asyncpg://${POSTGRES_USER:-cortex}:${POSTGRES_PASSWORD:?Required: set POSTGRES_PASSWORD in environment}@postgres:5432/${POSTGRES_DB:-cortexforge}"
-      - CORTEX_EMBEDDINGS_PROVIDER=${CORTEX_EMBEDDINGS_PROVIDER:-openai}
-      - CORTEX_LLM_PROVIDER=${CORTEX_LLM_PROVIDER:-openai}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - CORTEX_TELEMETRY=disabled
-      - REDIS_URL=redis://redis:6379/0
-      - PYTHONUNBUFFERED=1
+      CORTEX_ENV: ${CORTEX_ENV:-production}
+      CORTEX_AUTH_STRICT: ${CORTEX_AUTH_STRICT:-true}
+      CORTEX_DB_URL: postgresql+asyncpg://${POSTGRES_USER:-cortex}:${POSTGRES_PASSWORD:?Required}@postgres:5432/${POSTGRES_DB:-cortexforge}
+      CORTEX_EMBEDDINGS_PROVIDER: ${CORTEX_EMBEDDINGS_PROVIDER:-openai}
+      CORTEX_LLM_PROVIDER: ${CORTEX_LLM_PROVIDER:-openai}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      CORTEX_TELEMETRY: disabled
+      REDIS_URL: redis://redis:6379/0
+      PYTHONUNBUFFERED: "1"
     volumes:
       - cortex_data:/root/.cortexforge
       - .:/workspace:ro
@@ -39,15 +39,15 @@ services:
     networks:
       - internal_net
     environment:
-      - CORTEX_ENV=${CORTEX_ENV:-production}
-      - CORTEX_AUTH_STRICT=${CORTEX_AUTH_STRICT:-true}
-      - "CORTEX_DB_URL=postgresql+asyncpg://${POSTGRES_USER:-cortex}:${POSTGRES_PASSWORD:?Required: set POSTGRES_PASSWORD in environment}@postgres:5432/${POSTGRES_DB:-cortexforge}"
-      - CORTEX_EMBEDDINGS_PROVIDER=${CORTEX_EMBEDDINGS_PROVIDER:-openai}
-      - CORTEX_LLM_PROVIDER=${CORTEX_LLM_PROVIDER:-openai}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - CORTEX_TELEMETRY=disabled
-      - REDIS_URL=redis://redis:6379/0
-      - PYTHONUNBUFFERED=1
+      CORTEX_ENV: ${CORTEX_ENV:-production}
+      CORTEX_AUTH_STRICT: ${CORTEX_AUTH_STRICT:-true}
+      CORTEX_DB_URL: postgresql+asyncpg://${POSTGRES_USER:-cortex}:${POSTGRES_PASSWORD:?Required}@postgres:5432/${POSTGRES_DB:-cortexforge}
+      CORTEX_EMBEDDINGS_PROVIDER: ${CORTEX_EMBEDDINGS_PROVIDER:-openai}
+      CORTEX_LLM_PROVIDER: ${CORTEX_LLM_PROVIDER:-openai}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      CORTEX_TELEMETRY: disabled
+      REDIS_URL: redis://redis:6379/0
+      PYTHONUNBUFFERED: "1"
     volumes:
       - cortex_data:/root/.cortexforge
       - .:/workspace:ro
@@ -64,9 +64,9 @@ services:
     networks:
       - internal_net
     environment:
-      - POSTGRES_USER=${POSTGRES_USER:-cortex}
-      - "POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Required: set POSTGRES_PASSWORD in environment}"
-      - POSTGRES_DB=${POSTGRES_DB:-cortexforge}
+      POSTGRES_USER: ${POSTGRES_USER:-cortex}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Required}
+      POSTGRES_DB: ${POSTGRES_DB:-cortexforge}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
