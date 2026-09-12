@@ -44,10 +44,13 @@ def test_safe_log_event_redaction(caplog):
     import logging
 
     with caplog.at_level(logging.INFO):
-        collector.safe_log_event("TEST_EVENT", {
-            "token": "sk-proj-1234567890abcdef1234567890abcdef",
-            "message": "Auth succeeded",
-        })
+        collector.safe_log_event(
+            "TEST_EVENT",
+            {
+                "token": "sk-proj-1234567890abcdef1234567890abcdef",
+                "message": "Auth succeeded",
+            },
+        )
 
     assert "sk-proj-" not in caplog.text
     assert "[REDACTED_OPENAI_KEY]" in caplog.text

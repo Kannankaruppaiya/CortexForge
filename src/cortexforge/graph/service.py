@@ -16,6 +16,14 @@ from cortexforge.core.schemas import (
 class GraphService:
     """Relational graph query and architecture synthesis service."""
 
+    # Entity types that represent physical container nodes rather than inner code/config entities.
+    # In CortexForge's graph model, "file" entities represent the physical file container itself
+    # (already summarized via file_count) rather than a code component within that file.
+    NON_DISPLAYABLE_ENTITY_TYPES: frozenset[str] = frozenset({"file"})
+
+    # Maximum number of top-level components exposed per module summary to maintain balanced payloads.
+    MAX_TOP_LEVEL_COMPONENTS: int = 25
+
     async def get_project_architecture(
         self, session: AsyncSession, project_id: str, depth: int = 2
     ) -> ArchitectureResponse | None:
@@ -70,8 +78,14 @@ class GraphService:
             mod_files = {e.file_path for e in mod_entities}
             top_components: list[ComponentSummary] = []
 
-            for e in mod_entities:
-                if e.entity_type in ("class", "function", "interface", "model"):
+            # Sort entities deterministically by (file_path, start_line, name)
+            sorted_entities = sorted(
+                mod_entities,
+                key=lambda e: (e.file_path or "", e.start_line or 0, e.name or ""),
+            )
+
+            for e in sorted_entities:
+                if e.entity_type not in self.NON_DISPLAYABLE_ENTITY_TYPES:
                     comp = ComponentSummary(
                         name=e.name,
                         qualified_name=e.qualified_name,
@@ -79,16 +93,26 @@ class GraphService:
                         file_path=e.file_path,
                         line_range=[e.start_line, e.end_line],
                         signature=e.signature,
-                        dependencies=list(set(outgoing.get(e.qualified_name, [])))[:10],
-                        dependents=list(set(incoming.get(e.qualified_name, [])))[:10],
+                        dependencies=sorted(set(outgoing.get(e.qualified_name, [])))[:10],
+                        dependents=sorted(set(incoming.get(e.qualified_name, [])))[:10],
                     )
                     top_components.append(comp)
 
                     # Identify likely APIs or models
                     lower_name = e.name.lower()
-                    if "api" in lower_name or "route" in lower_name or "controller" in lower_name or "service" in lower_name:
+                    if (
+                        "api" in lower_name
+                        or "route" in lower_name
+                        or "controller" in lower_name
+                        or "service" in lower_name
+                        or e.entity_type == "api"
+                    ):
                         primary_apis.append(comp)
-                    elif "model" in lower_name or "schema" in lower_name or e.entity_type in ("model", "interface"):
+                    elif (
+                        "model" in lower_name
+                        or "schema" in lower_name
+                        or e.entity_type in ("model", "interface")
+                    ):
                         primary_models.append(comp)
 
             module_summaries.append(
@@ -96,7 +120,7 @@ class GraphService:
                     module_path=mod_name,
                     file_count=len(mod_files),
                     entity_count=len(mod_entities),
-                    top_level_components=top_components[:15],
+                    top_level_components=top_components[: self.MAX_TOP_LEVEL_COMPONENTS],
                 )
             )
 
@@ -112,20 +136,64 @@ class GraphService:
             primary_models=primary_models[:10],
         )
 
+    async def resolve_entity(
+        self, session: AsyncSession, project_id: str, entity_name_or_id: str
+    ) -> tuple[str, CodeEntity | None, list[str]]:
+        """Resolve an entity by ID, qualified name, or short name with ambiguity detection (Item 9).
+
+        Returns:
+            (status, entity, candidate_qualified_names)
+            where status is "RESOLVED", "AMBIGUOUS", or "NOT_FOUND".
+        """
+        # 1. Exact ID match
+        id_stmt = select(CodeEntity).where(
+            CodeEntity.project_id == project_id,
+            CodeEntity.id == entity_name_or_id,
+        )
+        exact_id = (await session.execute(id_stmt)).scalars().first()
+        if exact_id:
+            return "RESOLVED", exact_id, []
+
+        # 2. Exact qualified_name match
+        qn_stmt = select(CodeEntity).where(
+            CodeEntity.project_id == project_id,
+            CodeEntity.qualified_name == entity_name_or_id,
+        )
+        exact_qn = list((await session.execute(qn_stmt)).scalars().all())
+        if len(exact_qn) == 1:
+            return "RESOLVED", exact_qn[0], []
+        elif len(exact_qn) > 1:
+            candidates = [f"{m.file_path}:{m.qualified_name}" for m in exact_qn]
+            return "AMBIGUOUS", None, candidates
+
+        # 3. Short name or suffix match -- check for ambiguity
+        name_stmt = select(CodeEntity).where(
+            CodeEntity.project_id == project_id,
+            (CodeEntity.name == entity_name_or_id)
+            | (CodeEntity.qualified_name.endswith(f":{entity_name_or_id}"))
+            | (CodeEntity.qualified_name.endswith(f".{entity_name_or_id}")),
+        )
+        matches = list((await session.execute(name_stmt)).scalars().all())
+        if len(matches) == 1:
+            return "RESOLVED", matches[0], []
+        elif len(matches) > 1:
+            candidates = [m.qualified_name for m in matches]
+            return "AMBIGUOUS", None, candidates
+
+        return "NOT_FOUND", None, []
+
     async def get_dependencies(
-        self, session: AsyncSession, project_id: str, entity_name_or_id: str, depth: int = 2
+        self,
+        session: AsyncSession,
+        project_id: str,
+        entity_name_or_id: str,
+        depth: int = 2,
     ) -> list[dict[str, str]]:
         """Resolve downstream dependencies for a given entity."""
-        # Find start entity by id or qualified name or name
-        stmt = select(CodeEntity).where(
-            CodeEntity.project_id == project_id,
-            (CodeEntity.id == entity_name_or_id)
-            | (CodeEntity.qualified_name == entity_name_or_id)
-            | (CodeEntity.name == entity_name_or_id),
+        status, start_entity, _ = await self.resolve_entity(
+            session, project_id, entity_name_or_id
         )
-        res = await session.execute(stmt)
-        start_entity = res.scalars().first()
-        if not start_entity:
+        if status != "RESOLVED" or not start_entity:
             return []
 
         visited: set[str] = {start_entity.id}
@@ -164,18 +232,17 @@ class GraphService:
         return results
 
     async def get_dependents(
-        self, session: AsyncSession, project_id: str, entity_name_or_id: str, depth: int = 2
+        self,
+        session: AsyncSession,
+        project_id: str,
+        entity_name_or_id: str,
+        depth: int = 2,
     ) -> list[dict[str, str]]:
         """Resolve upstream callers and dependents (blast radius) for a given entity."""
-        stmt = select(CodeEntity).where(
-            CodeEntity.project_id == project_id,
-            (CodeEntity.id == entity_name_or_id)
-            | (CodeEntity.qualified_name == entity_name_or_id)
-            | (CodeEntity.name == entity_name_or_id),
+        status, start_entity, _ = await self.resolve_entity(
+            session, project_id, entity_name_or_id
         )
-        res = await session.execute(stmt)
-        start_entity = res.scalars().first()
-        if not start_entity:
+        if status != "RESOLVED" or not start_entity:
             return []
 
         visited: set[str] = {start_entity.id}

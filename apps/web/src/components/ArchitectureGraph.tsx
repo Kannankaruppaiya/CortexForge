@@ -6,6 +6,35 @@ interface ArchitectureGraphProps {
   arch: ArchitectureResponse | null;
 }
 
+const getEntityTypeBadgeStyle = (type: string | undefined | null): string => {
+  switch (type?.toLowerCase()) {
+    case 'class':
+      return 'bg-blue-500/10 text-blue-400 border border-blue-500/25';
+    case 'function':
+      return 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/25';
+    case 'method':
+      return 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/25';
+    case 'interface':
+      return 'bg-purple-500/10 text-purple-400 border border-purple-500/25';
+    case 'model':
+      return 'bg-amber-500/10 text-amber-400 border border-amber-500/25';
+    case 'module':
+      return 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/25';
+    case 'config':
+      return 'bg-orange-500/10 text-orange-400 border border-orange-500/25';
+    case 'config_key':
+      return 'bg-sky-500/10 text-sky-400 border border-sky-500/25';
+    case 'api':
+      return 'bg-rose-500/10 text-rose-400 border border-rose-500/25';
+    case 'test':
+      return 'bg-lime-500/10 text-lime-400 border border-lime-500/25';
+    case 'variable':
+      return 'bg-violet-500/10 text-violet-400 border border-violet-500/25';
+    default:
+      return 'bg-slate-500/10 text-slate-400 border border-slate-500/25';
+  }
+};
+
 export const ArchitectureGraph: React.FC<ArchitectureGraphProps> = ({ arch }) => {
   const [selectedComponent, setSelectedComponent] = useState<ComponentSummary | null>(null);
 
@@ -35,43 +64,53 @@ export const ArchitectureGraph: React.FC<ArchitectureGraphProps> = ({ arch }) =>
             key={mod.module_path}
             className="bg-slate-900/40 rounded-xl border border-slate-800 p-5 space-y-4 hover:border-slate-700 transition-all shadow-sm"
           >
-            <div className="flex items-center justify-between border-b border-slate-800/80 pb-3">
-              <div className="flex items-center gap-2">
-                <Layers className="w-4 h-4 text-brand-400" />
-                <span className="font-bold text-sm text-slate-100 font-mono">{mod.module_path}</span>
+            <div className="flex items-center justify-between border-b border-slate-800/80 pb-3 gap-2">
+              <div className="flex items-center gap-2 min-w-0 flex-1">
+                <Layers className="w-4 h-4 text-brand-400 shrink-0" />
+                <span className="font-bold text-sm text-slate-100 font-mono truncate" title={mod.module_path}>
+                  {mod.module_path}
+                </span>
               </div>
-              <span className="text-[11px] text-slate-400 font-mono">
-                {mod.file_count} files • {mod.entity_count} symbols
+              <span className="text-[11px] text-slate-400 font-mono shrink-0 whitespace-nowrap">
+                {mod.file_count} {mod.file_count === 1 ? 'file' : 'files'} • {mod.entity_count} {mod.entity_count === 1 ? 'symbol' : 'symbols'}
               </span>
             </div>
 
             <div className="space-y-2">
-              {mod.top_level_components.map((comp) => (
-                <div
-                  key={comp.qualified_name}
-                  onClick={() => setSelectedComponent(comp)}
-                  className="p-2.5 rounded-lg bg-slate-950/60 border border-slate-800/70 hover:border-brand-500/50 hover:bg-slate-900 cursor-pointer transition-all flex items-center justify-between group"
-                >
-                  <div className="truncate pr-2">
-                    <div className="flex items-center gap-2">
-                      <span className={`text-[10px] uppercase font-mono px-1.5 py-0.2 rounded font-semibold ${
-                        comp.entity_type === 'class' ? 'bg-blue-500/10 text-blue-400 border border-blue-500/20' :
-                        comp.entity_type === 'function' ? 'bg-green-500/10 text-green-400 border border-green-500/20' :
-                        'bg-purple-500/10 text-purple-400 border border-purple-500/20'
-                      }`}>
-                        {comp.entity_type}
-                      </span>
-                      <span className="font-semibold text-xs text-slate-200 group-hover:text-brand-400 transition-colors truncate">
-                        {comp.name}
-                      </span>
+              {mod.top_level_components.length > 0 ? (
+                mod.top_level_components.map((comp) => (
+                  <div
+                    key={comp.qualified_name}
+                    onClick={() => setSelectedComponent(comp)}
+                    className="p-2.5 rounded-lg bg-slate-950/60 border border-slate-800/70 hover:border-brand-500/50 hover:bg-slate-900 cursor-pointer transition-all flex items-center justify-between group"
+                  >
+                    <div className="min-w-0 flex-1 pr-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className={`text-[10px] uppercase font-mono px-1.5 py-0.5 rounded font-semibold shrink-0 ${getEntityTypeBadgeStyle(comp.entity_type)}`}>
+                          {comp.entity_type || 'symbol'}
+                        </span>
+                        <span className="font-semibold text-xs text-slate-200 group-hover:text-brand-400 transition-colors truncate" title={comp.name}>
+                          {comp.name}
+                        </span>
+                      </div>
+                      <div className="text-[10px] text-slate-400 font-mono truncate mt-0.5" title={`${comp.file_path}:${comp.line_range[0]}-${comp.line_range[1]}`}>
+                        {comp.file_path}:{comp.line_range[0]}-{comp.line_range[1]}
+                      </div>
                     </div>
-                    <div className="text-[10px] text-slate-400 font-mono truncate mt-0.5">
-                      {comp.file_path}:{comp.line_range[0]}-{comp.line_range[1]}
-                    </div>
+                    <ArrowRight className="w-3.5 h-3.5 text-slate-400 group-hover:text-brand-400 transition-colors shrink-0" />
                   </div>
-                  <ArrowRight className="w-3.5 h-3.5 text-slate-400 group-hover:text-brand-400 transition-colors shrink-0" />
+                ))
+              ) : (
+                <div className="py-4 text-center text-xs text-slate-500 italic">
+                  No top-level code components indexed
                 </div>
-              ))}
+              )}
+
+              {mod.entity_count > mod.top_level_components.length && (
+                <div className="text-[10px] text-slate-500 font-mono text-center pt-1">
+                  + {mod.entity_count - mod.top_level_components.length} more {mod.entity_count - mod.top_level_components.length === 1 ? 'entity' : 'entities'} in module
+                </div>
+              )}
             </div>
           </div>
         ))}
@@ -81,15 +120,17 @@ export const ArchitectureGraph: React.FC<ArchitectureGraphProps> = ({ arch }) =>
       {selectedComponent && (
         <div className="fixed inset-y-0 right-0 w-96 bg-slate-900 border-l border-slate-800 shadow-2xl p-6 z-50 overflow-y-auto space-y-6">
           <div className="flex items-center justify-between border-b border-slate-800 pb-4">
-            <div>
-              <span className="text-[10px] uppercase font-mono text-brand-400 font-semibold">
-                {selectedComponent.entity_type}
+            <div className="min-w-0 flex-1 pr-2">
+              <span className={`text-[10px] uppercase font-mono px-2 py-0.5 rounded font-semibold inline-block mb-1.5 ${getEntityTypeBadgeStyle(selectedComponent.entity_type)}`}>
+                {selectedComponent.entity_type || 'symbol'}
               </span>
-              <h3 className="font-bold text-base text-white truncate">{selectedComponent.name}</h3>
+              <h3 className="font-bold text-base text-white truncate" title={selectedComponent.name}>
+                {selectedComponent.name}
+              </h3>
             </div>
             <button
               onClick={() => setSelectedComponent(null)}
-              className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800"
+              className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 shrink-0"
             >
               <X className="w-5 h-5" />
             </button>

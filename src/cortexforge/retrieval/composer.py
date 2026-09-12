@@ -6,6 +6,69 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from cortexforge.graph.service import GraphService
 from cortexforge.retrieval.engine import HybridRetrievalEngine, ScoredItem
 
+
+def count_tokens(text: str) -> int:
+    """Measure exact token count with tiktoken (cl100k_base) or conservative fallback."""
+    try:
+        import tiktoken
+
+        enc = tiktoken.get_encoding("cl100k_base")
+        return len(enc.encode(text))
+    except Exception:
+        return int(len(text.split()) * 1.33)
+
+
+def enforce_token_budget(raw_text: str, budget: int) -> tuple[str, int]:
+    """Mathematically guarantees len(tokenizer.encode(result)) <= budget for any positive integer budget."""
+    if budget <= 0:
+        return "", 0
+
+    try:
+        import tiktoken
+
+        enc = tiktoken.get_encoding("cl100k_base")
+    except Exception:
+
+        class _FallbackEnc:
+            def encode(self, text: str) -> list[int]:
+                return list(text.encode("utf-8"))
+
+            def decode(self, tokens: list[int]) -> str:
+                return bytes(tokens).decode("utf-8", errors="ignore")
+
+        enc = _FallbackEnc()
+
+    tokens = enc.encode(raw_text)
+    if len(tokens) <= budget:
+        return raw_text, len(tokens)
+
+    suffix = (
+        "\n\n<!-- Truncated to fit token budget -->\n<!-- END CORTEXFORGE CONTEXT -->"
+    )
+    suffix_tokens = enc.encode(suffix)
+
+    if len(suffix_tokens) < budget:
+        allowance = budget - len(suffix_tokens)
+        candidate_text = enc.decode(tokens[:allowance]) + suffix
+    else:
+        candidate_text = enc.decode(tokens[:budget])
+
+    cand_tokens = enc.encode(candidate_text)
+    while len(cand_tokens) > budget:
+        excess = len(cand_tokens) - budget
+        trimmed = cand_tokens[:-excess] if excess > 0 else cand_tokens[:-1]
+        candidate_text = enc.decode(trimmed)
+        cand_tokens = enc.encode(candidate_text)
+        if len(cand_tokens) > budget:
+            cand_tokens = cand_tokens[:-1]
+            candidate_text = enc.decode(cand_tokens)
+            cand_tokens = enc.encode(candidate_text)
+
+    exact_tokens = len(cand_tokens)
+    assert exact_tokens <= budget, f"Invariant violated: {exact_tokens} > {budget}"
+    return candidate_text, exact_tokens
+
+
 PROFILE_BUDGETS = {
     "small": 1200,
     "medium": 3500,
@@ -115,7 +178,9 @@ class ContextComposer:
         budget = max_tokens or PROFILE_BUDGETS.get(norm_profile, 3500)
 
         # Retrieve candidates with safety margin
-        retrieval_limit = 10 if norm_profile == "small" else (20 if norm_profile == "medium" else 40)
+        retrieval_limit = (
+            10 if norm_profile == "small" else (20 if norm_profile == "medium" else 40)
+        )
         items: list[ScoredItem] = await self.retrieval_engine.retrieve(
             session,
             project_id=project_id,
@@ -124,7 +189,9 @@ class ContextComposer:
             limit=retrieval_limit,
         )
 
-        arch = await self.graph_service.get_project_architecture(session, project_id, depth=2)
+        arch = await self.graph_service.get_project_architecture(
+            session, project_id, depth=2
+        )
         project_name = arch.project_name if arch else "Project"
 
         # Categorize retrieved items into cognitive layers
@@ -161,7 +228,9 @@ class ContextComposer:
         selected_memories: list[ContextMemoryItem] = []
         excluded_memories: list[ContextMemoryItem] = []
 
-        def select_top(pool: list[ScoredItem], quota: int, reason_prefix: str) -> list[ScoredItem]:
+        def select_top(
+            pool: list[ScoredItem], quota: int, reason_prefix: str
+        ) -> list[ScoredItem]:
             accepted = pool[:quota]
             for it in accepted:
                 selected_memories.append(
@@ -191,14 +260,24 @@ class ContextComposer:
 
         # Quotas based on profile
         q_dec = 2 if norm_profile == "small" else (4 if norm_profile == "medium" else 8)
-        q_fail = 2 if norm_profile == "small" else (4 if norm_profile == "medium" else 6)
-        q_const = 2 if norm_profile == "small" else (4 if norm_profile == "medium" else 6)
-        q_less = 2 if norm_profile == "small" else (4 if norm_profile == "medium" else 8)
-        q_work = 2 if norm_profile == "small" else (3 if norm_profile == "medium" else 5)
+        q_fail = (
+            2 if norm_profile == "small" else (4 if norm_profile == "medium" else 6)
+        )
+        q_const = (
+            2 if norm_profile == "small" else (4 if norm_profile == "medium" else 6)
+        )
+        q_less = (
+            2 if norm_profile == "small" else (4 if norm_profile == "medium" else 8)
+        )
+        q_work = (
+            2 if norm_profile == "small" else (3 if norm_profile == "medium" else 5)
+        )
 
         active_decisions = select_top(decisions, q_dec, "Top architectural decision")
         active_failures = select_top(failures, q_fail, "Historical failure to avoid")
-        active_constraints = select_top(constraints, q_const, "Active operational constraint")
+        active_constraints = select_top(
+            constraints, q_const, "Active operational constraint"
+        )
         active_working_state = select_top(working_state, q_work, "Active working state")
         active_lessons = select_top(lessons, q_less, "Durable project lesson")
 
@@ -206,8 +285,12 @@ class ContextComposer:
         affected_components = []
         if target_files:
             for tf in target_files:
-                deps = await self.graph_service.get_dependencies(session, project_id, tf, depth=1)
-                callers = await self.graph_service.get_dependents(session, project_id, tf, depth=1)
+                deps = await self.graph_service.get_dependencies(
+                    session, project_id, tf, depth=1
+                )
+                callers = await self.graph_service.get_dependents(
+                    session, project_id, tf, depth=1
+                )
                 for d in deps[:3]:
                     affected_components.append(f"{d['name']} (dep)")
                 for c in callers[:3]:
@@ -236,7 +319,9 @@ class ContextComposer:
             mod_names = [m.module_path for m in arch.modules[:4]]
             lines.append(f"- **Active Modules**: {', '.join(mod_names)}")
             if arch.primary_apis:
-                lines.append(f"- **Key APIs**: {', '.join(a.name for a in arch.primary_apis[:3])}")
+                lines.append(
+                    f"- **Key APIs**: {', '.join(a.name for a in arch.primary_apis[:3])}"
+                )
             lines.append("")
 
         # Relevant Decisions (L3)
@@ -250,14 +335,18 @@ class ContextComposer:
         if active_constraints:
             lines.append("## Relevant Constraints")
             for c in active_constraints:
-                lines.append(f"- **{c.title.replace('[CONSTRAINT] ', '')}**: {c.summary}")
+                lines.append(
+                    f"- **{c.title.replace('[CONSTRAINT] ', '')}**: {c.summary}"
+                )
             lines.append("")
 
         # Previous Failures & Anti-Patterns (L4)
         if active_failures:
             lines.append("## Previous Failures & Anti-Patterns (Avoid Repeating) (L4)")
             for f in active_failures:
-                lines.append(f"- **{f.title.replace('[FAILURE] ', '').replace('[FIX] ', '')}**: {f.summary}")
+                lines.append(
+                    f"- **{f.title.replace('[FAILURE] ', '').replace('[FIX] ', '')}**: {f.summary}"
+                )
                 if norm_profile in ("medium", "large"):
                     lines.append(f"  *Cause & Prevention*: {f.content[:180]}...")
             lines.append("")
@@ -275,7 +364,9 @@ class ContextComposer:
                 clean_t = item.title
                 for pfx in ["[CONVENTION] ", "[LESSON] ", "[ARCH] ", "[NOTE] "]:
                     clean_t = clean_t.replace(pfx, "")
-                desc = item.summary or (item.content[:140] + ("..." if len(item.content) > 140 else ""))
+                desc = item.summary or (
+                    item.content[:140] + ("..." if len(item.content) > 140 else "")
+                )
                 lines.append(f"- **{clean_t}**: {desc}")
             lines.append("")
 
@@ -293,7 +384,9 @@ class ContextComposer:
         if conflicted_items:
             lines.append("## [CAUTION] Conflicted / Contradictory Memories Detected")
             for c in conflicted_items[:3]:
-                msg = f"`{c.title}`: Disputed by newer evidence or contradictory memory."
+                msg = (
+                    f"`{c.title}`: Disputed by newer evidence or contradictory memory."
+                )
                 conflict_warnings_out.append(msg)
                 lines.append(f"- {msg}")
             lines.append("")
@@ -301,13 +394,9 @@ class ContextComposer:
         lines.append("<!-- END CORTEXFORGE CONTEXT -->")
         raw_text = "\n".join(lines)
 
-        # Enforce Token Budget
-        words = raw_text.split()
-        max_words = int(budget * 0.75)
-        if len(words) > max_words:
-            raw_text = " ".join(words[:max_words]) + "\n\n<!-- Truncated to fit token budget -->\n<!-- END CORTEXFORGE CONTEXT -->"
-
-        estimated_tokens = int(len(raw_text.split()) * 1.33)
+        # Enforce Hard Token Budget Guarantee (Item 19)
+        raw_text, exact_tokens = enforce_token_budget(raw_text, budget)
+        estimated_tokens = exact_tokens
 
         explainability_report = (
             f"Context Profile: {norm_profile.upper()} (Budget: {budget} tokens, Estimated: {estimated_tokens} tokens)\n"

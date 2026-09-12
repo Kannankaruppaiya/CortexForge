@@ -7,15 +7,53 @@ services:
     restart: unless-stopped
     ports:
       - "8000:8000"
+    networks:
+      - public_net
+      - internal_net
     environment:
-      - CORTEX_DB_URL=postgresql+asyncpg://cortex:cortex_secret@postgres:5432/cortexforge
-      - CORTEX_EMBEDDINGS_PROVIDER=local
-      - CORTEX_LLM_PROVIDER=mock
-      - CORTEX_TELEMETRY=disabled
-      - REDIS_URL=redis://redis:6379/0
-      - PYTHONUNBUFFERED=1
+      CORTEX_ENV: ${CORTEX_ENV:-production}
+      CORTEX_AUTH_STRICT: ${CORTEX_AUTH_STRICT:-true}
+      CORTEX_DB_URL: postgresql+asyncpg://${POSTGRES_USER:-cortex}:${POSTGRES_PASSWORD:?Required}@postgres:5432/${POSTGRES_DB:-cortexforge}
+      CORTEX_EMBEDDINGS_PROVIDER: ${CORTEX_EMBEDDINGS_PROVIDER:-openai}
+      CORTEX_LLM_PROVIDER: ${CORTEX_LLM_PROVIDER:-openai}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      CORTEX_TELEMETRY: disabled
+      REDIS_URL: redis://redis:6379/0
+      PYTHONUNBUFFERED: "1"
+      CORTEX_MANAGED_ROOT: /var/lib/cortexforge/workspaces
     volumes:
       - cortex_data:/root/.cortexforge
+      - cortex_workspaces:/var/lib/cortexforge/workspaces
+      - .:/workspace:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  cortexforge-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cortexforge-worker
+    restart: unless-stopped
+    command: ["python", "-m", "cortexforge.jobs.worker"]
+    networks:
+      - internal_net
+    environment:
+      CORTEX_ENV: ${CORTEX_ENV:-production}
+      CORTEX_AUTH_STRICT: ${CORTEX_AUTH_STRICT:-true}
+      CORTEX_DB_URL: postgresql+asyncpg://${POSTGRES_USER:-cortex}:${POSTGRES_PASSWORD:?Required}@postgres:5432/${POSTGRES_DB:-cortexforge}
+      CORTEX_EMBEDDINGS_PROVIDER: ${CORTEX_EMBEDDINGS_PROVIDER:-openai}
+      CORTEX_LLM_PROVIDER: ${CORTEX_LLM_PROVIDER:-openai}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      CORTEX_TELEMETRY: disabled
+      REDIS_URL: redis://redis:6379/0
+      PYTHONUNBUFFERED: "1"
+      CORTEX_MANAGED_ROOT: /var/lib/cortexforge/workspaces
+    volumes:
+      - cortex_data:/root/.cortexforge
+      - cortex_workspaces:/var/lib/cortexforge/workspaces
       - .:/workspace:ro
     depends_on:
       postgres:
@@ -27,16 +65,16 @@ services:
     image: pgvector/pgvector:pg16
     container_name: cortexforge-postgres
     restart: unless-stopped
-    ports:
-      - "5432:5432"
+    networks:
+      - internal_net
     environment:
-      - POSTGRES_USER=cortex
-      - POSTGRES_PASSWORD=cortex_secret
-      - POSTGRES_DB=cortexforge
+      POSTGRES_USER: ${POSTGRES_USER:-cortex}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Required}
+      POSTGRES_DB: ${POSTGRES_DB:-cortexforge}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U cortex -d cortexforge"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cortex} -d ${POSTGRES_DB:-cortexforge}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -45,8 +83,8 @@ services:
     image: redis:7-alpine
     container_name: cortexforge-redis
     restart: unless-stopped
-    ports:
-      - "6379:6379"
+    networks:
+      - internal_net
     volumes:
       - redis_data:/data
     healthcheck:
@@ -55,7 +93,15 @@ services:
       timeout: 3s
       retries: 5
 
+networks:
+  public_net:
+    driver: bridge
+  internal_net:
+    driver: bridge
+    internal: true
+
 volumes:
   cortex_data:
+  cortex_workspaces:
   postgres_data:
   redis_data:

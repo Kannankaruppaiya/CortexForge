@@ -1,13 +1,14 @@
 """Secret redaction and untrusted content sanitization for CortexForge."""
 
 import re
+from typing import Any
 
 # Common secret and token regex patterns
 SECRET_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     (
         "PRIVATE_KEY",
         re.compile(
-            r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
+            r"-----BEGIN [A-Z0-9_\- ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z0-9_\- ]*PRIVATE KEY-----|(?:\r?\n[\w+/= \t\.\-]+)*)",
             re.MULTILINE,
         ),
     ),
@@ -17,33 +18,76 @@ SECRET_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ),
     (
         "AWS_KEY",
-        re.compile(r"(?:A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}", re.ASCII),
+        re.compile(
+            r"(?:A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}",
+            re.ASCII,
+        ),
     ),
     (
         "GITHUB_TOKEN",
-        re.compile(r"(?:ghp|gho|ghu|ghs|ghr)_[a-zA-Z0-9]{36,}|github_pat_[a-zA-Z0-9_]{40,}", re.ASCII),
+        re.compile(
+            r"(?:ghp|gho|ghu|ghs|ghr)_[a-zA-Z0-9]{36,}|github_pat_[a-zA-Z0-9_]{40,}",
+            re.ASCII,
+        ),
     ),
     (
         "JWT_TOKEN",
-        re.compile(r"eyJ[a-zA-Z0-9_\-]{5,}\.eyJ[a-zA-Z0-9_\-]{5,}\.[a-zA-Z0-9_\-]+", re.ASCII),
+        re.compile(
+            r"\beyJ[a-zA-Z0-9_\-]{4,}\.[a-zA-Z0-9_\-]{2,}(?:\.[a-zA-Z0-9_\-]*|\b)",
+            re.ASCII,
+        ),
+    ),
+    (
+        "BEARER_TOKEN",
+        re.compile(
+            r"(?i)\b(?P<scheme>(?:authorization:\s*)?bearer\s+)(?P<token>(?!\[REDACTED)[a-zA-Z0-9_\-\.~+/=]{8,})\b",
+            re.ASCII,
+        ),
     ),
     (
         "SLACK_TOKEN",
         re.compile(r"xox[baprs]-[0-9]{10,}-[a-zA-Z0-9]{24,}", re.ASCII),
     ),
     (
-        "GENERIC_PASSWORD",
+        # Credentials embedded in a connection string. Only the userinfo section
+        # is replaced, so the host, port and database name survive -- those are
+        # often the useful part of the observation, and blanking the whole URL
+        # would discard information for no security gain.
+        "DB_CREDENTIALS",
         re.compile(
-            r"""(?i)(?:api_key|apikey|secret|password|passwd|auth_token|access_token)\s*[:=]\s*['"]([a-zA-Z0-9!@#$%^&*()_+\-=\[\]{}|;:,.<>?/~`]{8,})['"]""",
+            # The username may be empty ("redis://:password@host"), so `*` not `+`.
+            r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*://)(?P<user>[^:/@\s]*):(?P<password>[^@/\s]+)@",
             re.ASCII,
         ),
+    ),
+    (
+        "GENERIC_PASSWORD",
+        re.compile(
+            r"""(?i)(?:api_key|apikey|secret|password|passwd|auth_token|access_token|secret_key|secret_access_key)\s*[:=]\s*(?:['"]([^\s'"]{8,})['"]|([^\s'"]{8,}))""",
+            re.ASCII,
+        ),
+    ),
+    (
+        "GOOGLE_TOKEN",
+        re.compile(r"ya29\.[a-zA-Z0-9_\-]{25,}", re.ASCII),
     ),
 ]
 
 # Injection delimiters commonly used to break out of agent instruction boundaries
 PROMPT_INJECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    ("SYSTEM_PROMPT_DELIMITER", re.compile(r"<\|im_start\|>|<\|im_end\|>|\[SYSTEM\]|\[HUMAN\]|\[ASSISTANT\]", re.IGNORECASE)),
-    ("INSTRUCTION_OVERRIDE", re.compile(r"(?i)(?:ignore\s+(?:all\s+)?previous\s+instructions|disregard\s+(?:all\s+)?prior\s+rules)")),
+    (
+        "SYSTEM_PROMPT_DELIMITER",
+        re.compile(
+            r"<\|im_start\|>|<\|im_end\|>|<\|system\|>|<\|user\|>|<\|assistant\|>|\[SYSTEM\]|\[HUMAN\]|\[ASSISTANT\]|\[INST\]|\[/INST\]",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "INSTRUCTION_OVERRIDE",
+        re.compile(
+            r"(?i)(?:ignore\s+(?:all\s+)?(?:previous|prior)\s+instructions|disregard\s+(?:all\s+)?(?:prior|previous)\s+rules|bypass\s+(?:system\s+)?safety)"
+        ),
+    ),
 ]
 
 
@@ -59,8 +103,27 @@ class SecretRedactor:
         redacted = text
         for name, pattern in SECRET_PATTERNS:
             if name == "GENERIC_PASSWORD":
-                # Only redact the matched capture group (the actual password)
-                redacted = pattern.sub(lambda m: m.group(0).replace(m.group(1), "[REDACTED_CREDENTIAL]"), redacted)
+                # Only the captured password is replaced, not the whole assignment,
+                # so the surrounding text stays readable.
+                def _replace_generic(m: re.Match[str]) -> str:
+                    secret_val = m.group(1) or m.group(2)
+                    if secret_val:
+                        return m.group(0).replace(secret_val, "[REDACTED_CREDENTIAL]")
+                    return m.group(0)
+
+                redacted = pattern.sub(_replace_generic, redacted)
+            elif name == "DB_CREDENTIALS":
+                # Keep the scheme and everything after the credentials: a memory
+                # that records "we connect to postgres on db.internal" is useful,
+                # and only the username and password need to disappear.
+                redacted = pattern.sub(
+                    lambda m: f"{m.group('scheme')}[REDACTED_DB_CREDENTIALS]@", redacted
+                )
+            elif name == "BEARER_TOKEN":
+                # Preserve the scheme ('Bearer ' or 'Authorization: Bearer ') and redact credential
+                redacted = pattern.sub(
+                    lambda m: f"{m.group('scheme')}[REDACTED_BEARER_TOKEN]", redacted
+                )
             else:
                 redacted = pattern.sub(f"[REDACTED_{name}]", redacted)
 
@@ -83,7 +146,47 @@ class SecretRedactor:
         """Apply full secret redaction and injection neutralization."""
         return cls.neutralize_injections(cls.redact_secrets(text))
 
+    @classmethod
+    def redact_structure(cls, data: Any) -> Any:
+        """Recursively redact secrets in structured data (dicts, lists, tuples, sets, strings)."""
+        if isinstance(data, str):
+            return cls.redact_secrets(data)
+        if isinstance(data, dict):
+            return {k: cls.redact_structure(v) for k, v in data.items()}
+        if isinstance(data, list):
+            return [cls.redact_structure(item) for item in data]
+        if isinstance(data, tuple):
+            return tuple(cls.redact_structure(item) for item in data)
+        if isinstance(data, set):
+            return {cls.redact_structure(item) for item in data}
+        return data
+
+    @classmethod
+    def sanitize_structure(cls, data: Any) -> Any:
+        """Recursively apply full sanitization (secrets + injection) to structured data."""
+        if isinstance(data, str):
+            return cls.sanitize(data)
+        if isinstance(data, dict):
+            return {k: cls.sanitize_structure(v) for k, v in data.items()}
+        if isinstance(data, list):
+            return [cls.sanitize_structure(item) for item in data]
+        if isinstance(data, tuple):
+            return tuple(cls.sanitize_structure(item) for item in data)
+        if isinstance(data, set):
+            return {cls.sanitize_structure(item) for item in data}
+        return data
+
 
 def sanitize_text(text: str) -> str:
     """Convenience helper for full sanitization."""
     return SecretRedactor.sanitize(text)
+
+
+def sanitize_structure(data: Any) -> Any:
+    """Convenience helper for full structured sanitization."""
+    return SecretRedactor.sanitize_structure(data)
+
+
+def redact_structure(data: Any) -> Any:
+    """Convenience helper for structured secret redaction."""
+    return SecretRedactor.redact_structure(data)

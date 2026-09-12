@@ -56,7 +56,9 @@ class TreeSitterProvider(CodeIntelligenceProvider):
         ext = self._get_ext(file_path)
         lang_key = self.EXT_TO_LANG.get(ext)
         if not lang_key:
-            return ParseResult(language="unknown", error=f"Unsupported file extension: {ext}")
+            return ParseResult(
+                language="unknown", error=f"Unsupported file extension: {ext}"
+            )
 
         language = self._languages[lang_key]
         parser = Parser(language)
@@ -81,15 +83,21 @@ class TreeSitterProvider(CodeIntelligenceProvider):
         symbols.append(file_symbol)
 
         if lang_key == "python":
-            self._parse_python(tree.root_node, content, file_path, symbols, relationships)
+            self._parse_python(
+                tree.root_node, content, file_path, symbols, relationships
+            )
         elif lang_key in ("javascript", "typescript", "tsx"):
-            self._parse_ts_js(tree.root_node, content, file_path, lang_key, symbols, relationships)
+            self._parse_ts_js(
+                tree.root_node, content, file_path, lang_key, symbols, relationships
+            )
         elif lang_key == "go":
             self._parse_go(tree.root_node, content, file_path, symbols, relationships)
         elif lang_key == "java":
             self._parse_java(tree.root_node, content, file_path, symbols, relationships)
 
-        return ParseResult(symbols=symbols, relationships=relationships, language=lang_key)
+        return ParseResult(
+            symbols=symbols, relationships=relationships, language=lang_key
+        )
 
     # ------------------ PYTHON PARSING ------------------
     def _parse_python(
@@ -104,10 +112,14 @@ class TreeSitterProvider(CodeIntelligenceProvider):
             if node.type == "class_definition":
                 name_node = node.child_by_field_name("name")
                 if name_node:
-                    class_name = content[name_node.start_byte : name_node.end_byte].decode(
-                        "utf-8", errors="replace"
+                    class_name = content[
+                        name_node.start_byte : name_node.end_byte
+                    ].decode("utf-8", errors="replace")
+                    qualified = (
+                        f"{parent_scope}.{class_name}"
+                        if parent_scope
+                        else f"{file_path}:{class_name}"
                     )
-                    qualified = f"{parent_scope}.{class_name}" if parent_scope else f"{file_path}:{class_name}"
                     class_content = content[node.start_byte : node.end_byte]
                     class_hash = hashlib.sha256(class_content).hexdigest()
 
@@ -117,9 +129,9 @@ class TreeSitterProvider(CodeIntelligenceProvider):
                     if args_node:
                         for arg in args_node.children:
                             if arg.type in ("identifier", "attribute"):
-                                base_name = content[arg.start_byte : arg.end_byte].decode(
-                                    "utf-8", errors="replace"
-                                )
+                                base_name = content[
+                                    arg.start_byte : arg.end_byte
+                                ].decode("utf-8", errors="replace")
                                 bases.append(base_name)
                                 relationships.append(
                                     ParsedRelationship(
@@ -137,7 +149,9 @@ class TreeSitterProvider(CodeIntelligenceProvider):
                             file_path=file_path,
                             start_line=node.start_point[0] + 1,
                             end_line=node.end_point[0] + 1,
-                            signature=f"class {class_name}({', '.join(bases)})" if bases else f"class {class_name}",
+                            signature=f"class {class_name}({', '.join(bases)})"
+                            if bases
+                            else f"class {class_name}",
                             content_hash=class_hash,
                             language="python",
                             metadata={"bases": bases},
@@ -160,15 +174,21 @@ class TreeSitterProvider(CodeIntelligenceProvider):
             elif node.type in ("function_definition", "async_function_definition"):
                 name_node = node.child_by_field_name("name")
                 if name_node:
-                    func_name = content[name_node.start_byte : name_node.end_byte].decode(
-                        "utf-8", errors="replace"
+                    func_name = content[
+                        name_node.start_byte : name_node.end_byte
+                    ].decode("utf-8", errors="replace")
+                    qualified = (
+                        f"{parent_scope}.{func_name}"
+                        if parent_scope
+                        else f"{file_path}:{func_name}"
                     )
-                    qualified = f"{parent_scope}.{func_name}" if parent_scope else f"{file_path}:{func_name}"
                     func_content = content[node.start_byte : node.end_byte]
                     func_hash = hashlib.sha256(func_content).hexdigest()
                     params_node = node.child_by_field_name("parameters")
                     params_str = (
-                        content[params_node.start_byte : params_node.end_byte].decode("utf-8", errors="replace")
+                        content[params_node.start_byte : params_node.end_byte].decode(
+                            "utf-8", errors="replace"
+                        )
                         if params_node
                         else "()"
                     )
@@ -203,7 +223,9 @@ class TreeSitterProvider(CodeIntelligenceProvider):
                 # import foo, import foo.bar as baz
                 for child in node.children:
                     if child.type == "dotted_name":
-                        mod = content[child.start_byte : child.end_byte].decode("utf-8", errors="replace")
+                        mod = content[child.start_byte : child.end_byte].decode(
+                            "utf-8", errors="replace"
+                        )
                         relationships.append(
                             ParsedRelationship(
                                 source_qualified_name=file_path,
@@ -214,7 +236,9 @@ class TreeSitterProvider(CodeIntelligenceProvider):
                     elif child.type == "aliased_import":
                         name = child.child_by_field_name("name")
                         if name:
-                            mod = content[name.start_byte : name.end_byte].decode("utf-8", errors="replace")
+                            mod = content[name.start_byte : name.end_byte].decode(
+                                "utf-8", errors="replace"
+                            )
                             relationships.append(
                                 ParsedRelationship(
                                     source_qualified_name=file_path,
@@ -227,7 +251,9 @@ class TreeSitterProvider(CodeIntelligenceProvider):
                 # from foo import bar
                 module_node = node.child_by_field_name("module_name")
                 if module_node:
-                    mod = content[module_node.start_byte : module_node.end_byte].decode("utf-8", errors="replace")
+                    mod = content[module_node.start_byte : module_node.end_byte].decode(
+                        "utf-8", errors="replace"
+                    )
                     relationships.append(
                         ParsedRelationship(
                             source_qualified_name=file_path,
@@ -255,9 +281,17 @@ class TreeSitterProvider(CodeIntelligenceProvider):
             if node.type == "class_declaration":
                 name_node = node.child_by_field_name("name")
                 if name_node:
-                    class_name = content[name_node.start_byte : name_node.end_byte].decode("utf-8", errors="replace")
-                    qualified = f"{parent_scope}.{class_name}" if parent_scope else f"{file_path}:{class_name}"
-                    class_hash = hashlib.sha256(content[node.start_byte : node.end_byte]).hexdigest()
+                    class_name = content[
+                        name_node.start_byte : name_node.end_byte
+                    ].decode("utf-8", errors="replace")
+                    qualified = (
+                        f"{parent_scope}.{class_name}"
+                        if parent_scope
+                        else f"{file_path}:{class_name}"
+                    )
+                    class_hash = hashlib.sha256(
+                        content[node.start_byte : node.end_byte]
+                    ).hexdigest()
 
                     symbols.append(
                         ParsedSymbol(
@@ -288,8 +322,14 @@ class TreeSitterProvider(CodeIntelligenceProvider):
             elif node.type == "interface_declaration":
                 name_node = node.child_by_field_name("name")
                 if name_node:
-                    iface_name = content[name_node.start_byte : name_node.end_byte].decode("utf-8", errors="replace")
-                    qualified = f"{parent_scope}.{iface_name}" if parent_scope else f"{file_path}:{iface_name}"
+                    iface_name = content[
+                        name_node.start_byte : name_node.end_byte
+                    ].decode("utf-8", errors="replace")
+                    qualified = (
+                        f"{parent_scope}.{iface_name}"
+                        if parent_scope
+                        else f"{file_path}:{iface_name}"
+                    )
                     symbols.append(
                         ParsedSymbol(
                             entity_type="interface",
@@ -299,7 +339,9 @@ class TreeSitterProvider(CodeIntelligenceProvider):
                             start_line=node.start_point[0] + 1,
                             end_line=node.end_point[0] + 1,
                             signature=f"interface {iface_name}",
-                            content_hash=hashlib.sha256(content[node.start_byte : node.end_byte]).hexdigest(),
+                            content_hash=hashlib.sha256(
+                                content[node.start_byte : node.end_byte]
+                            ).hexdigest(),
                             language=lang,
                         )
                     )
@@ -315,8 +357,14 @@ class TreeSitterProvider(CodeIntelligenceProvider):
             elif node.type in ("function_declaration", "method_definition"):
                 name_node = node.child_by_field_name("name")
                 if name_node:
-                    func_name = content[name_node.start_byte : name_node.end_byte].decode("utf-8", errors="replace")
-                    qualified = f"{parent_scope}.{func_name}" if parent_scope else f"{file_path}:{func_name}"
+                    func_name = content[
+                        name_node.start_byte : name_node.end_byte
+                    ].decode("utf-8", errors="replace")
+                    qualified = (
+                        f"{parent_scope}.{func_name}"
+                        if parent_scope
+                        else f"{file_path}:{func_name}"
+                    )
                     symbols.append(
                         ParsedSymbol(
                             entity_type="method" if parent_scope else "function",
@@ -326,7 +374,9 @@ class TreeSitterProvider(CodeIntelligenceProvider):
                             start_line=node.start_point[0] + 1,
                             end_line=node.end_point[0] + 1,
                             signature=f"function {func_name}()",
-                            content_hash=hashlib.sha256(content[node.start_byte : node.end_byte]).hexdigest(),
+                            content_hash=hashlib.sha256(
+                                content[node.start_byte : node.end_byte]
+                            ).hexdigest(),
                             language=lang,
                         )
                     )
@@ -342,7 +392,11 @@ class TreeSitterProvider(CodeIntelligenceProvider):
             elif node.type == "import_statement":
                 source_node = node.child_by_field_name("source")
                 if source_node:
-                    src_text = content[source_node.start_byte : source_node.end_byte].decode("utf-8", errors="replace").strip("\"'")
+                    src_text = (
+                        content[source_node.start_byte : source_node.end_byte]
+                        .decode("utf-8", errors="replace")
+                        .strip("\"'")
+                    )
                     relationships.append(
                         ParsedRelationship(
                             source_qualified_name=file_path,
@@ -367,9 +421,13 @@ class TreeSitterProvider(CodeIntelligenceProvider):
     ) -> None:
         def visit(node: tree_sitter.Node) -> None:
             if node.type == "package_clause":
-                pkg_id = node.child_by_field_name("package") or (node.children[1] if len(node.children) > 1 else None)
+                pkg_id = node.child_by_field_name("package") or (
+                    node.children[1] if len(node.children) > 1 else None
+                )
                 if pkg_id:
-                    pkg_name = content[pkg_id.start_byte : pkg_id.end_byte].decode("utf-8", errors="replace")
+                    pkg_name = content[pkg_id.start_byte : pkg_id.end_byte].decode(
+                        "utf-8", errors="replace"
+                    )
                     symbols.append(
                         ParsedSymbol(
                             entity_type="module",
@@ -379,7 +437,9 @@ class TreeSitterProvider(CodeIntelligenceProvider):
                             start_line=node.start_point[0] + 1,
                             end_line=node.end_point[0] + 1,
                             signature=f"package {pkg_name}",
-                            content_hash=hashlib.sha256(content[node.start_byte : node.end_byte]).hexdigest(),
+                            content_hash=hashlib.sha256(
+                                content[node.start_byte : node.end_byte]
+                            ).hexdigest(),
                             language="go",
                         )
                     )
@@ -387,7 +447,9 @@ class TreeSitterProvider(CodeIntelligenceProvider):
             elif node.type == "function_declaration":
                 name_node = node.child_by_field_name("name")
                 if name_node:
-                    func_name = content[name_node.start_byte : name_node.end_byte].decode("utf-8", errors="replace")
+                    func_name = content[
+                        name_node.start_byte : name_node.end_byte
+                    ].decode("utf-8", errors="replace")
                     qualified = f"{file_path}:{func_name}"
                     symbols.append(
                         ParsedSymbol(
@@ -398,7 +460,9 @@ class TreeSitterProvider(CodeIntelligenceProvider):
                             start_line=node.start_point[0] + 1,
                             end_line=node.end_point[0] + 1,
                             signature=f"func {func_name}",
-                            content_hash=hashlib.sha256(content[node.start_byte : node.end_byte]).hexdigest(),
+                            content_hash=hashlib.sha256(
+                                content[node.start_byte : node.end_byte]
+                            ).hexdigest(),
                             language="go",
                         )
                     )
@@ -414,12 +478,16 @@ class TreeSitterProvider(CodeIntelligenceProvider):
                 name_node = node.child_by_field_name("name")
                 receiver = node.child_by_field_name("receiver")
                 recv_text = (
-                    content[receiver.start_byte : receiver.end_byte].decode("utf-8", errors="replace")
+                    content[receiver.start_byte : receiver.end_byte].decode(
+                        "utf-8", errors="replace"
+                    )
                     if receiver
                     else ""
                 )
                 if name_node:
-                    m_name = content[name_node.start_byte : name_node.end_byte].decode("utf-8", errors="replace")
+                    m_name = content[name_node.start_byte : name_node.end_byte].decode(
+                        "utf-8", errors="replace"
+                    )
                     qualified = f"{file_path}:{m_name}"
                     symbols.append(
                         ParsedSymbol(
@@ -430,7 +498,9 @@ class TreeSitterProvider(CodeIntelligenceProvider):
                             start_line=node.start_point[0] + 1,
                             end_line=node.end_point[0] + 1,
                             signature=f"func {recv_text} {m_name}",
-                            content_hash=hashlib.sha256(content[node.start_byte : node.end_byte]).hexdigest(),
+                            content_hash=hashlib.sha256(
+                                content[node.start_byte : node.end_byte]
+                            ).hexdigest(),
                             language="go",
                         )
                     )
@@ -439,7 +509,9 @@ class TreeSitterProvider(CodeIntelligenceProvider):
                 name_node = node.child_by_field_name("name")
                 type_node = node.child_by_field_name("type")
                 if name_node:
-                    type_name = content[name_node.start_byte : name_node.end_byte].decode("utf-8", errors="replace")
+                    type_name = content[
+                        name_node.start_byte : name_node.end_byte
+                    ].decode("utf-8", errors="replace")
                     is_interface = type_node and type_node.type == "interface_type"
                     kind = "interface" if is_interface else "model"
                     qualified = f"{file_path}:{type_name}"
@@ -452,7 +524,9 @@ class TreeSitterProvider(CodeIntelligenceProvider):
                             start_line=node.start_point[0] + 1,
                             end_line=node.end_point[0] + 1,
                             signature=f"type {type_name}",
-                            content_hash=hashlib.sha256(content[node.start_byte : node.end_byte]).hexdigest(),
+                            content_hash=hashlib.sha256(
+                                content[node.start_byte : node.end_byte]
+                            ).hexdigest(),
                             language="go",
                         )
                     )
@@ -460,7 +534,11 @@ class TreeSitterProvider(CodeIntelligenceProvider):
             elif node.type == "import_spec":
                 path_node = node.child_by_field_name("path")
                 if path_node:
-                    import_path = content[path_node.start_byte : path_node.end_byte].decode("utf-8", errors="replace").strip("\"`")
+                    import_path = (
+                        content[path_node.start_byte : path_node.end_byte]
+                        .decode("utf-8", errors="replace")
+                        .strip('"`')
+                    )
                     relationships.append(
                         ParsedRelationship(
                             source_qualified_name=file_path,
@@ -487,9 +565,17 @@ class TreeSitterProvider(CodeIntelligenceProvider):
             if node.type in ("class_declaration", "interface_declaration"):
                 name_node = node.child_by_field_name("name")
                 if name_node:
-                    name_str = content[name_node.start_byte : name_node.end_byte].decode("utf-8", errors="replace")
-                    kind = "interface" if node.type == "interface_declaration" else "class"
-                    qualified = f"{parent_scope}.{name_str}" if parent_scope else f"{file_path}:{name_str}"
+                    name_str = content[
+                        name_node.start_byte : name_node.end_byte
+                    ].decode("utf-8", errors="replace")
+                    kind = (
+                        "interface" if node.type == "interface_declaration" else "class"
+                    )
+                    qualified = (
+                        f"{parent_scope}.{name_str}"
+                        if parent_scope
+                        else f"{file_path}:{name_str}"
+                    )
                     symbols.append(
                         ParsedSymbol(
                             entity_type=kind,
@@ -499,7 +585,9 @@ class TreeSitterProvider(CodeIntelligenceProvider):
                             start_line=node.start_point[0] + 1,
                             end_line=node.end_point[0] + 1,
                             signature=f"{kind} {name_str}",
-                            content_hash=hashlib.sha256(content[node.start_byte : node.end_byte]).hexdigest(),
+                            content_hash=hashlib.sha256(
+                                content[node.start_byte : node.end_byte]
+                            ).hexdigest(),
                             language="java",
                         )
                     )
@@ -519,8 +607,14 @@ class TreeSitterProvider(CodeIntelligenceProvider):
             elif node.type == "method_declaration":
                 name_node = node.child_by_field_name("name")
                 if name_node:
-                    m_name = content[name_node.start_byte : name_node.end_byte].decode("utf-8", errors="replace")
-                    qualified = f"{parent_scope}.{m_name}" if parent_scope else f"{file_path}:{m_name}"
+                    m_name = content[name_node.start_byte : name_node.end_byte].decode(
+                        "utf-8", errors="replace"
+                    )
+                    qualified = (
+                        f"{parent_scope}.{m_name}"
+                        if parent_scope
+                        else f"{file_path}:{m_name}"
+                    )
                     symbols.append(
                         ParsedSymbol(
                             entity_type="method",
@@ -530,7 +624,9 @@ class TreeSitterProvider(CodeIntelligenceProvider):
                             start_line=node.start_point[0] + 1,
                             end_line=node.end_point[0] + 1,
                             signature=f"{m_name}()",
-                            content_hash=hashlib.sha256(content[node.start_byte : node.end_byte]).hexdigest(),
+                            content_hash=hashlib.sha256(
+                                content[node.start_byte : node.end_byte]
+                            ).hexdigest(),
                             language="java",
                         )
                     )
@@ -546,7 +642,9 @@ class TreeSitterProvider(CodeIntelligenceProvider):
             elif node.type == "import_declaration":
                 for child in node.children:
                     if child.type in ("scoped_identifier", "identifier"):
-                        import_str = content[child.start_byte : child.end_byte].decode("utf-8", errors="replace")
+                        import_str = content[child.start_byte : child.end_byte].decode(
+                            "utf-8", errors="replace"
+                        )
                         relationships.append(
                             ParsedRelationship(
                                 source_qualified_name=file_path,

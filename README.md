@@ -1,8 +1,8 @@
 # CortexForge
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python: 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-[![MCP: 2.x](https://img.shields.io/badge/MCP-2.x_Compliant-emerald.svg)](https://modelcontextprotocol.io)
+[![MCP: 1.2+](https://img.shields.io/badge/MCP-1.2+-emerald.svg)](https://modelcontextprotocol.io)
 [![FastAPI](https://img.shields.io/badge/FastAPI-Production-green.svg)](https://fastapi.tiangolo.com)
 [![TypeScript: 5.7+](https://img.shields.io/badge/TypeScript-5.7+-blue.svg)](https://www.typescriptlang.org/)
 [![Vite: 6.x](https://img.shields.io/badge/Vite-6.x-purple.svg)](https://vitejs.dev/)
@@ -135,6 +135,44 @@ Open `http://localhost:8000` in your browser to view the interactive Developer W
 
 ---
 
+## 🔐 Authentication & GitHub OAuth Setup
+
+CortexForge features a production-grade, unified GitHub OAuth 2.0 authentication flow with **PKCE (RFC 7636)** and server-side state security.
+
+A single user interface action—**"Continue with GitHub"**—handles both:
+1. **New Users**: Automatic account provisioning (Sign Up) with verified email retrieval.
+2. **Existing Users**: Seamless session resumption (Sign In) and profile synchronization.
+
+### 1. Register GitHub OAuth Application
+
+1. In GitHub, go to **Settings** > **Developer Settings** > **OAuth Apps** > **New OAuth App**.
+2. Set **Application Name**: `CortexForge`
+3. Set **Homepage URL**: `http://localhost:8000` (or your domain in production)
+4. Set **Authorization callback URL**: `http://localhost:8000/api/v1/auth/github/callback`
+5. Generate a **Client Secret**.
+
+### 2. Configure Environment Variables
+
+```bash
+# Required GitHub OAuth Configuration
+export GITHUB_OAUTH_CLIENT_ID="<your_github_client_id>"
+export GITHUB_OAUTH_CLIENT_SECRET="<your_github_client_secret>"
+export GITHUB_OAUTH_REDIRECT_URI="http://localhost:8000/api/v1/auth/github/callback"
+
+# Optional: Custom frontend redirect target on login completion (defaults to /dashboard)
+export FRONTEND_URL="/dashboard"
+```
+
+### 3. Security Invariants
+
+- **PKCE with S256**: Every OAuth transaction generates a high-entropy `code_verifier` (64 bytes URL-safe) and SHA-256 `code_challenge`.
+- **Single-Use State Tokens**: Cryptographic state tokens are stored in the database (`oauth_transactions`) with a 10-minute TTL and burned immediately upon first callback arrival to prevent replay attacks.
+- **Immutable Numeric GitHub ID**: User accounts are linked via GitHub's permanent numeric `id` (`github_user_id`), making authentication immune to GitHub username changes.
+- **Secure Sessions**: User sessions are stored hashed (SHA-256) in the database and issued via `HttpOnly`, `SameSite=Lax` cookies (`cortex_session` and `cortexforge_session`).
+- **Fail-Closed in Production**: `mock_github_client_id` is strictly banned. In production (`CORTEX_ENV=production`), missing credentials fail closed with HTTP 500.
+
+---
+
 ## 🔌 Model Context Protocol (MCP 2.x) Integration
 
 CortexForge exposes a standards-compliant MCP 2.x server over `stdio`, ready to plug into Claude Desktop, Cursor, Gemini Antigravity, or any MCP-compatible agent.
@@ -244,15 +282,28 @@ cortex eval mutations
 ## 🧪 Testing
 
 ```bash
-# Run all 51 unit and integration tests
-uv run pytest tests/ -v
+# Unit, integration, contract, property and evaluation suites
+pytest -v
 
-# Run type check and linting
+# Only the property-based invariants (idempotency, isolation, authority ordering)
+pytest tests/property -v
+
+# Only the adversarial and temporal benchmarks
+pytest tests/evaluation -v
+
+# The schema must be buildable from migrations alone, as it is on a fresh deploy
+pytest tests/contract -v
+
+# Lint
 ruff check src tests
 ```
+
+The suite is deliberately not described by a fixed count here: a number in prose
+goes stale the moment a test is added, and `cortex integrity` will report it when
+it does.
 
 ---
 
 ## 📜 License
-
-MIT License. Designed and built with production rigor for the open-source developer tooling ecosystem.
+ 
+CortexForge is distributed under the [Apache License, Version 2.0](LICENSE), matching `pyproject.toml`.

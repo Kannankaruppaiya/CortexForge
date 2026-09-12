@@ -1,11 +1,36 @@
-"""Provider-neutral LLM abstraction for memory extraction and consolidation."""
+"""Provider-neutral LLM abstraction (specification sections 23 and 24).
 
+An LLM here is a proposal generator, never an authority. Two rules follow:
+
+* Production must never silently fall back to the mock provider. Mock output that
+  reaches durable memory is fabricated knowledge wearing the same clothes as the
+  real thing, so a misconfiguration fails loudly instead of quietly degrading.
+* Every response carries the provider that produced it, so downstream code can
+  refuse to treat mock output as evidence.
+"""
+
+import logging
 import os
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
+
+logger = logging.getLogger(__name__)
+
+# Environments in which a mock or unconfigured provider is a hard error.
+NON_MOCKABLE_ENVIRONMENTS = frozenset({"production", "prod", "staging"})
+
+
+def current_environment() -> str:
+    """The deployment environment, defaulting to development."""
+    return (
+        os.environ.get("CORTEX_ENV", os.environ.get("ENVIRONMENT", "development"))
+        .strip()
+        .lower()
+    )
 
 
 @dataclass
@@ -17,6 +42,15 @@ class LLMResponse:
     output_tokens: int
     latency_ms: float
     cost_estimate: float = 0.0
+
+    @property
+    def is_synthetic(self) -> bool:
+        """True when this text came from the offline mock rather than a model.
+
+        Callers that persist LLM output consult this so that mock text can never
+        be mistaken for a model's proposal.
+        """
+        return self.provider == "mock"
 
 
 class LLMProvider(ABC):
@@ -67,7 +101,9 @@ class MockLLMProvider(LLMProvider):
         chosen_model = model or self.default_model
 
         # Heuristic response for memory consolidation
-        if "consolidate" in prompt.lower() or (system_prompt and "consolidate" in system_prompt.lower()):
+        if "consolidate" in prompt.lower() or (
+            system_prompt and "consolidate" in system_prompt.lower()
+        ):
             content = """# Consolidated Architectural Rules
 - Database connections must be pooled and initialized inside application lifespan.
 - All public REST endpoints must validate input models through Pydantic v2 schemas.
@@ -100,9 +136,15 @@ CONTENT: The authentication layer enforces stateless JWT verification with redis
 class OpenAIProvider(LLMProvider):
     """OpenAI API provider."""
 
-    def __init__(self, api_key: str | None = None, default_model: str = "gpt-4o-mini") -> None:
+    def __init__(
+        self, api_key: str | None = None, default_model: str | None = None
+    ) -> None:
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
-        self._default_model = default_model
+        # CORTEX_LLM_MODEL is documented in .env.example, so it must actually
+        # select the model rather than being decoration.
+        self._default_model = (
+            default_model or os.environ.get("CORTEX_LLM_MODEL") or "gpt-4o-mini"
+        )
 
     @property
     def provider_name(self) -> str:
@@ -122,11 +164,17 @@ class OpenAIProvider(LLMProvider):
     ) -> LLMResponse:
         chosen_model = model or self.default_model
         if not self._api_key:
-            env = os.environ.get("CORTEX_ENV", os.environ.get("ENVIRONMENT", "development")).lower()
-            if env == "production":
+            environment = current_environment()
+            if environment in NON_MOCKABLE_ENVIRONMENTS:
                 raise RuntimeError(
-                    "Production configuration error: OpenAIProvider configured in production but OPENAI_API_KEY is not set."
+                    "OpenAIProvider is configured but OPENAI_API_KEY is not set, and "
+                    f"the environment is '{environment}'. Refusing to substitute "
+                    "mock output for a model response."
                 )
+            logger.warning(
+                "OPENAI_API_KEY is not set; returning deterministic mock output. "
+                "This text is not model output and must not be treated as one."
+            )
             return await MockLLMProvider().generate(prompt, system_prompt, chosen_model)
 
         messages = []
@@ -170,9 +218,210 @@ class OpenAIProvider(LLMProvider):
             )
 
 
+class AnthropicProvider(LLMProvider):
+    """Anthropic Claude API provider."""
+
+    def __init__(
+        self, api_key: str | None = None, default_model: str | None = None
+    ) -> None:
+        self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        self._default_model = (
+            default_model
+            or os.environ.get("CORTEX_LLM_MODEL")
+            or "claude-3-5-sonnet-20241022"
+        )
+
+    @property
+    def provider_name(self) -> str:
+        return "anthropic"
+
+    @property
+    def default_model(self) -> str:
+        return self._default_model
+
+    async def generate(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        model: str | None = None,
+        temperature: float = 0.2,
+        max_tokens: int = 2000,
+    ) -> LLMResponse:
+        chosen_model = model or self.default_model
+        if not self._api_key:
+            environment = current_environment()
+            if environment in NON_MOCKABLE_ENVIRONMENTS:
+                raise RuntimeError(
+                    "AnthropicProvider is configured but ANTHROPIC_API_KEY is not set, and "
+                    f"the environment is '{environment}'. Refusing to substitute "
+                    "mock output for a model response."
+                )
+            logger.warning(
+                "ANTHROPIC_API_KEY is not set; returning deterministic mock output."
+            )
+            return await MockLLMProvider().generate(prompt, system_prompt, chosen_model)
+
+        start = time.perf_counter()
+        headers = {
+            "x-api-key": self._api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+        payload: dict[str, Any] = {
+            "model": chosen_model,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if system_prompt:
+            payload["system"] = system_prompt
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers=headers,
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            latency = (time.perf_counter() - start) * 1000
+
+            usage = data.get("usage", {})
+            in_tokens = usage.get("input_tokens", len(prompt.split()))
+            out_tokens = usage.get("output_tokens", 0)
+            content_blocks = data.get("content", [])
+            content = "".join(
+                b.get("text", "") for b in content_blocks if b.get("type") == "text"
+            )
+
+            return LLMResponse(
+                content=content,
+                model=chosen_model,
+                provider="anthropic",
+                input_tokens=in_tokens,
+                output_tokens=out_tokens,
+                latency_ms=round(latency, 2),
+                cost_estimate=(in_tokens * 0.000003) + (out_tokens * 0.000015),
+            )
+
+
+class GeminiProvider(LLMProvider):
+    """Google Gemini API provider."""
+
+    def __init__(
+        self, api_key: str | None = None, default_model: str | None = None
+    ) -> None:
+        self._api_key = (
+            api_key
+            or os.environ.get("GEMINI_API_KEY")
+            or os.environ.get("GOOGLE_API_KEY", "")
+        )
+        self._default_model = (
+            default_model or os.environ.get("CORTEX_LLM_MODEL") or "gemini-1.5-pro"
+        )
+
+    @property
+    def provider_name(self) -> str:
+        return "gemini"
+
+    @property
+    def default_model(self) -> str:
+        return self._default_model
+
+    async def generate(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        model: str | None = None,
+        temperature: float = 0.2,
+        max_tokens: int = 2000,
+    ) -> LLMResponse:
+        chosen_model = model or self.default_model
+        if not self._api_key:
+            environment = current_environment()
+            if environment in NON_MOCKABLE_ENVIRONMENTS:
+                raise RuntimeError(
+                    "GeminiProvider is configured but GEMINI_API_KEY is not set, and "
+                    f"the environment is '{environment}'. Refusing to substitute "
+                    "mock output for a model response."
+                )
+            logger.warning(
+                "GEMINI_API_KEY is not set; returning deterministic mock output."
+            )
+            return await MockLLMProvider().generate(prompt, system_prompt, chosen_model)
+
+        start = time.perf_counter()
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{chosen_model}:generateContent"
+        headers = {"x-goog-api-key": self._api_key}
+        parts = []
+        if system_prompt:
+            parts.append({"text": f"System Instructions: {system_prompt}\n\n"})
+        parts.append({"text": prompt})
+
+        payload = {
+            "contents": [{"parts": parts}],
+            "generationConfig": {
+                "temperature": temperature,
+                "maxOutputTokens": max_tokens,
+            },
+        }
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+            latency = (time.perf_counter() - start) * 1000
+
+            candidates = data.get("candidates", [])
+            content = ""
+            if candidates:
+                cand_parts = candidates[0].get("content", {}).get("parts", [])
+                content = "".join(p.get("text", "") for p in cand_parts)
+
+            usage = data.get("usageMetadata", {})
+            in_tokens = usage.get("promptTokenCount", len(prompt.split()))
+            out_tokens = usage.get("candidatesTokenCount", len(content.split()))
+
+            return LLMResponse(
+                content=content,
+                model=chosen_model,
+                provider="gemini",
+                input_tokens=in_tokens,
+                output_tokens=out_tokens,
+                latency_ms=round(latency, 2),
+                cost_estimate=0.0,
+            )
+
+
 def get_llm_provider(provider_type: str | None = None) -> LLMProvider:
-    """Factory returning configured LLM provider."""
-    ptype = (provider_type or os.environ.get("CORTEX_LLM_PROVIDER", "mock")).lower()
-    if ptype == "openai":
+    """Return the configured LLM provider.
+
+    The mock provider is only available outside production. Defaulting to it in a
+    production deployment -- which the previous unconditional fallback did -- would
+    let deterministic canned text flow into consolidation and become durable
+    project knowledge (section 24).
+    """
+    ptype = (
+        (provider_type or os.environ.get("CORTEX_LLM_PROVIDER", "mock")).strip().lower()
+    )
+    environment = current_environment()
+
+    if ptype in ("openai", "custom_openai", "openai_compatible"):
         return OpenAIProvider()
-    return MockLLMProvider()
+    if ptype in ("anthropic", "claude"):
+        return AnthropicProvider()
+    if ptype in ("gemini", "google"):
+        return GeminiProvider()
+    if ptype == "mock":
+        if environment in NON_MOCKABLE_ENVIRONMENTS:
+            raise RuntimeError(
+                f"CORTEX_LLM_PROVIDER is 'mock' but the environment is "
+                f"'{environment}'. The mock provider returns canned text and must "
+                "not be used where its output can become durable memory."
+            )
+        return MockLLMProvider()
+
+    raise ValueError(
+        f"Unknown LLM provider '{ptype}'. Supported providers are: 'openai', 'anthropic', "
+        "'gemini', 'openai_compatible', or 'mock' (mock is unavailable in production)."
+    )

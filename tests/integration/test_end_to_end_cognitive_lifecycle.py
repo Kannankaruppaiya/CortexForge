@@ -29,11 +29,8 @@ from cortexforge.code_intelligence.scanner import RepositoryScanner
 from cortexforge.core.models import (
     Base,
     FailureEpisode,
-    FixAttempt,
     Memory,
     Project,
-    TestCaseResult,
-    TestRun,
 )
 from cortexforge.core.schemas import MemoryCreate, MemoryEvidenceCreate
 from cortexforge.memory.consolidation import MemoryConsolidationEngine
@@ -85,7 +82,9 @@ async def e2e_session():
 
 
 @pytest.mark.asyncio
-async def test_end_to_end_cognitive_lifecycle(synthetic_repo, e2e_session: AsyncSession):
+async def test_end_to_end_cognitive_lifecycle(
+    synthetic_repo, e2e_session: AsyncSession
+):
     scanner = RepositoryScanner()
     mem_service = MemoryService()
     verifier = MemoryVerificationEngine()
@@ -278,14 +277,22 @@ async def test_end_to_end_cognitive_lifecycle(synthetic_repo, e2e_session: Async
     assert cons_res["clusters_consolidated"] >= 1
     assert cons_res["durable_memories_created"] >= 1
 
-    # Verify a durable lesson was created in database
+    # An LLM-synthesized lesson is a proposal, not knowledge. It waits for review,
+    # and until it is approved the episodes behind it stay intact.
     lesson_stmt = select(Memory).where(
         Memory.project_id == project.id, Memory.memory_type == "LESSON"
     )
     lesson_res = await e2e_session.execute(lesson_stmt)
     lessons = list(lesson_res.scalars().all())
     assert len(lessons) >= 1
-    assert lessons[0].status == "ACTIVE"
+    assert lessons[0].status == "REVIEW_REQUIRED"
+    assert lessons[0].authority == "LLM_GENERATED"
+    assert cons_res["memories_archived"] == 0
+
+    approved_lesson = await consolidator.approve_lesson(
+        e2e_session, lessons[0].id, approver="staff-engineer"
+    )
+    assert approved_lesson.status == "ACTIVE"
 
     # ----------------------------------------------------
     # Step 11: Retrieve again; confirm context reflects updated state
@@ -298,7 +305,10 @@ async def test_end_to_end_cognitive_lifecycle(synthetic_repo, e2e_session: Async
         target_files=["services/auth.py"],
     )
     # Should feature the new JWT decision and/or durable lessons
-    assert "Stateless JWT Authentication" in final_context or "Project Conventions & Durable Lessons" in final_context
+    assert (
+        "Stateless JWT Authentication" in final_context
+        or "Project Conventions & Durable Lessons" in final_context
+    )
     # Warning should flag the stale Redis decision
     assert "Potentially Stale Memories Detected" in final_context
     assert "Redis" in final_context
@@ -319,13 +329,17 @@ async def test_end_to_end_cognitive_lifecycle(synthetic_repo, e2e_session: Async
             importance=0.90,
         ),
     )
-    # create_memory automatically ran conflict resolution against the earlier Redis decision
+    # Conflict resolution runs on creation. The new claim contradicts a
+    # code-grounded decision but presents no evidence of its own, so it does not
+    # get to displace it -- an unevidenced assertion never outranks direct code
+    # evidence (specification sections 6 and 23). It is held for review rather
+    # than discarded, since it may simply be a true statement lacking grounding.
     await e2e_session.refresh(decision)
     await e2e_session.refresh(contradiction_memory)
-    assert contradiction_memory.supersedes_id == decision.id
-    assert decision.status == "SUPERSEDED"
-    assert decision.conflict_group is not None
-
+    assert contradiction_memory.status == "REVIEW_REQUIRED"
+    assert decision.status != "SUPERSEDED"
+    assert contradiction_memory.conflict_group is not None
+    assert contradiction_memory.conflict_group == decision.conflict_group
 
     # ----------------------------------------------------
     # Step 13: Agent Workflow Orchestration & Failure Ingestion
@@ -399,10 +413,17 @@ async def test_end_to_end_cognitive_lifecycle(synthetic_repo, e2e_session: Async
     # ----------------------------------------------------
     # Step 16: Safe Idempotent Consolidation
     # ----------------------------------------------------
-    c1 = await consolidator.consolidate_project_memories(e2e_session, project.id)
-    # Running consolidation a second time should be idempotent
-    c2 = await consolidator.consolidate_project_memories(e2e_session, project.id)
-    assert c2["durable_memories_created"] == 0  # Idempotent!
+    first_pass = await consolidator.consolidate_project_memories(
+        e2e_session, project.id
+    )
+    # Consolidating the same episodes again must converge, not accumulate: clusters
+    # are identified by a fingerprint over their members, so the second pass finds
+    # its work already done.
+    second_pass = await consolidator.consolidate_project_memories(
+        e2e_session, project.id
+    )
+    assert second_pass["durable_memories_created"] == 0
+    assert second_pass["duplicates_skipped"] >= first_pass["durable_memories_created"]
 
     # ----------------------------------------------------
     # Step 17: Capture Cognitive Snapshot
@@ -431,7 +452,9 @@ async def test_end_to_end_cognitive_lifecycle(synthetic_repo, e2e_session: Async
     # ----------------------------------------------------
     # The old Redis session decision was SUPERSEDED and must not be selected as an active decision
     assert "Redis Session Store for Auth" not in [
-        m["title"] for m in next_task_context.selected_memories if m.get("memory_type") == "DECISION"
+        m["title"]
+        for m in next_task_context.selected_memories
+        if m.get("memory_type") == "DECISION"
     ]
 
     # ----------------------------------------------------
@@ -448,8 +471,9 @@ async def test_end_to_end_cognitive_lifecycle(synthetic_repo, e2e_session: Async
         commit_sha="e2e4a8f9b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7",
         task_text="Check authentication architecture and key sizing",
     )
+    assert replay["replay_available"] is True
     assert replay["snapshot_generation"] == snapshot.cognitive_generation
-    assert len(replay["selected_memories"]) >= 1
-
-
-
+    assert replay["state_hash"] == snapshot.state_hash
+    # Replay reports the recorded set, believed and withheld alike, so that "what
+    # did we believe then" and "what do we believe now" stay distinguishable.
+    assert replay["believed_memories"] or replay["withheld_memories"]

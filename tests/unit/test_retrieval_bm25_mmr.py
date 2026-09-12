@@ -33,7 +33,9 @@ def test_bm25_scorer_tf_idf_properties():
 
 
 @pytest.mark.asyncio
-async def test_retrieval_filters_superseded_and_applies_layer_filter(test_session: AsyncSession, tmp_path):
+async def test_retrieval_filters_superseded_and_applies_layer_filter(
+    test_session: AsyncSession, tmp_path
+):
     """Verify retrieval excludes superseded memories and honors layer filters."""
     project = Project(name="RetrievalProj", local_path=str(tmp_path))
     test_session.add(project)
@@ -86,7 +88,10 @@ async def test_retrieval_filters_superseded_and_applies_layer_filter(test_sessio
     )
     # Explicitly supersede it
     await mem_service.deprecate_memory(
-        test_session, mem_sup.id, superseded_by_id=mem_dec.id, reason="Replaced by async"
+        test_session,
+        mem_sup.id,
+        superseded_by_id=mem_dec.id,
+        reason="Replaced by async",
     )
 
     retrieval_engine = HybridRetrievalEngine(

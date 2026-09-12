@@ -33,13 +33,74 @@ jobs:
         run: |
           ruff check src tests
 
+      # A fresh deployment runs migrations, not create_all. This step catches a
+      # chain that only works against a database that already exists -- which is
+      # exactly the state this repository was previously in.
+      # The env block is used rather than an inline assignment so the step works
+      # on both the Ubuntu and Windows runners.
+      - name: Verify migrations build the schema from empty
+        env:
+          CORTEX_DB_URL: sqlite+aiosqlite:///migration_check.db
+        run: alembic upgrade head
+
       - name: Run Test Suite (pytest)
         run: |
           pytest -v
 
       - name: Run Cortex Doctor Diagnostics
+        env:
+          CORTEX_DB_URL: sqlite+aiosqlite:///migration_check.db
+          CORTEX_ENV: production
         run: |
           cortex doctor
+
+  postgres-test:
+    name: PostgreSQL + pgvector Integration
+    runs-on: ubuntu-latest
+
+    # The declared production database is PostgreSQL with pgvector. Testing only
+    # against the SQLite fallback is how a migration chain that cannot build the
+    # production schema goes unnoticed -- which is exactly what happened here: a
+    # boolean column defaulted with an integer literal, which SQLite accepts and
+    # PostgreSQL rejects.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: cortexforge_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[all]"
+
+      - name: Run the migration chain against PostgreSQL
+        env:
+          CORTEX_DB_URL: postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/cortexforge_test
+        run: alembic upgrade head
+
+      - name: Verify database-native vector retrieval
+        env:
+          CORTEX_TEST_POSTGRES_URL: postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/cortexforge_test
+        run: pytest tests/integration/test_postgres_vector_retrieval.py -v
 
   frontend-build:
     name: Web Dashboard Typecheck & Build
@@ -51,14 +112,50 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
           cache: "npm"
-          cache-dependency-path: "apps/web/package.json"
+          cache-dependency-path: "apps/web/package-lock.json"
 
       - name: Install Frontend Dependencies
         working-directory: apps/web
-        run: npm install
+        run: npm ci
 
       - name: Build Web Dashboard
         working-directory: apps/web
         run: npm run build
+
+  security-audit:
+    name: Dependency Vulnerability & Security Gates
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: "apps/web/package-lock.json"
+
+      - name: Frontend Dependency Vulnerability Audit
+        working-directory: apps/web
+        run: npm audit --registry=https://registry.npmjs.org/ --audit-level=high
+
+      - name: Python Dependency Vulnerability Audit (pip-audit)
+        run: |
+          python -m pip install --upgrade pip pip-audit
+          pip-audit --desc on
+
+      - name: Secret Scan (Gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

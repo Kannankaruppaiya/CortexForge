@@ -12,8 +12,8 @@ from cortexforge.core.db import get_db_session
 from cortexforge.core.models import (
     ArchitectureRule,
     FailureEpisode,
+    Memory,
     Project,
-    RuleViolation,
     TestRun,
 )
 from cortexforge.core.schemas import (
@@ -29,8 +29,14 @@ from cortexforge.evaluation.mutations import MutationBenchmarkHarness
 from cortexforge.graph.service import GraphService
 from cortexforge.memory.provenance import ProvenanceEngine
 from cortexforge.memory.snapshots import CognitiveSnapshotEngine
+from cortexforge.security.auth import (
+    Principal,
+    RequireProjectAccess,
+    get_current_principal,
+)
+from cortexforge.security.policy import Permission
 
-router = APIRouter(tags=["cognition"])
+router = APIRouter(tags=["cognition"], dependencies=[Depends(RequireProjectAccess())])
 
 invariant_engine = ArchitectureInvariantEngine()
 provenance_engine = ProvenanceEngine()
@@ -40,35 +46,66 @@ graph_service = GraphService()
 
 # ==================== 1. ARCHITECTURE INVARIANTS & VIOLATIONS ====================
 
-@router.get("/projects/{project_id}/architecture/rules", response_model=list[ArchitectureRuleRead])
+
+@router.get(
+    "/projects/{project_id}/architecture/rules",
+    response_model=list[ArchitectureRuleRead],
+)
 async def list_architecture_rules(
     project_id: str, session: AsyncSession = Depends(get_db_session)
 ) -> list[ArchitectureRuleRead]:
     """List defined architectural boundary rules for a project."""
     project = await session.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
 
     stmt = select(ArchitectureRule).where(ArchitectureRule.project_id == project_id)
     res = await session.execute(stmt)
     return [ArchitectureRuleRead.model_validate(r) for r in res.scalars().all()]
 
 
-@router.post("/projects/{project_id}/architecture/rules", response_model=ArchitectureRuleRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/projects/{project_id}/architecture/rules",
+    response_model=ArchitectureRuleRead,
+    status_code=status.HTTP_201_CREATED,
+)
 async def create_architecture_rule(
     project_id: str,
     payload: ArchitectureRuleCreate,
     session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(
+        RequireProjectAccess("project_id", permission=Permission.ARCHITECTURE_WRITE)
+    ),
 ) -> ArchitectureRuleRead:
     """Create a new architectural invariant boundary rule."""
+    if payload.authority:
+        auth_norm = payload.authority.strip().upper()
+        if (
+            auth_norm in ("USER_CONFIRMED", "REVIEW_CONFIRMED", "HIGH_AUTHORITY")
+            and principal.actor_type != "USER"
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Non-human principals cannot self-assert human-confirmed epistemic authority.",
+            )
+
     project = await session.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
 
     rule = ArchitectureRule(
         project_id=project_id,
         rule_name=payload.rule_name,
         description=payload.description,
+        modality=payload.modality,
+        authority=payload.authority,
+        source=payload.source,
+        evidence=payload.evidence,
+        version=payload.version,
         scope=payload.scope,
         severity=payload.severity,
         forbidden_source_pattern=payload.forbidden_source_pattern,
@@ -81,8 +118,10 @@ async def create_architecture_rule(
     return ArchitectureRuleRead.model_validate(rule)
 
 
-
-@router.get("/projects/{project_id}/architecture/violations", response_model=list[RuleViolationRead])
+@router.get(
+    "/projects/{project_id}/architecture/violations",
+    response_model=list[RuleViolationRead],
+)
 async def check_architecture_violations(
     project_id: str,
     commit_sha: str | None = None,
@@ -91,7 +130,9 @@ async def check_architecture_violations(
     """Check and return all active architecture boundary rule violations."""
     project = await session.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
 
     violations = await invariant_engine.check_project_invariants(
         session, project_id=project_id, commit_sha=commit_sha
@@ -101,57 +142,91 @@ async def check_architecture_violations(
 
 # ==================== 2. PROVENANCE GRAPH ====================
 
+
 @router.get("/memories/{memory_id}/provenance", response_model=ProvenanceTraceRead)
 async def get_memory_provenance(
-    memory_id: str, session: AsyncSession = Depends(get_db_session)
+    memory_id: str,
+    principal: Principal = Depends(get_current_principal),
+    session: AsyncSession = Depends(get_db_session),
 ) -> ProvenanceTraceRead:
     """Answer 'Why does CortexForge believe this?' by tracing full causal provenance."""
+    mem = await session.get(Memory, memory_id)
+    if not mem:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found"
+        )
+    RequireProjectAccess.check_access(principal, mem.project_id)
+
     trace = await provenance_engine.trace_memory(session, memory_id=memory_id)
     if not trace:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found"
+        )
     return ProvenanceTraceRead.model_validate(trace)
 
 
 # ==================== 3. COGNITIVE SNAPSHOTS & DETERMINISTIC REPLAY ====================
 
-@router.get("/projects/{project_id}/snapshots", response_model=list[CognitiveSnapshotRead])
+
+@router.get(
+    "/projects/{project_id}/snapshots", response_model=list[CognitiveSnapshotRead]
+)
 async def list_snapshots(
     project_id: str, session: AsyncSession = Depends(get_db_session)
 ) -> list[CognitiveSnapshotRead]:
     """List cognitive snapshots for a project across commit generations."""
     project = await session.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
 
     snapshots = await snapshot_engine.list_snapshots(session, project_id)
     return [CognitiveSnapshotRead.model_validate(s) for s in snapshots]
 
 
-@router.post("/projects/{project_id}/snapshots", response_model=CognitiveSnapshotRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/projects/{project_id}/snapshots",
+    response_model=CognitiveSnapshotRead,
+    status_code=status.HTTP_201_CREATED,
+)
 async def take_snapshot(
     project_id: str,
     commit_sha: str,
     session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(
+        RequireProjectAccess("project_id", permission=Permission.SNAPSHOT_CREATE)
+    ),
 ) -> CognitiveSnapshotRead:
     """Capture a deterministic cognitive snapshot of project state at a commit."""
     project = await session.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
 
     snapshot = await snapshot_engine.take_snapshot(session, project_id, commit_sha)
     return CognitiveSnapshotRead.model_validate(snapshot)
 
 
-@router.get("/projects/{project_id}/snapshots/{commit_sha}", response_model=CognitiveSnapshotRead)
+@router.get(
+    "/projects/{project_id}/snapshots/{commit_sha}",
+    response_model=CognitiveSnapshotRead,
+)
 async def get_snapshot_at_commit(
     project_id: str,
     commit_sha: str,
     session: AsyncSession = Depends(get_db_session),
 ) -> CognitiveSnapshotRead:
     """Retrieve cognitive snapshot metadata for a specific commit."""
-    snapshot = await snapshot_engine.get_snapshot_at_commit(session, project_id, commit_sha)
+    snapshot = await snapshot_engine.get_snapshot_at_commit(
+        session, project_id, commit_sha
+    )
     if not snapshot:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Snapshot not found for commit")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Snapshot not found for commit",
+        )
     return CognitiveSnapshotRead.model_validate(snapshot)
 
 
@@ -160,19 +235,30 @@ async def replay_state_at_commit(
     project_id: str,
     commit_sha: str,
     session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(
+        RequireProjectAccess("project_id", permission=Permission.SNAPSHOT_READ)
+    ),
 ) -> dict[str, Any]:
     """Reconstruct exact cognitive and architectural state at a given commit."""
     project = await session.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
 
-    state = await snapshot_engine.replay_state_at_commit(session, project_id, commit_sha)
+    state = await snapshot_engine.replay_state_at_commit(
+        session, project_id, commit_sha
+    )
     if not state:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Could not replay state at commit")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Could not replay state at commit",
+        )
     return state
 
 
 # ==================== 4. TEST INTELLIGENCE & FAILURE EPISODES ====================
+
 
 @router.get("/projects/{project_id}/tests", response_model=list[TestRunRead])
 async def list_test_runs(
@@ -181,7 +267,9 @@ async def list_test_runs(
     """List historical test runs and test case results for the project."""
     project = await session.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
 
     stmt = (
         select(TestRun)
@@ -202,7 +290,9 @@ async def list_failure_episodes(
     """List recorded failure episodes, root causes, and fix attempts."""
     project = await session.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
 
     stmt = (
         select(FailureEpisode)
@@ -217,14 +307,21 @@ async def list_failure_episodes(
 
 # ==================== 5. MUTATION BENCHMARK ====================
 
+
 @router.post("/projects/{project_id}/mutations/benchmark")
 async def run_mutation_benchmark(
-    project_id: str, session: AsyncSession = Depends(get_db_session)
+    project_id: str,
+    session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(
+        RequireProjectAccess("project_id", permission=Permission.JOB_CREATE)
+    ),
 ) -> dict[str, Any]:
     """Run deterministic repository mutation benchmark evaluating cognitive update accuracy."""
     project = await session.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
 
     harness = MutationBenchmarkHarness()
     results = await harness.run_suite(session, project_id)
@@ -245,4 +342,3 @@ async def run_mutation_benchmark(
         ],
         "all_passed": all(r.passed for r in results),
     }
-

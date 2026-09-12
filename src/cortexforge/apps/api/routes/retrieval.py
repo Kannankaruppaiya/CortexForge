@@ -14,8 +14,13 @@ from cortexforge.core.db import get_db_session
 from cortexforge.core.models import Project
 from cortexforge.retrieval.composer import ContextComposer
 from cortexforge.retrieval.engine import HybridRetrievalEngine, ScoredItem
+from cortexforge.security.auth import RequireProjectAccess
 
-router = APIRouter(prefix="/projects", tags=["retrieval"])
+router = APIRouter(
+    prefix="/projects",
+    tags=["retrieval"],
+    dependencies=[Depends(RequireProjectAccess())],
+)
 retrieval_engine = HybridRetrievalEngine()
 context_composer = ContextComposer(retrieval_engine=retrieval_engine)
 change_propagator = SemanticChangePropagator()
@@ -49,7 +54,9 @@ async def retrieve_memories(
     """Execute multi-signal hybrid retrieval over memories and code entities."""
     project = await session.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
 
     return await retrieval_engine.retrieve(
         session,
@@ -70,7 +77,9 @@ async def compose_context(
     """Build structured, token-budget-aware context block for AI agent prompt injection."""
     project = await session.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
 
     context_markdown = await context_composer.build_context(
         session,
@@ -97,7 +106,9 @@ async def analyze_impact(
     """Pre-action blast radius check for proposed file modifications."""
     project = await session.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
 
     report: ChangeImpactReport = await change_propagator.propagate_changes(
         session,

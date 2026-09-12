@@ -10,6 +10,9 @@ import {
   ActivitySquare,
   ShieldCheck,
   History,
+  Bot,
+  Settings,
+  Users,
 } from 'lucide-react';
 
 
@@ -23,7 +26,10 @@ export type TabType =
   | 'impact'
   | 'snapshots'
   | 'economics'
-  | 'evaluation';
+  | 'evaluation'
+  | 'agents'
+  | 'members'
+  | 'settings';
 
 interface NavigationProps {
   activeTab: TabType;
@@ -41,6 +47,9 @@ const navItems = [
   { id: 'snapshots', label: 'Cognitive Snapshots & Replay', icon: History },
   { id: 'economics', label: 'Token Economics', icon: TrendingUp },
   { id: 'evaluation', label: 'Evaluation & Mutation Harness', icon: ActivitySquare },
+  { id: 'agents', label: 'AI Agents (Permissions)', icon: Bot },
+  { id: 'members', label: 'Project Members', icon: Users },
+  { id: 'settings', label: 'Account & Security', icon: Settings },
 ];
 
 

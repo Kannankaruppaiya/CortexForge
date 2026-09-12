@@ -1,8 +1,21 @@
 """Explicit finite state machine governing durable memory lifecycle transitions.
 
-Specification (Section 6):
-States: CANDIDATE, UNVERIFIED, ACTIVE, STALE, CONFLICTED, SUPERSEDED, INVALIDATED, ARCHIVED.
-Arbitrary state transitions are strictly rejected.
+Specification sections 7 and 43.
+
+States: CANDIDATE, REVIEW_REQUIRED, UNVERIFIED, ACTIVE, STALE, CONFLICTED,
+SUPERSEDED, INVALIDATED, ARCHIVED.
+
+Two properties this machine exists to guarantee:
+
+* ``INVALIDATED`` is terminal apart from archival -- a memory whose premise was
+  deleted or disproven can never silently return to ACTIVE.
+* Leaving a disbelieved state (STALE / CONFLICTED / REVIEW_REQUIRED) for ACTIVE
+  requires the caller to assert ``verified=True``, which only the verification and
+  approval paths do. Believing something again is therefore always the result of
+  new evidence, never of a convenient status write.
+
+Every transition records a ``MemoryVersion`` carrying the actor, commit and reason,
+so lifecycle history is auditable rather than inferred.
 """
 
 from datetime import UTC, datetime
@@ -13,6 +26,7 @@ from cortexforge.core.models import Memory, MemoryVersion
 
 class MemoryState(str, Enum):
     CANDIDATE = "CANDIDATE"
+    REVIEW_REQUIRED = "REVIEW_REQUIRED"
     UNVERIFIED = "UNVERIFIED"
     ACTIVE = "ACTIVE"
     STALE = "STALE"
@@ -36,32 +50,50 @@ class InvalidStateTransitionError(ValueError):
 
 # Formal transition graph
 VALID_TRANSITIONS: dict[str, set[str]] = {
-    # Newly proposed observation or candidate memory
+    # Newly proposed observation or candidate memory.
+    # A candidate may not jump straight to ACTIVE: it must first be verified
+    # (UNVERIFIED -> ACTIVE on evidence) or approved (REVIEW_REQUIRED -> ACTIVE),
+    # which is what stops LLM output from self-activating (sections 7, 23, 43).
     MemoryState.CANDIDATE.value: {
+        MemoryState.REVIEW_REQUIRED.value,
         MemoryState.UNVERIFIED.value,
-        MemoryState.ACTIVE.value,
+        MemoryState.CONFLICTED.value,
+        MemoryState.SUPERSEDED.value,
         MemoryState.INVALIDATED.value,
+        MemoryState.ARCHIVED.value,
+    },
+    # Awaiting human or review approval before it can be believed (section 43).
+    MemoryState.REVIEW_REQUIRED.value: {
+        MemoryState.ACTIVE.value,  # Approved by a reviewer or the user
+        MemoryState.UNVERIFIED.value,  # Sent back for evidence gathering
+        MemoryState.STALE.value,  # Rewritten or vanished commit / ground
+        MemoryState.CONFLICTED.value,
+        MemoryState.SUPERSEDED.value,  # Replaced by newer statement or decision
+        MemoryState.INVALIDATED.value,  # Rejected
         MemoryState.ARCHIVED.value,
     },
     # Memory created without verified code/test evidence grounding
     MemoryState.UNVERIFIED.value: {
         MemoryState.ACTIVE.value,  # Upon evidence verification
+        MemoryState.REVIEW_REQUIRED.value,
         MemoryState.STALE.value,
         MemoryState.CONFLICTED.value,
+        MemoryState.SUPERSEDED.value,  # A newer statement can replace it unread
         MemoryState.INVALIDATED.value,
         MemoryState.ARCHIVED.value,
     },
     # Fully active, verified, durable memory
     MemoryState.ACTIVE.value: {
-        MemoryState.STALE.value,       # When grounded symbol/code is modified
+        MemoryState.UNVERIFIED.value,  # When content is mutated and prior verification is invalidated
+        MemoryState.STALE.value,  # When grounded symbol/code is modified
         MemoryState.CONFLICTED.value,  # When contradictory evidence/memory is found
         MemoryState.SUPERSEDED.value,  # When higher-authority replacement is established
-        MemoryState.INVALIDATED.value, # When grounded symbol/code is completely deleted
-        MemoryState.ARCHIVED.value,    # When explicitly decommissioned
+        MemoryState.INVALIDATED.value,  # When grounded symbol/code is completely deleted
+        MemoryState.ARCHIVED.value,  # When explicitly decommissioned
     },
     # Stale memory awaiting reverification or invalidation
     MemoryState.STALE.value: {
-        MemoryState.ACTIVE.value,       # Re-verified against updated code
+        MemoryState.ACTIVE.value,  # Re-verified against updated code
         MemoryState.CONFLICTED.value,
         MemoryState.SUPERSEDED.value,
         MemoryState.INVALIDATED.value,  # Symbol deleted or assertion disproven
@@ -69,8 +101,8 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
     },
     # Contradicted memory under dispute
     MemoryState.CONFLICTED.value: {
-        MemoryState.ACTIVE.value,       # Resolved in favor of this memory
-        MemoryState.SUPERSEDED.value,   # Resolved in favor of new memory
+        MemoryState.ACTIVE.value,  # Resolved in favor of this memory
+        MemoryState.SUPERSEDED.value,  # Resolved in favor of new memory
         MemoryState.INVALIDATED.value,
         MemoryState.ARCHIVED.value,
     },
@@ -85,6 +117,16 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
     # Terminal archive state
     MemoryState.ARCHIVED.value: set(),
 }
+
+
+# States a memory can only leave for ACTIVE by presenting fresh verification.
+_REQUIRES_REVERIFICATION: frozenset[str] = frozenset(
+    {
+        MemoryState.STALE.value,
+        MemoryState.CONFLICTED.value,
+        MemoryState.REVIEW_REQUIRED.value,
+    }
+)
 
 
 class MemoryLifecycleManager:
@@ -110,6 +152,7 @@ class MemoryLifecycleManager:
         actor: str = "system",
         commit_sha: str | None = None,
         force_version: bool = False,
+        verified: bool = False,
     ) -> MemoryVersion | None:
         """Apply state transition to memory, validating constraints and generating version audit.
 
@@ -133,12 +176,46 @@ class MemoryLifecycleManager:
                 reason=reason,
             )
 
+        # Re-activation must be earned. Moving a memory that was previously
+        # disbelieved (STALE / CONFLICTED) back to ACTIVE requires a caller that
+        # actually re-verified it, and says so by passing `verified=True`. Without
+        # that, the transition is refused rather than being quietly applied
+        # (sections 7 and 8).
+        if (
+            target_state == MemoryState.ACTIVE.value
+            and current_state in _REQUIRES_REVERIFICATION
+            and not verified
+        ):
+            raise InvalidStateTransitionError(
+                from_state=current_state,
+                to_state=target_state,
+                reason=(
+                    "re-activation requires successful re-verification; "
+                    "call with verified=True from a verification or approval path"
+                ),
+            )
+
         # Apply state mutation
         memory.status = target_state
         memory.updated_at = datetime.now(UTC)
 
-        if target_state == MemoryState.ACTIVE.value:
+        if target_state in (
+            MemoryState.SUPERSEDED.value,
+            MemoryState.INVALIDATED.value,
+            MemoryState.ARCHIVED.value,
+        ):
+            if not memory.valid_to_time:
+                memory.valid_to_time = datetime.now(UTC)
+            if commit_sha and not memory.valid_to_commit:
+                memory.valid_to_commit = commit_sha
+        elif target_state == MemoryState.ACTIVE.value:
             memory.last_verified_at = datetime.now(UTC)
+            memory.valid_to_time = None
+            memory.valid_to_commit = None
+            if not memory.valid_from_time:
+                memory.valid_from_time = datetime.now(UTC)
+            if commit_sha and not memory.valid_from_commit:
+                memory.valid_from_commit = commit_sha
 
         if superseded_by_id:
             memory.superseded_by_id = superseded_by_id

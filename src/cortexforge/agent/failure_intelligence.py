@@ -38,18 +38,26 @@ class FailureNormalizer:
         text = raw_trace
 
         # Replace Windows and Unix file paths with canonical <FILE>
-        text = re.sub(r'[A-Za-z]:\\[^\n:]+\\([A-Za-z0-9_]+\.[a-zA-Z0-9]+)', r'<PATH>/\1', text)
-        text = re.sub(r'/[\w\.\-]+/[\w\.\-/]+/([A-Za-z0-9_]+\.[a-zA-Z0-9]+)', r'<PATH>/\1', text)
+        text = re.sub(
+            r"[A-Za-z]:\\[^\n:]+\\([A-Za-z0-9_]+\.[a-zA-Z0-9]+)", r"<PATH>/\1", text
+        )
+        text = re.sub(
+            r"/[\w\.\-]+/[\w\.\-/]+/([A-Za-z0-9_]+\.[a-zA-Z0-9]+)", r"<PATH>/\1", text
+        )
 
         # Replace line numbers: "line 123" -> "line <LINE>"
-        text = re.sub(r'\bline \d+\b', 'line <LINE>', text)
-        text = re.sub(r':\d+:', ':<LINE>:', text)
+        text = re.sub(r"\bline \d+\b", "line <LINE>", text)
+        text = re.sub(r":\d+:", ":<LINE>:", text)
 
         # Replace hexadecimal memory addresses (e.g. 0x000001B840BF0230)
-        text = re.sub(r'0x[0-9a-fA-F]{4,16}', '<HEX>', text)
+        text = re.sub(r"0x[0-9a-fA-F]{4,16}", "<HEX>", text)
 
         # Replace UUIDs
-        text = re.sub(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}', '<UUID>', text)
+        text = re.sub(
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+            "<UUID>",
+            text,
+        )
 
         # Normalize whitespace
         lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -83,7 +91,9 @@ class FailureIntelligenceEngine:
         """Construct a structured FailureEpisode with normalized fingerprint."""
         norm_trace = self.normalizer.normalize_stack_trace(stack_trace or error_text)
         # Extract exception class name if available (e.g. TypeError, AssertionError, ValueError)
-        exc_match = re.search(r'([A-Za-z0-9_]+Error|[A-Za-z0-9_]+Exception|AssertionError):', error_text)
+        exc_match = re.search(
+            r"([A-Za-z0-9_]+Error|[A-Za-z0-9_]+Exception|AssertionError):", error_text
+        )
         exc_type = exc_match.group(1) if exc_match else "TestFailure"
 
         sig = self.normalizer.compute_signature(exc_type, norm_trace)

@@ -2,13 +2,17 @@
 
 import os
 import shutil
+import subprocess
 import tempfile
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+import cortexforge.apps.api.main
 from cortexforge.apps.api.main import app
 from cortexforge.apps.mcp.server import (
     memory_get_lessons,
@@ -20,7 +24,7 @@ from cortexforge.apps.mcp.server import (
 )
 from cortexforge.code_intelligence.scanner import RepositoryScanner
 from cortexforge.core.db import get_db_session
-from cortexforge.core.models import Base, Project
+from cortexforge.core.models import Base, CodeEntity, Project, Relationship
 from cortexforge.graph.service import GraphService
 
 
@@ -38,7 +42,9 @@ class AuthService:
         return user == "admin"
 """)
 
-    with open(os.path.join(tmp_dir, "services", "payment.py"), "w", encoding="utf-8") as f:
+    with open(
+        os.path.join(tmp_dir, "services", "payment.py"), "w", encoding="utf-8"
+    ) as f:
         f.write("""
 import services.auth
 
@@ -88,7 +94,9 @@ async def test_session():
 
 
 @pytest.mark.asyncio
-async def test_scanner_and_architecture_synthesis(sample_repo, test_session: AsyncSession):
+async def test_scanner_and_architecture_synthesis(
+    sample_repo, test_session: AsyncSession
+):
     """Verify repository scanner parses AST and builds architecture."""
     project = Project(
         name="TestApp",
@@ -126,6 +134,7 @@ async def test_scanner_and_architecture_synthesis(sample_repo, test_session: Asy
 @pytest.mark.asyncio
 async def test_rest_api_endpoints(sample_repo, test_session: AsyncSession):
     """Test FastAPI REST endpoints."""
+
     # Override get_db_session dependency with test_session
     async def override_get_db():
         yield test_session
@@ -169,12 +178,29 @@ async def test_rest_api_endpoints(sample_repo, test_session: AsyncSession):
             assert impact_resp.status_code == 200
             impact_data = impact_resp.json()
             assert "directly_changed_entities" in impact_data
-            assert any("AuthService" in e for e in impact_data["directly_changed_entities"])
+            assert any(
+                "AuthService" in e for e in impact_data["directly_changed_entities"]
+            )
 
-        # Test Static SPA Dashboard serving
+        # Static SPA serving is mounted only when apps/web/dist has been built.
+        # Asserting on it unconditionally makes an API test fail for the unrelated
+        # reason that `npm run build` has not run, so the assertion is made
+        # conditional on the artifact actually existing.
+        dist_index = (
+            Path(cortexforge.apps.api.main.__file__).resolve().parents[4]
+            / "apps"
+            / "web"
+            / "dist"
+            / "index.html"
+        )
         spa_resp = await client.get("/")
-        assert spa_resp.status_code == 200
-        assert "CortexForge" in spa_resp.text
+        if dist_index.exists():
+            assert spa_resp.status_code == 200
+            assert "CortexForge" in spa_resp.text
+        else:
+            assert spa_resp.status_code == 404, (
+                "with no built frontend the SPA route must not be mounted at all"
+            )
 
     app.dependency_overrides.clear()
 
@@ -182,6 +208,27 @@ async def test_rest_api_endpoints(sample_repo, test_session: AsyncSession):
 @pytest.mark.asyncio
 async def test_mcp_tools(sample_repo):
     """Verify MCP tools format architecture and components."""
+    from cortexforge.core.db import init_db, session_scope
+
+    await init_db()
+    async with session_scope() as session:
+        stmt = select(Project).where(
+            Project.local_path == os.path.realpath(sample_repo)
+        )
+        res = await session.execute(stmt)
+        project = res.scalars().first()
+        if not project:
+            project = Project(
+                name="TestApp",
+                local_path=os.path.realpath(sample_repo),
+                status="INITIALIZING",
+            )
+            session.add(project)
+            await session.commit()
+            await session.refresh(project)
+            scanner = RepositoryScanner()
+            await scanner.scan_project(session, project, incremental=False)
+
     # project_get_architecture tool
     arch_text = await project_get_architecture(sample_repo)
     assert "# Project Architecture:" in arch_text
@@ -194,21 +241,141 @@ async def test_mcp_tools(sample_repo):
     assert "auth.py" in comp_text
 
     # task_start tool
-    start_res = await task_start("Refactor login verification", project_id_or_path=sample_repo)
+    start_res = await task_start(
+        "Refactor login verification", project_id_or_path=sample_repo
+    )
     assert "Task started:" in start_res
     task_id = start_res.split("`")[1]
 
     # task_record_event tool
-    ev_res = await task_record_event(task_id, event_type="TOOL_CALLED", tool_name="search_symbols")
+    ev_res = await task_record_event(
+        task_id, event_type="TOOL_CALLED", tool_name="search_symbols"
+    )
     assert "Recorded tool call" in ev_res
 
     # task_complete tool
     comp_res = await task_complete(
-        task_id, success=True, lesson_learned="Always salt hashes before hashing in AuthService"
+        task_id,
+        success=True,
+        lesson_learned="Always salt hashes before hashing in AuthService",
     )
     assert "COMPLETED" in comp_res
 
-    # memory_get_lessons tool
+    # memory_get_lessons tool. A lesson recorded by a completing agent is an
+    # observation, not yet an established rule, so it is surfaced under the
+    # proposals heading and labelled with its authority.
     lessons_res = await memory_get_lessons(sample_repo)
-    assert "Durable Lessons" in lessons_res
+    assert "Lessons" in lessons_res
     assert "AuthService" in lessons_res
+
+
+def _git_run(repo: str, *args: str) -> str:
+    res = subprocess.run(
+        ["git", *args], cwd=repo, capture_output=True, text=True, check=True, timeout=30
+    )
+    return res.stdout.strip()
+
+
+def _git_commit(repo: str, msg: str) -> str:
+    _git_run(repo, "add", "-A")
+    _git_run(repo, "commit", "-q", "-m", msg)
+    return _git_run(repo, "rev-parse", "HEAD")
+
+
+@pytest.mark.asyncio
+async def test_incremental_relationship_graph_preservation(
+    tmp_path, test_session: AsyncSession
+):
+    """Verify incremental scan preserves cross-file inbound relationships and updates generations."""
+    repo = str(tmp_path / "inc_repo")
+    os.makedirs(os.path.join(repo, "services"), exist_ok=True)
+
+    _git_run(str(tmp_path), "init", "-q", repo)
+    _git_run(repo, "config", "user.email", "test@example.com")
+    _git_run(repo, "config", "user.name", "Test")
+
+    auth_file = os.path.join(repo, "services", "auth.py")
+    payment_file = os.path.join(repo, "services", "payment.py")
+
+    with open(auth_file, "w", encoding="utf-8") as f:
+        f.write("""class AuthService:
+    def authenticate(self, user: str) -> bool:
+        return user == "admin"
+""")
+
+    with open(payment_file, "w", encoding="utf-8") as f:
+        f.write("""import services.auth
+
+class PaymentService:
+    def __init__(self):
+        self.auth = services.auth.AuthService()
+
+    def process(self, amount: float) -> bool:
+        return amount > 0
+""")
+
+    _git_commit(repo, "initial")
+
+    project = Project(
+        name="IncrementalGraphRepo",
+        local_path=os.path.realpath(repo),
+        status="INITIALIZING",
+        default_branch="main",
+    )
+    test_session.add(project)
+    await test_session.commit()
+    await test_session.refresh(project)
+
+    scanner = RepositoryScanner()
+    res1 = await scanner.scan_project(test_session, project, incremental=False)
+
+    assert res1.status == "SUCCESS"
+    assert res1.files_scanned == 2
+    assert res1.graph_generation == 1
+
+    # Verify cross-file relationship exists
+    rels_stmt = select(Relationship).where(Relationship.project_id == project.id)
+    initial_rels = (await test_session.execute(rels_stmt)).scalars().all()
+    assert len(initial_rels) >= 1
+
+    # Check entities in payment.py and auth.py
+    ents_stmt = select(CodeEntity).where(CodeEntity.project_id == project.id)
+    ents = {e.name: e for e in (await test_session.execute(ents_stmt)).scalars().all()}
+    assert "AuthService" in ents
+    assert "PaymentService" in ents
+
+    # Modify ONLY services/auth.py
+    with open(auth_file, "w", encoding="utf-8") as f:
+        f.write("""class AuthService:
+    def authenticate(self, user: str) -> bool:
+        return bool(user)
+
+    def verify_token(self, token: str) -> bool:
+        return len(token) > 8
+""")
+
+    _git_commit(repo, "update auth only")
+
+    # Run incremental scan
+    res2 = await scanner.scan_project(test_session, project, incremental=True)
+
+    assert res2.status == "SUCCESS"
+    assert res2.files_scanned == 1  # Only auth.py scanned
+    assert res2.graph_generation == 2
+
+    # Inbound relationship from untouched PaymentService to AuthService must still exist!
+    rels_after = (await test_session.execute(rels_stmt)).scalars().all()
+    assert len(rels_after) >= 1
+
+    # Verify AuthService was updated with new method
+    ents_after = {
+        e.name: e for e in (await test_session.execute(ents_stmt)).scalars().all()
+    }
+    assert "verify_token" in ents_after
+    assert "PaymentService" in ents_after
+
+    # Rescanning without changes returns files_scanned=0 and preserves graph
+    res3 = await scanner.scan_project(test_session, project, incremental=True)
+    assert res3.status == "SUCCESS"
+    assert res3.files_scanned == 0
+    assert res3.graph_generation == 2

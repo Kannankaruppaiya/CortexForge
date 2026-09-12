@@ -1,34 +1,45 @@
 """End-to-end agent workflow orchestration connecting tasks, diffs, tests, and cognitive memories."""
 
+import logging
+import time
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from cortexforge.agent.events import (
     CanonicalEventType,
     EventAdapterRegistry,
 )
 from cortexforge.agent.failure_intelligence import FailureIntelligenceEngine
+from cortexforge.agent.success_intelligence import SuccessIntelligence
+from cortexforge.agent.test_intelligence import TestIntelligenceEngine
 from cortexforge.code_intelligence.change_propagator import (
     ChangeImpactReport,
     SemanticChangePropagator,
 )
+from cortexforge.cognition.epistemics import TestAttribution
 from cortexforge.core.models import (
     AgentEvent,
     AgentTask,
     FailureEpisode,
     FixAttempt,
     Project,
+    RetrievalEvent,
     TestCaseResult,
     TestRun,
 )
 from cortexforge.core.schemas import MemoryCreate, MemoryEvidenceCreate
 from cortexforge.memory.consolidation import MemoryConsolidationEngine
-from cortexforge.memory.service import MemoryService
+from cortexforge.memory.service import MemoryService, cosine_similarity
 from cortexforge.memory.verification import MemoryVerificationEngine
+from cortexforge.observability.audit import record_audit
 from cortexforge.retrieval.composer import ComposedContext, ContextComposer
+from cortexforge.retrieval.usefulness import RetrievalUsefulnessTracker
+
+logger = logging.getLogger(__name__)
 
 
 class AgentWorkflowOrchestrator:
@@ -42,6 +53,8 @@ class AgentWorkflowOrchestrator:
         verifier: MemoryVerificationEngine | None = None,
         failure_engine: FailureIntelligenceEngine | None = None,
         consolidator: MemoryConsolidationEngine | None = None,
+        success_intelligence: SuccessIntelligence | None = None,
+        usefulness: RetrievalUsefulnessTracker | None = None,
     ) -> None:
         self.memory_service = memory_service or MemoryService()
         self.composer = composer or ContextComposer()
@@ -49,6 +62,9 @@ class AgentWorkflowOrchestrator:
         self.verifier = verifier or MemoryVerificationEngine()
         self.failure_engine = failure_engine or FailureIntelligenceEngine()
         self.consolidator = consolidator or MemoryConsolidationEngine()
+        self.success_intelligence = success_intelligence or SuccessIntelligence()
+        self.usefulness = usefulness or RetrievalUsefulnessTracker()
+        self.test_intelligence = TestIntelligenceEngine()
 
     async def start_task(
         self,
@@ -59,19 +75,31 @@ class AgentWorkflowOrchestrator:
         agent_source: str = "mcp",
         profile: str = "medium",
         target_files: list[str] | None = None,
+        workspace_id: str | None = None,
+        session_id: str | None = None,
+        parent_task_id: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        model_version: str | None = None,
     ) -> tuple[AgentTask, ComposedContext]:
         """Initialize task, generate token-budgeted cognitive context, and start audit trail."""
         project = await session.get(Project, project_id)
         if not project:
             raise ValueError(f"Project {project_id} does not exist.")
 
-        # 1. Create AgentTask record
+        # 1. Create AgentTask record with session provenance
         task = AgentTask(
             project_id=project_id,
             agent_id=agent_id,
             task_text=task_text,
             status="IN_PROGRESS",
             created_at=datetime.now(UTC),
+            workspace_id=workspace_id,
+            session_id=session_id,
+            parent_task_id=parent_task_id,
+            provider=provider,
+            model=model,
+            model_version=model_version,
         )
         session.add(task)
         await session.flush()
@@ -79,12 +107,17 @@ class AgentWorkflowOrchestrator:
         # 2. Record TASK_STARTED event
         adapter = EventAdapterRegistry.get_adapter(agent_source)
         ev_start = adapter.normalize_event(
-            {"event_type": CanonicalEventType.TASK_STARTED.value, "task_text": task_text},
+            {
+                "event_type": CanonicalEventType.TASK_STARTED.value,
+                "task_text": task_text,
+            },
             task_id=task.id,
         )
         session.add(
             AgentEvent(
                 task_id=task.id,
+                project_id=project_id,
+                agent_id=agent_id,
                 event_type=ev_start.event_type.value,
                 source=ev_start.source,
                 payload=ev_start.payload,
@@ -92,6 +125,7 @@ class AgentWorkflowOrchestrator:
         )
 
         # 3. Generate token-budgeted explainable context
+        started = time.perf_counter()
         context = await self.composer.build_context(
             session=session,
             project_id=project_id,
@@ -99,6 +133,53 @@ class AgentWorkflowOrchestrator:
             profile=profile,
             target_files=target_files,
         )
+        latency_ms = (time.perf_counter() - started) * 1000
+
+        # 3a. Record what retrieval returned and what the composer selected from
+        #     it. The other half of the loop -- which memories the agent actually
+        #     used -- is attached when the task completes (section 27).
+        selected = [item["id"] for item in context.selected_memories]
+        excluded = [item["id"] for item in context.excluded_memories]
+        await self.usefulness.record_retrieval(
+            session,
+            project_id=project_id,
+            query=task_text,
+            returned_memory_ids=selected + excluded,
+            selected_memory_ids=selected,
+            excluded_reasons={
+                item["id"]: item.get("reason", "") for item in context.excluded_memories
+            },
+            stale_returned_count=len(context.stale_warnings),
+            conflicted_returned_count=len(context.conflict_warnings),
+            task_id=task.id,
+            context_tokens=getattr(context, "estimated_tokens", 0),
+            latency_ms=round(latency_ms, 2),
+            embedding_model=self.composer.retrieval_engine.embedding_provider.model_name,
+            embedding_version=self.composer.retrieval_engine.embedding_provider.version,
+        )
+
+        # 3b. Surface approaches that worked on similar tasks before, so the agent
+        #     starts from what is known to work rather than from nothing.
+        prior_successes = await self.success_intelligence.find_similar_successes(
+            session,
+            project_id=project_id,
+            task_text=task_text,
+            target_files=target_files,
+        )
+        if prior_successes:
+            session.add(
+                AgentEvent(
+                    task_id=task.id,
+                    project_id=project_id,
+                    agent_id=agent_id,
+                    event_type=CanonicalEventType.MEMORY_RETRIEVED.value,
+                    source=agent_source,
+                    payload={
+                        "kind": "prior_successes",
+                        "successes": prior_successes,
+                    },
+                )
+            )
 
         # 4. Record CONTEXT_REQUESTED event
         ev_ctx = adapter.normalize_event(
@@ -112,6 +193,8 @@ class AgentWorkflowOrchestrator:
         session.add(
             AgentEvent(
                 task_id=task.id,
+                project_id=project_id,
+                agent_id=agent_id,
                 event_type=ev_ctx.event_type.value,
                 source=ev_ctx.source,
                 payload=ev_ctx.payload,
@@ -148,6 +231,8 @@ class AgentWorkflowOrchestrator:
         )
         event_record = AgentEvent(
             task_id=task_id,
+            project_id=task.project_id if task else None,
+            agent_id=task.agent_id if task else None,
             event_type=ev.event_type.value,
             source=ev.source,
             payload=ev.payload,
@@ -181,6 +266,8 @@ class AgentWorkflowOrchestrator:
         session.add(
             AgentEvent(
                 task_id=task_id,
+                project_id=project_id,
+                agent_id=task.agent_id if task else None,
                 event_type=ev.event_type.value,
                 source=ev.source,
                 payload=ev.payload,
@@ -202,7 +289,6 @@ class AgentWorkflowOrchestrator:
                 base_commit=commit_base,
             )
 
-
         await session.commit()
         return impact
 
@@ -215,6 +301,7 @@ class AgentWorkflowOrchestrator:
         error_text: str | None = None,
         stack_trace: str | None = None,
         affected_files: list[str] | None = None,
+        affected_symbols: list[str] | None = None,
         agent_source: str = "mcp",
     ) -> None:
         """Capture test results, normalize stack traces, and record failure episodes."""
@@ -223,7 +310,11 @@ class AgentWorkflowOrchestrator:
             return
 
         is_failure = status.upper() == "FAILED"
-        ev_type = CanonicalEventType.TEST_FAILED if is_failure else CanonicalEventType.TEST_PASSED
+        ev_type = (
+            CanonicalEventType.TEST_FAILED
+            if is_failure
+            else CanonicalEventType.TEST_PASSED
+        )
 
         # 1. Log canonical AgentEvent
         adapter = EventAdapterRegistry.get_adapter(agent_source)
@@ -239,6 +330,8 @@ class AgentWorkflowOrchestrator:
         session.add(
             AgentEvent(
                 task_id=task_id,
+                project_id=task.project_id if task else None,
+                agent_id=task.agent_id if task else None,
                 event_type=ev.event_type.value,
                 source=ev.source,
                 payload=ev.payload,
@@ -292,19 +385,51 @@ class AgentWorkflowOrchestrator:
         session.add(tc_result)
         await session.flush()
 
-        # 4. If test failed, create first-class FailureEpisode and structured L4 Memory
-        if is_failure and episode and error_text:
+        # 4. Attribute the outcome before deciding what it means.
+        #
+        # A failing test is not automatically evidence that this change is wrong.
+        # A test that has been flipping for weeks, or that was already red before
+        # the change, tells you about itself rather than about the work in hand
+        # (section 15). Recording a FAILURE memory for such a test would let a
+        # noisy suite erode the project's knowledge one build at a time.
+        attribution = None
+        if is_failure:
+            report = await self.test_intelligence.attribute_run(session, test_run.id)
+            verdict = next(
+                (v for v in report.verdicts if v.test_name == test_name), None
+            )
+            if verdict is not None:
+                attribution = verdict
+                tc_result.status = (
+                    "FLAKY"
+                    if verdict.attribution == TestAttribution.FLAKY.value
+                    else tc_result.status
+                )
+
+        blames_this_change = (
+            attribution is None or attribution.is_evidence_against_the_change
+        )
+
+        # 5. If the failure is genuinely attributable, record it as a first-class
+        #    episode and durable L4 memory. If it is not, the result is still
+        #    stored -- it happened -- but it does not become evidence against the
+        #    change.
+        if is_failure and episode and error_text and blames_this_change:
             fail_episode = FailureEpisode(
                 project_id=task.project_id,
                 task_id=task.id,
                 test_case_result_id=tc_result.id,
                 failure_signature=episode.failure_signature,
-                error_class=error_text.split(":")[0][:100] if ":" in error_text else "TestFailure",
+                error_class=error_text.split(":")[0][:100]
+                if ":" in error_text
+                else "TestFailure",
                 error_message=episode.error_message,
                 normalized_trace=episode.normalized_trace,
                 attempted_approach=task.task_text,
-                affected_files={"files": affected_files or []},
+                affected_files=affected_files or [],
+                affected_symbols=affected_symbols or [],
             )
+            fail_episode.rejected_reason = None
             session.add(fail_episode)
 
             await self.memory_service.create_memory(
@@ -312,13 +437,18 @@ class AgentWorkflowOrchestrator:
                 project_id=task.project_id,
                 payload=MemoryCreate(
                     title=f"Test Failure in {test_name}",
-                    content=f"Error: {episode.error_message}\nSignature: {episode.failure_signature}\nTrace:\n{episode.normalized_trace}",
+                    content=(
+                        f"Error: {episode.error_message}\n"
+                        f"Signature: {episode.failure_signature}\n"
+                        f"Attribution: {attribution.attribution if attribution else 'UNKNOWN'}"
+                        f" - {attribution.reason if attribution else 'no history available'}\n"
+                        f"Trace:\n{episode.normalized_trace}"
+                    ),
                     summary=f"Failed test {test_name} with signature {episode.failure_signature}",
                     layer="L4",
                     memory_type="FAILURE",
                     source_type="verified_test",
                     importance=0.85,
-                    confidence=0.90,
                     evidence=[
                         MemoryEvidenceCreate(
                             file_path=f,
@@ -327,6 +457,15 @@ class AgentWorkflowOrchestrator:
                         for f in (affected_files or [])
                     ],
                 ),
+            )
+
+        elif is_failure and attribution is not None:
+            logger.info(
+                "Test %s failed but was attributed %s (%s); recorded without "
+                "creating a failure memory.",
+                test_name,
+                attribution.attribution,
+                attribution.reason,
             )
 
         await session.commit()
@@ -369,12 +508,24 @@ class AgentWorkflowOrchestrator:
         session: AsyncSession,
         project_id: str,
         task_text: str,
+        files: list[str] | None = None,
+        symbols: list[str] | None = None,
+        failure_signature: str | None = None,
         limit: int = 5,
     ) -> list[dict[str, Any]]:
-        """Retrieve historically similar engineering tasks, approaches, failures, and fixes."""
-        stmt = select(AgentTask).where(
-            AgentTask.project_id == project_id,
-            AgentTask.status == "COMPLETED",
+        """Retrieve historically similar tasks using embedding, files, symbols, and failure signatures."""
+        stmt = (
+            select(AgentTask)
+            .options(
+                selectinload(AgentTask.events),
+                selectinload(AgentTask.failure_episodes).selectinload(
+                    FailureEpisode.fix_attempts
+                ),
+            )
+            .where(
+                AgentTask.project_id == project_id,
+                AgentTask.status == "COMPLETED",
+            )
         )
         res = await session.execute(stmt)
         completed_tasks = list(res.scalars().all())
@@ -382,43 +533,210 @@ class AgentWorkflowOrchestrator:
         if not completed_tasks:
             return []
 
+        # 1. Text & Embedding Signal
         query_words = set(task_text.lower().split())
-        scored_tasks: list[tuple[float, AgentTask]] = []
+        query_embed = None
+        try:
+            query_embed_res = await self.memory_service.embedding_provider.embed_text(
+                task_text
+            )
+            query_embed = query_embed_res.vector
+        except Exception as exc:
+            logger.debug("Failed to embed task query for similarity: %s", exc)
+
+        scored_tasks: list[tuple[float, dict[str, float], AgentTask]] = []
+
+        q_files_norm = {f.replace("\\", "/").lower() for f in files} if files else set()
+        q_syms_norm = {s.lower() for s in symbols} if symbols else set()
+        q_sig_norm = failure_signature.strip().lower() if failure_signature else ""
 
         for t in completed_tasks:
+            # Semantic text score
             t_words = set(t.task_text.lower().split())
             overlap = len(query_words & t_words)
             jaccard = overlap / max(1, len(query_words | t_words))
-            if jaccard > 0.05 or overlap >= 2:
-                scored_tasks.append((jaccard, t))
+
+            cos_sim = 0.0
+            embedding_degraded = False
+            if query_embed:
+                try:
+                    t_embed_res = (
+                        await self.memory_service.embedding_provider.embed_text(
+                            t.task_text
+                        )
+                    )
+                    cos_sim = cosine_similarity(query_embed, t_embed_res.vector)
+                except Exception as exc:
+                    logger.warning(
+                        "Embedding generation failed for task %s; falling back to degraded lexical jaccard overlap: %s",
+                        t.id,
+                        exc,
+                    )
+                    cos_sim = 0.0
+                    embedding_degraded = True
+
+            text_score = (
+                max(0.0, (0.65 * cos_sim) + (0.35 * jaccard))
+                if cos_sim > 0.0
+                else jaccard
+            )
+
+            # Extract files and symbols associated with the task
+            task_files: set[str] = set()
+            task_symbols: set[str] = set()
+            for ev in t.events:
+                p = ev.payload or {}
+                for key in ("path", "file_path", "target_path"):
+                    if key in p and isinstance(p[key], str):
+                        task_files.add(p[key].replace("\\", "/").lower())
+                for key in ("files", "affected_files"):
+                    if key in p and isinstance(p[key], list):
+                        for f in p[key]:
+                            if isinstance(f, str):
+                                task_files.add(f.replace("\\", "/").lower())
+                for key in ("symbol", "symbol_name", "target_symbol"):
+                    if key in p and isinstance(p[key], str):
+                        task_symbols.add(p[key].lower())
+                for key in ("symbols", "affected_symbols"):
+                    if key in p and isinstance(p[key], list):
+                        for s in p[key]:
+                            if isinstance(s, str):
+                                task_symbols.add(s.lower())
+
+            for fe in t.failure_episodes:
+                if fe.affected_files and isinstance(fe.affected_files, list):
+                    for f in fe.affected_files:
+                        if isinstance(f, str):
+                            task_files.add(f.replace("\\", "/").lower())
+                if fe.affected_symbols and isinstance(fe.affected_symbols, list):
+                    for s in fe.affected_symbols:
+                        if isinstance(s, str):
+                            task_symbols.add(s.lower())
+
+            # File overlap score
+            file_score = 0.0
+            if q_files_norm:
+                file_score = len(q_files_norm & task_files) / max(1, len(q_files_norm))
+
+            # Symbol overlap score
+            symbol_score = 0.0
+            if q_syms_norm:
+                symbol_score = len(q_syms_norm & task_symbols) / max(
+                    1, len(q_syms_norm)
+                )
+
+            # Failure signature score
+            failure_score = 0.0
+            if q_sig_norm:
+                for fe in t.failure_episodes:
+                    fe_sig = (fe.failure_signature or "").strip().lower()
+                    fe_err = (fe.error_message or "").strip().lower()
+                    fe_cls = (fe.error_class or "").strip().lower()
+                    if fe_sig and fe_sig == q_sig_norm:
+                        failure_score = max(failure_score, 1.0)
+                    elif q_sig_norm in fe_sig or fe_sig in q_sig_norm:
+                        failure_score = max(failure_score, 0.8)
+                    elif q_sig_norm in fe_err or fe_cls in q_sig_norm:
+                        failure_score = max(failure_score, 0.5)
+
+            # Weighted composite calculation (§28: embedding + files + symbols + failure signatures)
+            w_text = 0.35
+            w_file = 0.25 if q_files_norm else 0.0
+            w_symbol = 0.20 if q_syms_norm else 0.0
+            w_failure = 0.20 if q_sig_norm else 0.0
+            total_weight = w_text + w_file + w_symbol + w_failure
+
+            composite = (
+                (w_text * text_score)
+                + (w_file * file_score)
+                + (w_symbol * symbol_score)
+                + (w_failure * failure_score)
+            ) / max(1e-6, total_weight)
+
+            breakdown = {
+                "text_score": round(text_score, 4),
+                "file_score": round(file_score, 4),
+                "symbol_score": round(symbol_score, 4),
+                "failure_score": round(failure_score, 4),
+                "embedding_degraded": embedding_degraded,
+            }
+
+            if (
+                composite > 0.05
+                or overlap >= 1
+                or file_score > 0.0
+                or failure_score > 0.0
+            ):
+                scored_tasks.append((composite, breakdown, t))
 
         scored_tasks.sort(key=lambda x: x[0], reverse=True)
         top_tasks = scored_tasks[:limit]
 
         results: list[dict[str, Any]] = []
-        for score, t in top_tasks:
-            # Fetch failure episodes
-            fe_stmt = select(FailureEpisode).where(FailureEpisode.task_id == t.id)
-            fe_res = await session.execute(fe_stmt)
-            episodes = list(fe_res.scalars().all())
+        for composite, breakdown, t in top_tasks:
+            fail_data: list[dict[str, Any]] = []
+            fix_data: list[dict[str, Any]] = []
 
-            fail_data = []
-            for ep in episodes:
-                fail_data.append({
-                    "error_message": ep.error_message,
-                    "failure_signature": ep.failure_signature,
-                    "attempted_approach": ep.attempted_approach,
-                    "rejected_reason": ep.rejected_reason,
-                })
+            for ep in t.failure_episodes:
+                has_success = any(
+                    getattr(fa, "success", False) is True
+                    or (getattr(fa, "outcome", "") or "").upper()
+                    in ("SUCCESS", "FIXED")
+                    for fa in ep.fix_attempts
+                )
+                fix_status = (
+                    "FIXED"
+                    if has_success
+                    else ("ATTEMPTED" if ep.fix_attempts else "UNRESOLVED")
+                )
 
-            results.append({
-                "task_id": t.id,
-                "task_text": t.task_text,
-                "success": t.success,
-                "similarity_score": round(score, 3),
-                "tool_calls": t.tool_calls,
-                "failure_episodes": fail_data,
-            })
+                fail_data.append(
+                    {
+                        "error_class": ep.error_class,
+                        "error_message": ep.error_message,
+                        "failure_signature": ep.failure_signature,
+                        "attempted_approach": ep.attempted_approach,
+                        "rejected_reason": ep.rejected_reason,
+                        "fix_status": fix_status,
+                    }
+                )
+                for fa in ep.fix_attempts:
+                    approach = getattr(fa, "attempted_fix", "") or getattr(
+                        fa, "approach_description", ""
+                    )
+                    outcome = (
+                        "SUCCESS"
+                        if getattr(fa, "success", False)
+                        else (getattr(fa, "outcome", "") or "FAILED")
+                    )
+                    why = getattr(fa, "why_worked_or_failed", "") or getattr(
+                        fa, "explanation", ""
+                    )
+                    fix_data.append(
+                        {
+                            "attempted_fix": approach,
+                            "approach_description": approach,
+                            "success": getattr(fa, "success", False),
+                            "outcome": outcome,
+                            "why_worked_or_failed": why,
+                            "explanation": why,
+                        }
+                    )
+
+            results.append(
+                {
+                    "task_id": t.id,
+                    "task": t,
+                    "task_text": t.task_text,
+                    "status": t.status,
+                    "success": t.success,
+                    "similarity_score": round(composite, 4),
+                    "score_breakdown": breakdown,
+                    "tool_calls": t.tool_calls,
+                    "failure_episodes": fail_data,
+                    "fix_attempts": fix_data,
+                }
+            )
 
         return results
 
@@ -431,8 +749,17 @@ class AgentWorkflowOrchestrator:
         token_output: int = 0,
         lesson_learned: str | None = None,
         agent_source: str = "mcp",
+        successful_approach: str | None = None,
+        affected_files: list[str] | None = None,
+        commit_sha: str | None = None,
     ) -> AgentTask | None:
-        """Mark task completed, reverify project memories, and promote durable knowledge."""
+        """Close out a task: verify, record what worked, and log the outcome.
+
+        A completed task is the moment both kinds of learning are available. The
+        failure path was already recorded as episodes; this also records the
+        approach that *worked*, so a future agent facing a similar task can
+        retrieve it rather than rediscovering it (section 17).
+        """
         task = await session.get(AgentTask, task_id)
         if not task:
             return None
@@ -455,16 +782,34 @@ class AgentWorkflowOrchestrator:
         session.add(
             AgentEvent(
                 task_id=task_id,
+                project_id=task.project_id if task else None,
+                agent_id=task.agent_id if task else None,
                 event_type=ev.event_type.value,
                 source=ev.source,
                 payload=ev.payload,
             )
         )
 
-        # 1. Run memory verification engine across the project
-        await self.verifier.verify_project_memories(session, task.project_id)
+        # 1. Re-verify project memories against the repository as the task left it.
+        await self.verifier.verify_project_memories(
+            session, task.project_id, commit_sha=commit_sha
+        )
 
-        # 2. If a durable lesson was learned, record in L5
+        # 2. Record the approach that worked, so it is retrievable next time.
+        if success:
+            approach = successful_approach or lesson_learned
+            if approach:
+                await self.success_intelligence.record_task_success(
+                    session,
+                    task,
+                    approach=approach,
+                    affected_files=affected_files,
+                    commit_sha=commit_sha,
+                )
+
+        # 3. A lesson stated by an agent is an observation, not a verified rule.
+        #    It is recorded, and the activation policy in MemoryService decides
+        #    what state it enters -- which, absent code grounding, is UNVERIFIED.
         if success and lesson_learned:
             await self.memory_service.create_memory(
                 session=session,
@@ -477,10 +822,64 @@ class AgentWorkflowOrchestrator:
                     memory_type="LESSON",
                     source_type="agent_observation",
                     importance=0.8,
-                    confidence=0.85,
                 ),
             )
+
+        # 4. Close the retrieval loop: which memories this task actually used, and
+        #    how it turned out. Without this, retrieval quality stays unmeasurable
+        #    (section 27).
+        await self._close_retrieval_events(session, task, success)
+
+        await record_audit(
+            session,
+            action="TASK_COMPLETED",
+            resource_type="agent_task",
+            resource_id=task.id,
+            actor=agent_source,
+            project_id=task.project_id,
+            after={"success": success, "tokens": task.token_input + task.token_output},
+            reason=task.task_text[:200],
+        )
 
         await session.commit()
         await session.refresh(task)
         return task
+
+    async def _close_retrieval_events(
+        self, session: AsyncSession, task: AgentTask, success: bool
+    ) -> None:
+        """Attribute the task's outcome to the retrievals that informed it.
+
+        Memories the agent reported reading are recorded as *used*; the rest were
+        retrieved and not used, which is exactly the signal needed to tell useful
+        retrieval from noise.
+        """
+        events = await session.execute(
+            select(RetrievalEvent).where(
+                RetrievalEvent.task_id == task.id,
+                RetrievalEvent.task_outcome.is_(None),
+            )
+        )
+        pending = list(events.scalars().all())
+        if not pending:
+            return
+
+        used_ids: set[str] = set()
+        agent_events = await session.execute(
+            select(AgentEvent).where(AgentEvent.task_id == task.id)
+        )
+        for event in agent_events.scalars().all():
+            payload = event.payload or {}
+            for key in ("memory_ids", "used_memory_ids", "referenced_memory_ids"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    used_ids.update(str(item) for item in value)
+
+        outcome = "SUCCESS" if success else "FAILURE"
+        for event in pending:
+            await self.usefulness.record_usage(
+                session,
+                event.id,
+                used_memory_ids=sorted(used_ids & set(event.returned_memory_ids or [])),
+                task_outcome=outcome,
+            )

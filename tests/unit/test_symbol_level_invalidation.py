@@ -38,7 +38,9 @@ def multiply_numbers(x: int, y: int) -> int:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+    factory = async_sessionmaker(
+        bind=engine, class_=AsyncSession, expire_on_commit=False
+    )
     async with factory() as session:
         yield temp_dir, session, calc_file
 
@@ -72,7 +74,11 @@ async def test_fine_grained_symbol_invalidation_invariant(symbol_test_env):
             content="add_numbers handles basic addition.",
             summary="Addition summary",
             importance=0.8,
-            evidence=[MemoryEvidenceCreate(file_path="services/calc.py", line_start=1, line_end=2)],
+            evidence=[
+                MemoryEvidenceCreate(
+                    file_path="services/calc.py", line_start=1, line_end=2
+                )
+            ],
         ),
     )
 
@@ -87,7 +93,11 @@ async def test_fine_grained_symbol_invalidation_invariant(symbol_test_env):
             content="multiply_numbers computes product.",
             summary="Multiplication summary",
             importance=0.9,
-            evidence=[MemoryEvidenceCreate(file_path="services/calc.py", line_start=4, line_end=5)],
+            evidence=[
+                MemoryEvidenceCreate(
+                    file_path="services/calc.py", line_start=4, line_end=5
+                )
+            ],
         ),
     )
 
