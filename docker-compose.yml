@@ -13,7 +13,7 @@ services:
     environment:
       - CORTEX_ENV=${CORTEX_ENV:-production}
       - CORTEX_AUTH_STRICT=${CORTEX_AUTH_STRICT:-true}
-      - CORTEX_DB_URL=postgresql+asyncpg://${POSTGRES_USER:-cortex}:${POSTGRES_PASSWORD:?Required: set POSTGRES_PASSWORD in environment}@postgres:5432/${POSTGRES_DB:-cortexforge}
+      - "CORTEX_DB_URL=postgresql+asyncpg://${POSTGRES_USER:-cortex}:${POSTGRES_PASSWORD:?Required: set POSTGRES_PASSWORD in environment}@postgres:5432/${POSTGRES_DB:-cortexforge}"
       - CORTEX_EMBEDDINGS_PROVIDER=${CORTEX_EMBEDDINGS_PROVIDER:-openai}
       - CORTEX_LLM_PROVIDER=${CORTEX_LLM_PROVIDER:-openai}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
@@ -41,7 +41,7 @@ services:
     environment:
       - CORTEX_ENV=${CORTEX_ENV:-production}
       - CORTEX_AUTH_STRICT=${CORTEX_AUTH_STRICT:-true}
-      - CORTEX_DB_URL=postgresql+asyncpg://${POSTGRES_USER:-cortex}:${POSTGRES_PASSWORD:?Required: set POSTGRES_PASSWORD in environment}@postgres:5432/${POSTGRES_DB:-cortexforge}
+      - "CORTEX_DB_URL=postgresql+asyncpg://${POSTGRES_USER:-cortex}:${POSTGRES_PASSWORD:?Required: set POSTGRES_PASSWORD in environment}@postgres:5432/${POSTGRES_DB:-cortexforge}"
       - CORTEX_EMBEDDINGS_PROVIDER=${CORTEX_EMBEDDINGS_PROVIDER:-openai}
       - CORTEX_LLM_PROVIDER=${CORTEX_LLM_PROVIDER:-openai}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
@@ -65,7 +65,7 @@ services:
       - internal_net
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-cortex}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Required: set POSTGRES_PASSWORD in environment}
+      - "POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Required: set POSTGRES_PASSWORD in environment}"
       - POSTGRES_DB=${POSTGRES_DB:-cortexforge}
     volumes:
       - postgres_data:/var/lib/postgresql/data
