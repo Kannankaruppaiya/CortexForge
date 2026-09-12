@@ -125,6 +125,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
   const isJobSuccess = jobData?.status === 'COMPLETED' || jobData?.status === 'SUCCEEDED';
 
   const pollIntervalRef = useRef<any>(null);
+  const lastAutoNameRef = useRef<string>('');
 
   // Fetch GitHub repos if connected and GitHub tab is selected
   useEffect(() => {
@@ -139,6 +140,11 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
       setSourceType('LOCAL');
       setName('');
       setLocalPath('');
+      setDefaultBranch('main');
+      setLanguage('');
+      setGitToken('');
+      setAuthType('PUBLIC');
+      lastAutoNameRef.current = '';
       setValidationResult(null);
       setExistingProject(null);
       setSelectedGhRepo(null);
@@ -188,6 +194,12 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
       // Existing project at this path — surface inline info, not a form error
       if (data.existing_project_id) {
         setExistingProject({ id: data.existing_project_id, name: data.existing_project_name || 'Existing Project' });
+        if (data.existing_project_name) {
+          setName(data.existing_project_name);
+          lastAutoNameRef.current = data.existing_project_name;
+        }
+        if (data.default_branch) setDefaultBranch(data.default_branch);
+        if (data.detected_language) setLanguage(data.detected_language);
         return;
       }
 
@@ -203,16 +215,21 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
         ) {
           setLocalPath(data.path);
         }
-        if (data.default_branch && (!defaultBranch || defaultBranch === 'main')) {
-          setDefaultBranch(data.default_branch);
-        }
-        if (data.detected_language && !language) {
-          setLanguage(data.detected_language);
-        }
+
+        // Always update default branch to the detected branch of this specific repository
+        setDefaultBranch(data.default_branch || 'main');
+
+        // Always update primary language to the detected language of this specific repository
+        setLanguage(data.detected_language || '');
+
         const effectivePath = data.path || targetPath;
-        if (!name.trim() || name === '.') {
-          const folder = effectivePath.replace(/[\\/]+$/, '').split(/[\\/]/).pop();
-          if (folder && folder !== '.') setName(folder);
+        const folder = effectivePath.replace(/[\\/]+$/, '').split(/[\\/]/).pop();
+        if (folder && folder !== '.') {
+          // If name is empty, '.', or matches the previous auto-generated name, update it
+          if (!name.trim() || name === '.' || name === lastAutoNameRef.current) {
+            setName(folder);
+            lastAutoNameRef.current = folder;
+          }
         }
       } else if (data.error) {
         setFormError(data.error);
@@ -250,11 +267,10 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
 
   const handleSelectDirectory = (dirPath: string, dirName: string) => {
     setLocalPath(dirPath);
-    if (!name.trim() || name === '.') {
-      const folderName = dirName || dirPath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '';
-      if (folderName && folderName !== '.') {
-        setName(folderName);
-      }
+    const folderName = dirName || dirPath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '';
+    if (folderName && folderName !== '.') {
+      setName(folderName);
+      lastAutoNameRef.current = folderName;
     }
     handleValidateLocalPath(dirPath);
     setShowFolderBrowser(false);
@@ -760,7 +776,13 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                           setLocalPath(e.target.value);
                           setValidationResult(null);
                         }}
-                        onBlur={() => handleValidateLocalPath()}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleValidateLocalPath(e.currentTarget.value);
+                          }
+                        }}
+                        onBlur={(e) => handleValidateLocalPath(e.currentTarget.value)}
                         placeholder="e.g. C:\Projects\MyRepo or /home/user/projects/my-repo"
                         className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm font-mono text-white placeholder-slate-600 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-colors"
                       />
