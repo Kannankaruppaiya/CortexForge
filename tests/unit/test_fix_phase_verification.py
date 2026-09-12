@@ -528,7 +528,7 @@ def test_p3_4_deterministic_embeddings_refused_in_production():
     with (
         patch.dict(os.environ, {"CORTEX_ENV": "production"}, clear=False),
         patch.dict(os.environ, {"PYTEST_CURRENT_TEST": ""}),
+        pytest.raises(RuntimeError) as exc,
     ):
-        with pytest.raises(RuntimeError) as exc:
-            get_embedding_provider("local")
-        assert "must not be used in production or staging" in str(exc.value)
+        get_embedding_provider("local")
+    assert "must not be used in production or staging" in str(exc.value)

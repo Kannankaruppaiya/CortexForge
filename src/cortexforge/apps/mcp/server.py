@@ -1,5 +1,6 @@
 """Full-Featured Model Context Protocol (MCP) Server for CortexForge."""
 
+import logging
 import os
 import uuid
 from contextvars import ContextVar
@@ -122,10 +123,15 @@ async def _resolve_project(
     project = await session.get(Project, project_id_or_path)
 
     if not project:
-        canonical_path = os.path.realpath(project_id_or_path)
-        stmt = select(Project).where(Project.local_path == canonical_path)
-        res = await session.execute(stmt)
-        project = res.scalars().first()
+        is_hosted = (
+            os.environ.get("CORTEX_HOSTED") == "true"
+            or os.environ.get("CORTEX_ENV") == "production"
+        )
+        if not is_hosted:
+            canonical_path = os.path.realpath(project_id_or_path)
+            stmt = select(Project).where(Project.local_path == canonical_path)
+            res = await session.execute(stmt)
+            project = res.scalars().first()
 
     if not project:
         return None
@@ -137,6 +143,17 @@ async def _resolve_project(
         or os.environ.get("CORTEX_MCP_TOKEN")
         or os.environ.get("CORTEX_AGENT_KEY")
     )
+    if not caller_token:
+        try:
+            from mcp.server.auth.middleware.auth_context import get_access_token
+
+            access_tok = get_access_token()
+            if access_tok:
+                caller_token = access_tok.token
+        except (ImportError, Exception) as exc:
+            logging.getLogger("cortexforge.mcp").debug(
+                "Could not retrieve ambient MCP access token: %s", exc
+            )
 
     principal: Principal | None = None
     if caller_token:
@@ -152,7 +169,10 @@ async def _resolve_project(
         caller_agent_id = caller_ctx.get("agent_id") or os.environ.get(
             "CORTEX_CALLER_AGENT_ID"
         )
-        is_prod = os.environ.get("CORTEX_ENV") == "production"
+        is_prod = (
+            os.environ.get("CORTEX_ENV") == "production"
+            or os.environ.get("CORTEX_HOSTED") == "true"
+        )
         if is_prod and not caller_agent_id and not caller_user_id:
             return None
         if caller_agent_id:
@@ -208,6 +228,7 @@ async def _resolve_project(
 
     if not principal and (
         os.environ.get("CORTEX_ENV") == "production"
+        or os.environ.get("CORTEX_HOSTED") == "true"
         or (
             os.environ.get("CORTEX_ENV") != "development"
             and not os.environ.get("PYTEST_CURRENT_TEST")
@@ -984,7 +1005,7 @@ async def project_get_context(
     """Build structured context block for coding agent prompt injection."""
     await init_db()
     async with session_scope() as session:
-        project = await _resolve_project(session, project_id_or_path)
+        project = await _resolve_project(session, project_id_or_path, required_permission=Permission.PROJECT_READ)
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
@@ -1007,7 +1028,7 @@ async def project_get_architecture(
     """Retrieve synthesized structural architecture of the project."""
     await init_db()
     async with session_scope() as session:
-        project = await _resolve_project(session, project_id_or_path)
+        project = await _resolve_project(session, project_id_or_path, required_permission=Permission.ARCHITECTURE_READ)
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
@@ -1066,7 +1087,7 @@ async def project_get_component(
     """Retrieve detailed AST component definition and graph connections."""
     await init_db()
     async with session_scope() as session:
-        project = await _resolve_project(session, project_id_or_path)
+        project = await _resolve_project(session, project_id_or_path, required_permission=Permission.ARCHITECTURE_READ)
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
@@ -1129,7 +1150,7 @@ async def memory_search(
     """Hybrid search across memories with provenance."""
     await init_db()
     async with session_scope() as session:
-        project = await _resolve_project(session, project_id_or_path)
+        project = await _resolve_project(session, project_id_or_path, required_permission=Permission.MEMORY_READ)
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
@@ -1171,7 +1192,7 @@ async def memory_get(memory_id: str) -> str:
         if not mem:
             return f"Memory with ID '{memory_id}' not found."
 
-        project = await _resolve_project(session, mem.project_id)
+        project = await _resolve_project(session, mem.project_id, required_permission=Permission.MEMORY_READ)
         if not project:
             return (
                 f"Access denied: you are not authorized to view memory '{memory_id}'."
@@ -1227,7 +1248,7 @@ async def memory_create(
     """Store a project memory with validation, trust classification, and verification pipeline."""
     await init_db()
     async with session_scope() as session:
-        project = await _resolve_project(session, project_id_or_path)
+        project = await _resolve_project(session, project_id_or_path, required_permission=Permission.MEMORY_CREATE)
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
@@ -1301,7 +1322,7 @@ async def memory_request_human_approval(
     """Submit a pending human approval request."""
     await init_db()
     async with session_scope() as session:
-        project = await _resolve_project(session, project_id_or_path)
+        project = await _resolve_project(session, project_id_or_path, required_permission=Permission.MEMORY_CREATE)
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
@@ -1338,7 +1359,7 @@ async def memory_update(
         mem = await memory_service.get_memory(session, memory_id)
         if not mem:
             return f"Memory with ID '{memory_id}' not found."
-        project = await _resolve_project(session, mem.project_id)
+        project = await _resolve_project(session, mem.project_id, required_permission=Permission.MEMORY_UPDATE)
         if not project:
             return f"Access denied: unauthorized to update memory '{memory_id}'."
 
@@ -1374,7 +1395,7 @@ async def memory_deprecate(
         mem = await memory_service.get_memory(session, memory_id)
         if not mem:
             return f"Memory with ID '{memory_id}' not found."
-        project = await _resolve_project(session, mem.project_id)
+        project = await _resolve_project(session, mem.project_id, required_permission=Permission.MEMORY_UPDATE)
         if not project:
             return f"Access denied: unauthorized to deprecate memory '{memory_id}'."
 
@@ -1401,7 +1422,7 @@ async def memory_verify(memory_id: str) -> str:
         if not mem:
             return f"Memory with ID '{memory_id}' not found."
 
-        project = await _resolve_project(session, mem.project_id)
+        project = await _resolve_project(session, mem.project_id, required_permission=Permission.MEMORY_VERIFY)
         if not project:
             return f"Access denied: unauthorized to verify memory '{memory_id}'."
 
@@ -1420,7 +1441,7 @@ async def memory_get_decisions(project_id_or_path: str = ".") -> str:
     """Fetch architectural decisions."""
     await init_db()
     async with session_scope() as session:
-        project = await _resolve_project(session, project_id_or_path)
+        project = await _resolve_project(session, project_id_or_path, required_permission=Permission.MEMORY_READ)
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
@@ -1443,7 +1464,7 @@ async def memory_get_failures(project_id_or_path: str = ".") -> str:
     """Fetch known failure post-mortems."""
     await init_db()
     async with session_scope() as session:
-        project = await _resolve_project(session, project_id_or_path)
+        project = await _resolve_project(session, project_id_or_path, required_permission=Permission.MEMORY_READ)
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
@@ -1470,7 +1491,7 @@ async def memory_get_constraints(project_id_or_path: str = ".") -> str:
     """Fetch project constraints and invariants."""
     await init_db()
     async with session_scope() as session:
-        project = await _resolve_project(session, project_id_or_path)
+        project = await _resolve_project(session, project_id_or_path, required_permission=Permission.MEMORY_READ)
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
@@ -1495,7 +1516,7 @@ async def memory_get_lessons(project_id_or_path: str = ".") -> str:
     """Fetch durable lessons and engineering principles."""
     await init_db()
     async with session_scope() as session:
-        project = await _resolve_project(session, project_id_or_path)
+        project = await _resolve_project(session, project_id_or_path, required_permission=Permission.MEMORY_READ)
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
@@ -1554,7 +1575,7 @@ async def graph_get_dependencies(
     """List downstream dependencies for an entity."""
     await init_db()
     async with session_scope() as session:
-        project = await _resolve_project(session, project_id_or_path)
+        project = await _resolve_project(session, project_id_or_path, required_permission=Permission.GRAPH_READ)
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
@@ -1582,7 +1603,7 @@ async def graph_get_dependents(
     """List upstream dependents (blast radius) for an entity."""
     await init_db()
     async with session_scope() as session:
-        project = await _resolve_project(session, project_id_or_path)
+        project = await _resolve_project(session, project_id_or_path, required_permission=Permission.GRAPH_READ)
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
@@ -1612,7 +1633,7 @@ async def change_get_impact(
     """Pre-action governance check for proposed modifications."""
     await init_db()
     async with session_scope() as session:
-        project = await _resolve_project(session, project_id_or_path)
+        project = await _resolve_project(session, project_id_or_path, required_permission=Permission.GRAPH_READ)
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
@@ -1691,7 +1712,7 @@ async def task_record_failure(
     """Record a failure post-mortem with actual FailureEpisode and FixAttempt entities."""
     await init_db()
     async with session_scope() as session:
-        project = await _resolve_project(session, project_id_or_path)
+        project = await _resolve_project(session, project_id_or_path, required_permission=Permission.MEMORY_CREATE)
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
@@ -1802,7 +1823,7 @@ async def task_start(
             if caller_user_id and ag.owner_user_id != caller_user_id:
                 return f"Error: Agent '{effective_agent_id}' does not belong to authenticated caller."
 
-        project = await _resolve_project(session, project_id_or_path)
+        project = await _resolve_project(session, project_id_or_path, required_permission=Permission.JOB_CREATE)
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
@@ -1841,7 +1862,7 @@ async def task_record_event(
         task = await session.get(AgentTask, task_id)
         if not task:
             return f"Task with ID '{task_id}' not found."
-        project = await _resolve_project(session, task.project_id)
+        project = await _resolve_project(session, task.project_id, required_permission=Permission.JOB_CREATE)
         if not project:
             return f"Access denied: unauthorized for task '{task_id}'."
 
@@ -1889,7 +1910,7 @@ async def task_complete(
         task_row = await session.get(AgentTask, task_id)
         if not task_row:
             return f"Task with ID '{task_id}' not found."
-        project = await _resolve_project(session, task_row.project_id)
+        project = await _resolve_project(session, task_row.project_id, required_permission=Permission.JOB_CREATE)
         if not project:
             return f"Access denied: unauthorized for task '{task_id}'."
 
@@ -1914,7 +1935,7 @@ async def memory_consolidate(project_id_or_path: str = ".") -> str:
     """Trigger memory consolidation."""
     await init_db()
     async with session_scope() as session:
-        project = await _resolve_project(session, project_id_or_path)
+        project = await _resolve_project(session, project_id_or_path, required_permission=Permission.MEMORY_CREATE)
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
@@ -1935,7 +1956,7 @@ async def memory_health(project_id_or_path: str = ".") -> str:
     """Report memory health metrics."""
     await init_db()
     async with session_scope() as session:
-        project = await _resolve_project(session, project_id_or_path)
+        project = await _resolve_project(session, project_id_or_path, required_permission=Permission.MEMORY_READ)
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
@@ -1986,7 +2007,7 @@ async def architecture_check_rules(project_id_or_path: str = ".") -> str:
     """Evaluate architectural boundary invariants."""
     await init_db()
     async with session_scope() as session:
-        project = await _resolve_project(session, project_id_or_path)
+        project = await _resolve_project(session, project_id_or_path, required_permission=Permission.ARCHITECTURE_READ)
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
@@ -2018,7 +2039,7 @@ async def memory_get_provenance(memory_id: str) -> str:
         if not mem:
             return f"Error: Memory with ID '{memory_id}' not found."
 
-        project = await _resolve_project(session, mem.project_id)
+        project = await _resolve_project(session, mem.project_id, required_permission=Permission.MEMORY_READ)
         if not project:
             return f"Access denied: you are not authorized to view provenance for memory '{memory_id}'."
 
@@ -2069,7 +2090,7 @@ async def project_take_snapshot(commit_sha: str, project_id_or_path: str = ".") 
     """Capture a cognitive snapshot of project state."""
     await init_db()
     async with session_scope() as session:
-        project = await _resolve_project(session, project_id_or_path)
+        project = await _resolve_project(session, project_id_or_path, required_permission=Permission.SNAPSHOT_CREATE)
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
@@ -2096,7 +2117,7 @@ async def task_find_similar(
     """Find similar previous tasks and their outcomes."""
     await init_db()
     async with session_scope() as session:
-        project = await _resolve_project(session, project_id_or_path)
+        project = await _resolve_project(session, project_id_or_path, required_permission=Permission.PROJECT_READ)
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
@@ -2193,7 +2214,7 @@ async def memory_observe(
     """Record an agent observation without asserting that it is true."""
     await init_db()
     async with session_scope() as session:
-        project = await _resolve_project(session, project_id_or_path)
+        project = await _resolve_project(session, project_id_or_path, required_permission=Permission.MEMORY_CREATE)
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
@@ -2249,7 +2270,7 @@ async def memory_propose(
     """Propose knowledge for review rather than writing it in as fact."""
     await init_db()
     async with session_scope() as session:
-        project = await _resolve_project(session, project_id_or_path)
+        project = await _resolve_project(session, project_id_or_path, required_permission=Permission.MEMORY_CREATE)
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
@@ -2299,7 +2320,7 @@ async def memory_verify_claims(
     """Run claim verification and report what was found."""
     await init_db()
     async with session_scope() as session:
-        project = await _resolve_project(session, project_id_or_path)
+        project = await _resolve_project(session, project_id_or_path, required_permission=Permission.MEMORY_VERIFY)
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
@@ -2330,7 +2351,7 @@ async def memory_get_claims(memory_id: str) -> str:
         if not mem:
             return f"No claims recorded for memory `{memory_id}`."
 
-        project = await _resolve_project(session, mem.project_id)
+        project = await _resolve_project(session, mem.project_id, required_permission=Permission.MEMORY_READ)
         if not project:
             return f"Access denied: you are not authorized to view claims for memory '{memory_id}'."
 
@@ -2359,7 +2380,7 @@ async def memory_pending_approvals(project_id_or_path: str = ".") -> str:
     """Show what is waiting on a decision."""
     await init_db()
     async with session_scope() as session:
-        project = await _resolve_project(session, project_id_or_path)
+        project = await _resolve_project(session, project_id_or_path, required_permission=Permission.MEMORY_READ)
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
@@ -2393,7 +2414,7 @@ async def task_find_successful_approaches(
     """Surface what worked before, so the agent does not rediscover it."""
     await init_db()
     async with session_scope() as session:
-        project = await _resolve_project(session, project_id_or_path)
+        project = await _resolve_project(session, project_id_or_path, required_permission=Permission.PROJECT_READ)
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
@@ -2430,7 +2451,7 @@ async def memory_get_decisions_log(
     """Explain how the project's beliefs got to their current state."""
     await init_db()
     async with session_scope() as session:
-        project = await _resolve_project(session, project_id_or_path)
+        project = await _resolve_project(session, project_id_or_path, required_permission=Permission.MEMORY_READ)
         if not project:
             return f"Error: Project could not be resolved for '{project_id_or_path}'."
 
@@ -2471,6 +2492,135 @@ async def resource_decisions() -> str:
 @mcp_server.resource("cortex://project/constraints")
 async def resource_constraints() -> str:
     return await memory_get_constraints(".")
+
+
+def create_mcp_streamable_app(
+    base_url: str | None = None,
+    public_mcp_path: str = "/mcp",
+):
+    """Factory creating the Streamable HTTP Starlette app, session manager, and OAuth provider.
+
+    Exposes:
+    - /mcp (Streamable HTTP transport)
+    - /.well-known/oauth-authorization-server
+    - /.well-known/oauth-protected-resource/mcp
+    - /authorize, /token, /register, /revoke
+    """
+    import urllib.parse
+
+    from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
+    from mcp.server.streamable_http import TransportSecuritySettings
+    from pydantic import AnyHttpUrl
+
+    from cortexforge.security.mcp_auth import (
+        CortexForgeMCPContextMiddleware,
+        CortexForgeOAuthProvider,
+        CortexForgeTokenVerifier,
+    )
+
+    if not base_url:
+        base_url = os.environ.get("CORTEX_PUBLIC_URL", "http://localhost:8000").rstrip("/")
+
+    if not base_url.startswith("http://") and not base_url.startswith("https://"):
+        base_url = f"https://{base_url}"
+
+    mcp_url = f"{base_url}{public_mcp_path}"
+
+    provider = CortexForgeOAuthProvider()
+    verifier = CortexForgeTokenVerifier(provider)
+
+    auth_settings = AuthSettings(
+        issuer_url=AnyHttpUrl(base_url),
+        resource_server_url=AnyHttpUrl(mcp_url),
+        client_registration_options=ClientRegistrationOptions(enabled=True),
+        validate_token_resource=False,
+        required_scopes=None,
+    )
+
+    # Build transport security with explicit origin/host allowlists
+    allowed_hosts = [
+        "127.0.0.1",
+        "127.0.0.1:*",
+        "localhost",
+        "localhost:*",
+        "[::1]",
+        "[::1]:*",
+    ]
+    allowed_origins = [
+        "http://127.0.0.1",
+        "http://127.0.0.1:*",
+        "http://localhost",
+        "http://localhost:*",
+        "http://[::1]",
+        "http://[::1]:*",
+    ]
+
+    parsed_base = urllib.parse.urlparse(base_url)
+    if parsed_base.netloc:
+        allowed_hosts.append(parsed_base.netloc)
+        if ":" not in parsed_base.netloc:
+            allowed_hosts.append(f"{parsed_base.netloc}:*")
+        allowed_origins.append(f"{parsed_base.scheme}://{parsed_base.netloc}")
+        allowed_origins.append(f"{parsed_base.scheme}://{parsed_base.netloc}:*")
+
+    extra_origins = os.environ.get("CORTEX_ALLOWED_ORIGINS", "")
+    if extra_origins:
+        for o in extra_origins.split(","):
+            o = o.strip()
+            if o and o != "*":
+                allowed_origins.append(o)
+                p = urllib.parse.urlparse(o)
+                if p.netloc:
+                    allowed_hosts.append(p.netloc)
+
+    extra_hosts = os.environ.get("CORTEX_MCP_ALLOWED_HOSTS", "")
+    if extra_hosts:
+        for h in extra_hosts.split(","):
+            h = h.strip()
+            if h:
+                allowed_hosts.append(h)
+
+    transport_sec = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=list(set(allowed_hosts)),
+        allowed_origins=list(set(allowed_origins)),
+    )
+
+    starlette_app = mcp_server._lowlevel_server.streamable_http_app(
+        streamable_http_path=public_mcp_path,
+        auth=auth_settings,
+        token_verifier=verifier,
+        auth_server_provider=provider,
+        transport_security=transport_sec,
+    )
+
+    starlette_app.add_middleware(CortexForgeMCPContextMiddleware)
+
+    from starlette.requests import Request
+    from starlette.responses import Response
+    from starlette.routing import Route
+
+    async def revoke_endpoint(request: Request) -> Response:
+        token_val = None
+        try:
+            form = await request.form()
+            token_val = form.get("token")
+        except Exception:
+            token_val = None
+        if not token_val:
+            try:
+                data = await request.json()
+                token_val = data.get("token")
+            except Exception:
+                token_val = None
+        if token_val:
+            await provider.revoke_token(str(token_val))
+        return Response(status_code=200)
+
+    starlette_app.routes.append(Route("/revoke", endpoint=revoke_endpoint, methods=["POST"]))
+
+    session_manager = mcp_server._lowlevel_server._session_manager
+    return starlette_app, session_manager, provider
 
 
 def main() -> None:

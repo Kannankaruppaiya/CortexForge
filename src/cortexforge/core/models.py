@@ -2201,3 +2201,100 @@ class HumanApprovalRecord(Base):
         Index("idx_approval_token", "token"),
         Index("idx_approval_digest", "payload_digest"),
     )
+
+
+class MCPOAuthClient(Base):
+    """Registered OAuth client for Remote MCP authorization (e.g. Claude Custom Connectors)."""
+
+    __tablename__ = "mcp_oauth_clients"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    client_id: Mapped[str] = mapped_column(
+        String(128), unique=True, nullable=False, index=True
+    )
+    client_secret_hash: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )
+    client_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    redirect_uris: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    grant_types: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    response_types: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    token_endpoint_auth_method: Mapped[str] = mapped_column(
+        String(50), default="none", nullable=False
+    )
+    scopes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class MCPOAuthAuthorizationCode(Base):
+    """Cryptographically secure, single-use authorization code with PKCE verification."""
+
+    __tablename__ = "mcp_oauth_authorization_codes"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    code: Mapped[str] = mapped_column(
+        String(255), unique=True, nullable=False, index=True
+    )
+    client_id: Mapped[str] = mapped_column(
+        String(255), nullable=False, index=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    redirect_uri: Mapped[str] = mapped_column(String(1024), nullable=False)
+    code_challenge: Mapped[str] = mapped_column(String(255), nullable=False)
+    code_challenge_method: Mapped[str] = mapped_column(
+        String(32), default="S256", nullable=False
+    )
+    scope: Mapped[str] = mapped_column(String(512), default="", nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class MCPOAuthToken(Base):
+    """Issued OAuth access and refresh tokens for Remote MCP sessions."""
+
+    __tablename__ = "mcp_oauth_tokens"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    token_hash: Mapped[str] = mapped_column(
+        String(64), unique=True, nullable=False, index=True
+    )
+    client_id: Mapped[str] = mapped_column(
+        String(255), nullable=False, index=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    token_type: Mapped[str] = mapped_column(
+        String(32), default="Bearer", nullable=False
+    )
+    scope: Mapped[str] = mapped_column(String(512), default="", nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+

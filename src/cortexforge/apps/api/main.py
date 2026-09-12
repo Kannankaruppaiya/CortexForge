@@ -59,7 +59,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     )
     _log.info("Background job runner started.")
 
-    yield
+    async with mcp_session_manager.run():
+        yield
 
     # Graceful shutdown: signal the runner to stop and wait briefly.
     stop_event.set()
@@ -76,6 +77,38 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+from starlette.types import ASGIApp, Receive, Scope, Send
+
+from cortexforge.apps.mcp.server import create_mcp_streamable_app
+
+
+class MCPDispatcherMiddleware:
+    """Dispatches incoming requests matching MCP and OAuth endpoints directly to the MCP Starlette app."""
+
+    def __init__(self, app: ASGIApp, mcp_app: ASGIApp):
+        self.app = app
+        self.mcp_app = mcp_app
+        self.mcp_paths = frozenset(
+            {"/mcp", "/authorize", "/token", "/register", "/revoke"}
+        )
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] == "http":
+            path = scope.get("path", "")
+            if path in self.mcp_paths or path.startswith("/.well-known/"):
+                return await self.mcp_app(scope, receive, send)
+        return await self.app(scope, receive, send)
+
+
+mcp_starlette_app, mcp_session_manager, mcp_oauth_provider = (
+    create_mcp_streamable_app()
+)
+app.state.mcp_session_manager = mcp_session_manager
+app.state.mcp_app = mcp_starlette_app
+app.state.mcp_oauth_provider = mcp_oauth_provider
+
+app.add_middleware(MCPDispatcherMiddleware, mcp_app=mcp_starlette_app)
 
 # CORS Configuration (§19): explicit origins, no wildcard credentials
 allowed_origins_env = os.environ.get("CORTEX_ALLOWED_ORIGINS", "").strip()
@@ -208,9 +241,14 @@ async def readiness_check() -> dict[str, Any]:
             detail=f"Service not ready: database connection check failed ({exc})",
         )
 
+    mcp_ready = (
+        hasattr(app.state, "mcp_session_manager")
+        and app.state.mcp_session_manager is not None
+    )
     return {
         "status": "ready",
         "database": "connected",
+        "mcp": "ready" if mcp_ready else "not_configured",
         "version": "0.1.0",
         "timestamp": datetime.now(UTC).isoformat(),
     }

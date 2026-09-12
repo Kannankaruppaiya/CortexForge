@@ -22,6 +22,7 @@ from cortexforge.core.models import (
     Agent,
     AgentCredential,
     AgentProjectPermission,
+    MCPOAuthToken,
     Project,
     ProjectMembership,
     Session,
@@ -220,6 +221,44 @@ async def resolve_principal_from_token(
     sess = res.scalars().first()
     if sess:
         user = await db_session.get(User, sess.user_id)
+        if user and user.status == "ACTIVE":
+            proj_res = await db_session.execute(
+                select(Project.id).where(Project.owner_user_id == user.id)
+            )
+            owned_ids = set(proj_res.scalars().all())
+            mem_res = await db_session.execute(
+                select(ProjectMembership).where(ProjectMembership.user_id == user.id)
+            )
+            memberships = mem_res.scalars().all()
+
+            proj_roles = {pid: "OWNER" for pid in owned_ids}
+            for m in memberships:
+                proj_roles[m.project_id] = m.role
+                owned_ids.add(m.project_id)
+
+            is_admin_user = bool(getattr(user, "is_admin", False))
+            return Principal(
+                principal_id=user.id,
+                actor_type="USER",
+                user_id=user.id,
+                email=user.email,
+                role="admin" if is_admin_user else "user",
+                allowed_project_ids=owned_ids,
+                project_roles=proj_roles,
+                is_admin=is_admin_user,
+            )
+
+    # 4. MCP OAuth token check
+    mcp_res = await db_session.execute(
+        select(MCPOAuthToken).where(
+            MCPOAuthToken.token_hash == key_h,
+            MCPOAuthToken.revoked_at.is_(None),
+            MCPOAuthToken.expires_at > now,
+        )
+    )
+    mcp_tok = mcp_res.scalars().first()
+    if mcp_tok:
+        user = await db_session.get(User, mcp_tok.user_id)
         if user and user.status == "ACTIVE":
             proj_res = await db_session.execute(
                 select(Project.id).where(Project.owner_user_id == user.id)
