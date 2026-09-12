@@ -454,10 +454,112 @@ async def request_email_otp(
 
     is_test_mode = _is_server_debug_mode_allowed()
 
+    # Deliver OTP
+    _deliver_otp(norm_email, otp, is_test_mode)
+
     return OTPRequestResponse(
         message="If this email is registered or valid, a 6-digit verification code has been sent.",
         debug_otp=otp if is_test_mode else None,
     )
+
+
+def _deliver_otp(email: str, otp: str, is_dev: bool) -> None:
+    """Deliver the OTP to the user.
+
+    Strategy (in priority order):
+    1. If SMTP_HOST is configured → send a real email via SMTP.
+    2. Otherwise in dev/test mode → print to server log so developers can copy it.
+    3. In production without SMTP → log a WARNING (OTP is undeliverable).
+    """
+    import logging as _logging
+
+    _log = _logging.getLogger(__name__)
+
+    smtp_host = os.environ.get("SMTP_HOST", "").strip()
+
+    if smtp_host:
+        _send_smtp_email(email, otp, _log)
+    elif is_dev:
+        # ─────────────────────────────────────────────────────────────
+        # DEV MODE: print OTP to backend terminal so you can copy-paste
+        # ─────────────────────────────────────────────────────────────
+        _log.warning(
+            "\n"
+            "╔══════════════════════════════════════════════════╗\n"
+            "║          CortexForge — DEV OTP LOGIN             ║\n"
+            "╠══════════════════════════════════════════════════╣\n"
+            "║  Email : %-40s ║\n"
+            "║  OTP   : %-40s ║\n"
+            "╚══════════════════════════════════════════════════╝",
+            email,
+            otp,
+        )
+    else:
+        _log.error(
+            "OTP generated for %s but SMTP is not configured. "
+            "Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD env vars to enable email delivery.",
+            email,
+        )
+
+
+def _send_smtp_email(to_email: str, otp: str, log: "logging.Logger") -> None:  # type: ignore[name-defined]
+    """Send the OTP via SMTP using environment-configured credentials."""
+    import smtplib
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+
+    smtp_host = os.environ.get("SMTP_HOST", "")
+    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+    smtp_user = os.environ.get("SMTP_USER", "")
+    smtp_password = os.environ.get("SMTP_PASSWORD", "")
+    from_email = os.environ.get("SMTP_FROM", smtp_user or "noreply@cortexforge.ai")
+    app_name = "CortexForge"
+
+    subject = f"{otp} is your {app_name} verification code"
+    html_body = f"""
+<html><body style="font-family:sans-serif;background:#0f0f17;color:#e2e8f0;padding:32px">
+  <div style="max-width:440px;margin:0 auto;background:#1e1e2e;border-radius:16px;padding:32px;border:1px solid #2d2d3d">
+    <h1 style="font-size:22px;margin:0 0 8px;color:#ffffff">{app_name}</h1>
+    <p style="color:#94a3b8;margin:0 0 24px;font-size:13px">Your AI Project Brain</p>
+    <p style="margin:0 0 16px">Your one-time verification code is:</p>
+    <div style="background:#0f0f17;border-radius:12px;padding:20px;text-align:center;letter-spacing:12px;font-size:32px;font-weight:700;color:#818cf8;font-family:monospace;border:1px solid #3730a3">
+      {otp}
+    </div>
+    <p style="margin:20px 0 0;font-size:12px;color:#64748b">
+      This code expires in 10 minutes. If you did not request this, please ignore this email.
+    </p>
+  </div>
+</body></html>
+"""
+    text_body = f"Your {app_name} verification code: {otp}\n\nExpires in 10 minutes."
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = from_email
+    msg["To"] = to_email
+    msg.attach(MIMEText(text_body, "plain"))
+    msg.attach(MIMEText(html_body, "html"))
+
+    try:
+        use_ssl = smtp_port == 465
+        if use_ssl:
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=10) as server:
+                if smtp_user and smtp_password:
+                    server.login(smtp_user, smtp_password)
+                server.sendmail(from_email, [to_email], msg.as_string())
+        else:
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as server:
+                server.ehlo()
+                server.starttls()
+                server.ehlo()
+                if smtp_user and smtp_password:
+                    server.login(smtp_user, smtp_password)
+                server.sendmail(from_email, [to_email], msg.as_string())
+        log.info("OTP email sent to %s via %s:%s", to_email, smtp_host, smtp_port)
+    except Exception as exc:
+        log.error("Failed to send OTP email to %s: %s", to_email, exc)
+
+
 
 
 @router.post("/otp/verify", response_model=AuthResponse)
