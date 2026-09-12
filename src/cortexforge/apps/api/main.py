@@ -32,20 +32,42 @@ from cortexforge.security.auth import Principal, get_current_principal
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Lifespan handler for database initialization, recovery, and cleanup."""
+    import asyncio
+    import logging
+
     await init_db()
     from cortexforge.core.db import session_scope
     from cortexforge.jobs.durable import DurableJobStore
+
+    _log = logging.getLogger("cortexforge.api")
 
     try:
         async with session_scope() as session:
             await DurableJobStore().recover_abandoned(session)
     except Exception as exc:
-        import logging
+        _log.warning("Could not recover abandoned jobs at startup: %s", exc)
 
-        logging.getLogger("cortexforge.api").warning(
-            "Could not recover abandoned jobs at startup: %s", exc
-        )
+    # Start the background job runner loop so submitted jobs are actually executed.
+    # Without this, jobs stay PENDING forever — the job store is durable but needs
+    # a live worker to claim and run them.
+    from cortexforge.apps.api.routes.jobs import _runner
+
+    stop_event = asyncio.Event()
+    runner_task = asyncio.create_task(
+        _runner.run_loop(poll_interval_seconds=2.0, stop_event=stop_event),
+        name="job-runner-loop",
+    )
+    _log.info("Background job runner started.")
+
     yield
+
+    # Graceful shutdown: signal the runner to stop and wait briefly.
+    stop_event.set()
+    try:
+        await asyncio.wait_for(runner_task, timeout=10.0)
+    except (TimeoutError, asyncio.CancelledError):
+        runner_task.cancel()
+    _log.info("Background job runner stopped.")
 
 
 app = FastAPI(
