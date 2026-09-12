@@ -13,6 +13,8 @@ import hashlib
 import hmac
 import secrets
 
+from cortexforge.core.db import is_managed_environment
+
 # Try importing argon2-cffi if installed; otherwise use standard library hashlib.scrypt
 _ARGON2_AVAILABLE = False
 try:
@@ -152,12 +154,19 @@ def _get_encryption_key(explicit_key: str | bytes | None = None) -> bytes:
             else explicit_key
         )
     else:
-        raw = (
+        env_key = (
             os.environ.get("CORTEX_GITHUB_TOKEN_ENCRYPTION_KEY")
             or os.environ.get("CORTEX_ENCRYPTION_KEY")
             or os.environ.get("SECRET_KEY")
-            or "cortexforge_default_envelope_key_do_not_use_in_production"
-        ).encode("utf-8")
+        )
+        if not env_key:
+            if is_managed_environment():
+                raise RuntimeError(
+                    "Critical security error: Missing CORTEX_GITHUB_TOKEN_ENCRYPTION_KEY "
+                    "or CORTEX_ENCRYPTION_KEY in managed environment. Hardcoded fallback is prohibited."
+                )
+            env_key = "cortexforge_development_test_key_do_not_use_in_production"
+        raw = env_key.encode("utf-8")
     return hashlib.sha256(raw).digest()
 
 
@@ -181,13 +190,20 @@ def encrypt_token(plaintext: str, key: str | bytes | None = None) -> str:
 def decrypt_token(ciphertext: str, key: str | bytes | None = None) -> str:
     """Decrypt a token encrypted with encrypt_token.
 
-    If the token does not have 'v1:enc:' prefix, it is treated as a legacy plaintext token
-    for seamless backward compatibility.
+    If the token does not have 'v1:enc:' prefix, it is rejected in managed environments,
+    or treated as a legacy plaintext token in development for backward compatibility.
     """
     if not ciphertext:
         return ""
     if not ciphertext.startswith("v1:enc:"):
-        # Legacy unencrypted token
+        from cortexforge.core.db import is_managed_environment
+
+        if is_managed_environment():
+            raise ValueError(
+                "Plaintext tokens are strictly forbidden in managed environments. "
+                "Token must be encrypted at rest using AES-256-GCM (v1:enc:)."
+            )
+        # Legacy unencrypted token in development/test only
         return ciphertext
 
     raw_b64 = ciphertext[7:]

@@ -64,11 +64,26 @@ DEFAULT_MCP_SCOPES = [
     "scan:trigger",
 ]
 
+MINIMAL_DEFAULT_MCP_SCOPES = [
+    "project:read",
+    "context:read",
+]
+
 
 class CortexForgeOAuthProvider(
     OAuthAuthorizationServerProvider[AuthorizationCode, AccessToken, RefreshToken]
 ):
     """Production OAuth 2.0 Authorization Server Provider for CortexForge MCP."""
+
+    def __init__(self, resource_server_url: str | None = None):
+        import os
+
+        if not resource_server_url:
+            base = os.environ.get("CORTEX_PUBLIC_URL", "http://localhost:8000").rstrip("/")
+            if not base.startswith("http://") and not base.startswith("https://"):
+                base = f"https://{base}"
+            resource_server_url = f"{base}/mcp"
+        self.resource_server_url = resource_server_url
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
         """Load OAuth client information by client_id."""
@@ -138,7 +153,7 @@ class CortexForgeOAuthProvider(
     ) -> str:
         """Issue an authorization code for an authenticated user and return redirect URI."""
         req = current_mcp_request.get()
-        user: User | None = None
+        user_id: str | None = None
 
         async with session_scope() as session:
             if req:
@@ -150,36 +165,60 @@ class CortexForgeOAuthProvider(
                     principal = await resolve_principal_from_token(session, cookie_token)
                     if principal and principal.user_id:
                         user = await session.get(User, principal.user_id)
+                        if user and user.status == "ACTIVE":
+                            user_id = user.id
 
                 # 2. Check Authorization header if cookie was not present
-                if not user:
+                if not user_id:
                     auth_hdr = req.headers.get("Authorization")
                     if auth_hdr and auth_hdr.lower().startswith("bearer "):
                         tok = auth_hdr[7:].strip()
                         principal = await resolve_principal_from_token(session, tok)
                         if principal and principal.user_id:
                             user = await session.get(User, principal.user_id)
+                            if user and user.status == "ACTIVE":
+                                user_id = user.id
 
-            if not user or user.status != "ACTIVE":
-                raise AuthorizeError(
-                    error="access_denied",
-                    error_description="User authentication required. Please sign in to CortexForge.",
-                )
+        if not user_id:
+            raise AuthorizeError(
+                error="access_denied",
+                error_description="User authentication required. Please sign in to CortexForge.",
+            )
 
-            # Issue authorization code
-            code = secrets.token_urlsafe(32)
-            now = datetime.now(UTC)
-            scopes = params.scopes or DEFAULT_MCP_SCOPES
+        # Issue authorization code with strict scope intersection (client_registered ∩ requested)
+        client_registered_scopes = (
+            set(client.scope.split()) if client.scope else set(DEFAULT_MCP_SCOPES)
+        )
+        requested_scopes = (
+            set(params.scopes) if params.scopes else set(MINIMAL_DEFAULT_MCP_SCOPES)
+        )
+        granted_scopes = [
+            s for s in DEFAULT_MCP_SCOPES
+            if s in client_registered_scopes and s in requested_scopes
+        ]
+        if not granted_scopes:
+            granted_scopes = [
+                s for s in requested_scopes if s in client_registered_scopes
+            ]
+        if not granted_scopes:
+            raise AuthorizeError(
+                error="invalid_scope",
+                error_description="None of the requested scopes are permitted for this registered client.",
+            )
 
+        code = secrets.token_urlsafe(32)
+        now = datetime.now(UTC)
+
+        async with session_scope() as session:
             auth_code_row = MCPOAuthAuthorizationCode(
                 id=str(uuid.uuid4()),
                 code=code,
                 client_id=client.client_id,
-                user_id=user.id,
+                user_id=user_id,
                 redirect_uri=str(params.redirect_uri),
                 code_challenge=params.code_challenge,
                 code_challenge_method="S256",
-                scope=" ".join(scopes),
+                scope=" ".join(granted_scopes),
                 expires_at=now + timedelta(minutes=5),
             )
             session.add(auth_code_row)
@@ -215,7 +254,7 @@ class CortexForgeOAuthProvider(
 
             return AuthorizationCode(
                 code=code_row.code,
-                scopes=code_row.scope.split() if code_row.scope else DEFAULT_MCP_SCOPES,
+                scopes=code_row.scope.split() if code_row.scope else MINIMAL_DEFAULT_MCP_SCOPES,
                 expires_at=exp.timestamp() if exp else None,
                 client_id=code_row.client_id,
                 code_challenge=code_row.code_challenge,
@@ -234,7 +273,7 @@ class CortexForgeOAuthProvider(
         token_str = "cf_mcp_" + secrets.token_urlsafe(32)
         token_h = hash_token(token_str)
         expires_at = now + timedelta(days=30)
-        scopes = authorization_code.scopes or DEFAULT_MCP_SCOPES
+        scopes = authorization_code.scopes or MINIMAL_DEFAULT_MCP_SCOPES
 
         async with session_scope() as session:
             stmt = select(MCPOAuthAuthorizationCode).where(
@@ -327,6 +366,7 @@ class CortexForgeOAuthProvider(
                     client_id=mcp_token.client_id,
                     scopes=scopes,
                     expires_at=expires_at_val,
+                    resource=str(self.resource_server_url) if self.resource_server_url else None,
                     subject=user.id,
                     claims={
                         "principal_id": user.id,
@@ -349,6 +389,7 @@ class CortexForgeOAuthProvider(
                     client_id="cortexforge",
                     scopes=DEFAULT_MCP_SCOPES,
                     expires_at=None,
+                    resource=str(self.resource_server_url) if self.resource_server_url else None,
                     subject=principal.principal_id,
                     claims={
                         "principal_id": principal.principal_id,

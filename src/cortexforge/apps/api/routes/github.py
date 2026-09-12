@@ -43,15 +43,14 @@ def verify_github_signature(payload_bytes: bytes, signature_header: str | None) 
     """
     secret = os.environ.get("GITHUB_WEBHOOK_SECRET")
     if not secret:
-        environment = os.environ.get(
-            "CORTEX_ENV", os.environ.get("ENVIRONMENT", "development")
-        ).lower()
-        if environment == "production":
+        from cortexforge.core.db import is_managed_environment
+
+        if is_managed_environment():
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=(
                     "GITHUB_WEBHOOK_SECRET is not configured. Refusing to accept "
-                    "unsigned webhooks in production."
+                    "unsigned webhooks in managed environments (production, prod, staging)."
                 ),
             )
         logger.warning(
@@ -385,12 +384,18 @@ async def list_user_github_repositories(
 
     repos: list[dict[str, Any]] = []
     error_msg: str | None = None
+    has_repo_scope = True
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             api_url = "https://api.github.com/user/repos?sort=updated&per_page=100"
             resp = await client.get(api_url, headers=headers)
             if resp.status_code == 200:
+                scopes_header = resp.headers.get("x-oauth-scopes", "")
+                if scopes_header:
+                    token_scopes = [s.strip() for s in scopes_header.split(",") if s.strip()]
+                    has_repo_scope = "repo" in token_scopes
+
                 raw_data = resp.json()
                 if isinstance(raw_data, list):
                     for r in raw_data:
@@ -421,6 +426,8 @@ async def list_user_github_repositories(
         "connected": True,
         "login": gh_login,
         "repositories": repos,
+        "has_repo_scope": has_repo_scope,
+        "repo_connect_url": "/api/v1/auth/github?scope=repo",
         "error": error_msg,
     }
 

@@ -265,9 +265,6 @@ async def register_user(
     )
     session.add(user_session)
 
-    await session.commit()
-    await session.refresh(user)
-
     await AuditService.record(
         db_session=session,
         action="USER_REGISTER",
@@ -277,6 +274,9 @@ async def register_user(
         actor_type="USER",
         details={"email": norm_email, "display_name": display_name},
     )
+
+    await session.commit()
+    await session.refresh(user)
 
     _set_session_cookie(response, raw_token, request)
     return AuthResponse(
@@ -354,9 +354,6 @@ async def login_with_password(
     )
     session.add(user_session)
 
-    await session.commit()
-    await session.refresh(user)
-
     await AuditService.record(
         db_session=session,
         action="USER_LOGIN",
@@ -366,6 +363,9 @@ async def login_with_password(
         actor_type="USER",
         details={"method": "password"},
     )
+
+    await session.commit()
+    await session.refresh(user)
 
     _set_session_cookie(response, raw_token, request)
     return AuthResponse(
@@ -659,9 +659,6 @@ async def verify_email_otp(
     )
     session.add(user_session)
 
-    await session.commit()
-    await session.refresh(user)
-
     await AuditService.record(
         db_session=session,
         action="USER_OTP_LOGIN",
@@ -671,6 +668,9 @@ async def verify_email_otp(
         actor_type="USER",
         details={"method": "email_otp"},
     )
+
+    await session.commit()
+    await session.refresh(user)
 
     _set_session_cookie(response, raw_token, request)
     return AuthResponse(
@@ -779,12 +779,13 @@ async def github_login(
     request: Request,
     response: Response,
     format: str | None = None,
+    scope: str | None = None,
     session: AsyncSession = Depends(get_db_session),
 ):
     """Initiate standard GitHub OAuth flow with PKCE S256 and single-use state.
 
-    Supports both automatic Sign Up (new users) and Sign In (existing users)
-    via single 'Continue with GitHub' flow.
+    Supports minimal user identity (read:user user:email) by default, or dedicated
+    repository authorization when scope=repo is explicitly requested.
     """
     config = get_github_oauth_config(request)
     client_ip = _get_client_ip(request)
@@ -824,11 +825,11 @@ async def github_login(
         path="/",
     )
 
-    # Build authorization URL with minimal read:user user:email scope (NO repo scope)
+    oauth_scope = "read:user user:email repo" if scope == "repo" else "read:user user:email"
     params = {
         "client_id": config.client_id,
         "redirect_uri": config.redirect_uri,
-        "scope": "read:user user:email",
+        "scope": oauth_scope,
         "state": state,
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
@@ -913,12 +914,12 @@ async def github_callback(
             detail="OAuth state has expired. Please re-authenticate.",
         )
 
-    # Check cookie state if present (defense-in-depth CSRF verification)
+    # Mandatory browser-bound OAuth state cookie verification (RFC 9700 Login-CSRF prevention)
     cookie_state = request.cookies.get("cortex_oauth_state")
-    if cookie_state and cookie_state != state:
+    if not cookie_state or cookie_state != state:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="OAuth state cookie mismatch. Request rejected for security.",
+            detail="OAuth state cookie mismatch or missing. Browser session binding is mandatory.",
         )
 
     # Single-use enforcement: mark state as used immediately
@@ -1153,9 +1154,6 @@ async def github_callback(
     )
     session.add(user_session)
 
-    await session.commit()
-    await session.refresh(user)
-
     await AuditService.record(
         db_session=session,
         action=audit_action,
@@ -1169,6 +1167,9 @@ async def github_callback(
             "github_login": gh_login,
         },
     )
+
+    await session.commit()
+    await session.refresh(user)
 
     # Set secure HttpOnly cookie
     _set_session_cookie(response, raw_token, request)
@@ -1353,8 +1354,6 @@ async def request_password_reset(
             created_at=now,
         )
         session.add(reset_record)
-        await session.commit()
-
         await AuditService.record(
             db_session=session,
             action="USER_PASSWORD_RESET_REQUESTED",
@@ -1363,6 +1362,8 @@ async def request_password_reset(
             user_id=user.id,
             actor_type="USER",
         )
+
+        await session.commit()
 
     is_test_mode = _is_server_debug_mode_allowed()
 
@@ -1433,8 +1434,6 @@ async def confirm_password_reset(
     for s in active_sessions.scalars().all():
         s.revoked_at = now
 
-    await session.commit()
-
     await AuditService.record(
         db_session=session,
         action="USER_PASSWORD_RESET_COMPLETED",
@@ -1443,6 +1442,8 @@ async def confirm_password_reset(
         user_id=record.user_id,
         actor_type="USER",
     )
+
+    await session.commit()
 
     return {
         "message": "Password updated successfully. Please sign in with your new password."
@@ -1484,8 +1485,6 @@ async def change_password(
 
     cred.password_hash = PasswordHasher.hash(payload.new_password)
     cred.updated_at = now
-    await session.commit()
-
     await AuditService.record(
         db_session=session,
         action="USER_PASSWORD_CHANGED",
@@ -1494,6 +1493,8 @@ async def change_password(
         user_id=principal.user_id,
         actor_type="USER",
     )
+
+    await session.commit()
 
     return {"message": "Password changed successfully."}
 

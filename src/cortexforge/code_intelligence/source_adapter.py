@@ -10,6 +10,7 @@ local filesystem paths, supporting:
 import logging
 import os
 from abc import ABC, abstractmethod
+from typing import Any
 
 import httpx
 
@@ -119,6 +120,22 @@ class RepositorySource(ABC):
     def is_ancestor(self, maybe_ancestor: str, descendant: str) -> bool:
         """Whether one commit is an ancestor of another in the repository graph."""
 
+    @abstractmethod
+    def discover_config_artifacts(self) -> list[str]:
+        """Discover relative paths of configuration, schema, or deployment artifacts."""
+
+    def read_config_artifact(self, relative_path: str) -> Any:
+        """Parse configuration artifact via source abstraction."""
+        from cortexforge.code_intelligence.config_intelligence import (
+            ConfigIntelligenceProvider,
+        )
+
+        try:
+            content = self.read_bytes(relative_path)
+            return ConfigIntelligenceProvider().parse(relative_path, content)
+        except Exception:
+            return None
+
 
 class LocalRepositorySource(RepositorySource):
     """Direct local filesystem repository source (used when running locally)."""
@@ -198,6 +215,15 @@ class LocalRepositorySource(RepositorySource):
     ) -> list[GitDiffFile]:
         return self.git.get_modified_files(base_commit, target_commit)
 
+    def discover_config_artifacts(self) -> list[str]:
+        from cortexforge.code_intelligence.config_intelligence import (
+            discover_config_files,
+        )
+
+        if self.is_accessible():
+            return discover_config_files(self.root_path, set(DEFAULT_IGNORED_DIRS))
+        return []
+
 
 class LocalBridgeRepositorySource(RepositorySource):
     """Mediates local filesystem access for hosted/cloud CortexForge via the Local Bridge."""
@@ -244,6 +270,14 @@ class LocalBridgeRepositorySource(RepositorySource):
     def is_ancestor(self, maybe_ancestor: str, descendant: str) -> bool:
         git = GitProvider(str(self.bridge.canonical_root))
         return git.is_ancestor(maybe_ancestor, descendant)
+
+    def discover_config_artifacts(self) -> list[str]:
+        if not os.path.isdir(str(self.bridge.canonical_root)):
+            return []
+        local_src = LocalRepositorySource(
+            str(self.bridge.canonical_root), policy=self.bridge.config.policy
+        )
+        return local_src.discover_config_artifacts()
 
 
 class GitHubRepositorySource(RepositorySource):
@@ -502,6 +536,15 @@ class GitHubRepositorySource(RepositorySource):
         except Exception as exc:
             logger.debug("Remote is_ancestor check failed: %s", exc)
         return False
+
+    def discover_config_artifacts(self) -> list[str]:
+        if self.local_mirror_path and os.path.isdir(self.local_mirror_path):
+            local_src = LocalRepositorySource(self.local_mirror_path)
+            return local_src.discover_config_artifacts()
+        from cortexforge.code_intelligence.config_intelligence import classify
+
+        all_files = self.discover_files(max_files=MAX_ALLOWED_FILES)
+        return [f for f in all_files if classify(f) is not None]
 
 
 def get_repository_source(

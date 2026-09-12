@@ -2526,15 +2526,15 @@ def create_mcp_streamable_app(
 
     mcp_url = f"{base_url}{public_mcp_path}"
 
-    provider = CortexForgeOAuthProvider()
+    provider = CortexForgeOAuthProvider(resource_server_url=mcp_url)
     verifier = CortexForgeTokenVerifier(provider)
 
     auth_settings = AuthSettings(
         issuer_url=AnyHttpUrl(base_url),
         resource_server_url=AnyHttpUrl(mcp_url),
         client_registration_options=ClientRegistrationOptions(enabled=True),
-        validate_token_resource=False,
-        required_scopes=None,
+        validate_token_resource=True,
+        required_scopes=["project:read"],
     )
 
     # Build transport security with explicit origin/host allowlists

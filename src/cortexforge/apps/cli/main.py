@@ -1087,6 +1087,9 @@ def doctor(as_json: bool) -> None:
         )
 
         # 2. Alembic Migration Head
+        from cortexforge.core.db import is_managed_environment
+
+        managed_env = is_managed_environment()
         mig_status = "PASS"
         try:
             async with engine.connect() as conn:
@@ -1094,9 +1097,22 @@ def doctor(as_json: bool) -> None:
                     text("SELECT version_num FROM alembic_version")
                 )
                 head = res.scalar()
-                mig_details = f"Alembic revision: {head}"
+                if head:
+                    mig_details = f"Managed Alembic schema mode (revision: {head})"
+                else:
+                    if managed_env:
+                        mig_status = "FAIL"
+                        mig_details = "Managed Alembic schema mode REQUIRED in production/staging, but alembic_version table is empty"
+                    else:
+                        mig_status = "WARN"
+                        mig_details = "Development schema mode (empty alembic_version)"
         except Exception:
-            mig_details = "Direct schema (Base.metadata.create_all)"
+            if managed_env:
+                mig_status = "FAIL"
+                mig_details = "Managed Alembic schema mode REQUIRED in production/staging (Base.metadata.create_all is prohibited)"
+            else:
+                mig_status = "WARN"
+                mig_details = "Development schema mode (Base.metadata.create_all)"
 
         report.append(
             {"subsystem": "Migrations", "status": mig_status, "details": mig_details}
@@ -1212,7 +1228,7 @@ def doctor(as_json: bool) -> None:
     asyncio.run(_run_diagnostics())
 
     if as_json:
-        console.print(json.dumps(report, indent=2))
+        console.print(json.dumps(report, indent=2), soft_wrap=True)
         return
 
     table = Table(

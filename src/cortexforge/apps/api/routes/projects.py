@@ -425,17 +425,6 @@ async def create_project(
         actor_id=principal.agent_id,
     )
 
-    await session.commit()
-    await session.refresh(project)
-
-    _dispatch_runner_background()
-
-    if principal.allowed_project_ids is not None and principal.allowed_project_ids != {
-        "*"
-    }:
-        principal.allowed_project_ids.add(project.id)
-        principal.project_roles[project.id] = "OWNER"
-
     await AuditService.record(
         db_session=session,
         action="PROJECT_CREATE",
@@ -452,6 +441,17 @@ async def create_project(
             "managed_workspace": managed_ws,
         },
     )
+
+    await session.commit()
+    await session.refresh(project)
+
+    _dispatch_runner_background()
+
+    if principal.allowed_project_ids is not None and principal.allowed_project_ids != {
+        "*"
+    }:
+        principal.allowed_project_ids.add(project.id)
+        principal.project_roles[project.id] = "OWNER"
 
     resp = ProjectRead.model_validate(project)
     resp.initial_job_id = bg_job.id

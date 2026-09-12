@@ -33,6 +33,9 @@ _runner.register("CONSOLIDATE", consolidate_project_task)
 _runner.register("BENCHMARK", benchmark_project_task)
 
 
+from cortexforge.security.policy import Permission
+
+
 def _serialize_job(job: Job) -> dict[str, Any]:
     return {
         "id": job.id,
@@ -67,7 +70,9 @@ async def list_jobs(
 ) -> list[dict[str, Any]]:
     """List background jobs optionally filtered by project_id with authorization enforcement."""
     if project_id:
-        RequireProjectAccess.check_access(principal, project_id)
+        RequireProjectAccess.check_access(
+            principal, project_id, permission=Permission.JOB_READ
+        )
     async with session_scope() as session:
         jobs = await job_store.list_jobs(session, project_id=project_id)
         # Filter jobs by authorized projects if not admin and project_id not given
@@ -75,7 +80,11 @@ async def list_jobs(
             jobs = [
                 j
                 for j in jobs
-                if not j.project_id or j.project_id in principal.allowed_project_ids
+                if not j.project_id
+                or (
+                    j.project_id in principal.allowed_project_ids
+                    and principal.has_permission(j.project_id, Permission.JOB_READ)
+                )
             ]
         return [_serialize_job(j) for j in jobs]
 
@@ -94,7 +103,9 @@ async def get_job(
                 detail=f"Job '{job_id}' not found",
             )
         if job.project_id:
-            RequireProjectAccess.check_access(principal, job.project_id)
+            RequireProjectAccess.check_access(
+                principal, job.project_id, permission=Permission.JOB_READ
+            )
         return _serialize_job(job)
 
 
@@ -113,11 +124,27 @@ async def cancel_job(
             )
         if job.project_id:
             RequireProjectAccess.check_access(principal, job.project_id)
+
+        # Invariant: only job creator, project admin/owner (with JOB_CANCEL), or system admin can cancel
+        is_creator = (
+            (job.user_id is not None and principal.user_id is not None and job.user_id == principal.user_id)
+            or (job.actor_id is not None and principal.agent_id is not None and job.actor_id == principal.agent_id)
+        )
+        has_cancel_perm = (
+            principal.is_admin
+            or (
+                job.project_id is not None
+                and principal.has_permission(job.project_id, Permission.JOB_CANCEL)
+            )
+        )
+        if not (is_creator or has_cancel_perm):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Permission denied to cancel job '{job_id}'. Only the job creator, project admins/owners, or system administrators can cancel this job.",
+            )
+
         cancelled = await job_store.cancel(session, job_id)
         return _serialize_job(cancelled or job)
-
-
-from cortexforge.security.policy import Permission
 
 
 @router.post(

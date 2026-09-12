@@ -42,6 +42,7 @@ class Permission(str, Enum):
 
     JOB_READ = "job.read"
     JOB_CREATE = "job.create"
+    JOB_CANCEL = "job.cancel"
 
     AGENT_MANAGE = "agent.manage"
     WEBHOOK_MANAGE = "webhook.manage"
@@ -77,6 +78,7 @@ ROLE_PERMISSIONS: dict[ProjectRole, set[Permission]] = {
         Permission.SNAPSHOT_CREATE,
         Permission.JOB_READ,
         Permission.JOB_CREATE,
+        Permission.JOB_CANCEL,
         Permission.AGENT_MANAGE,
         Permission.WEBHOOK_MANAGE,
         Permission.SETTINGS_MANAGE,

@@ -7,10 +7,6 @@ import time
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from cortexforge.code_intelligence.config_intelligence import (
-    discover_config_files,
-    read_artifact,
-)
 from cortexforge.code_intelligence.git_provider import GitProvider
 from cortexforge.code_intelligence.lineage import SymbolLineageTracker
 from cortexforge.code_intelligence.parser import ParseResult
@@ -148,10 +144,10 @@ class RepositoryScanner:
         self,
         session: AsyncSession,
         project: Project,
-        canonical_root: str,
+        repo_source: RepositorySource,
         created_entities_by_qualified: dict[str, CodeEntity],
     ) -> int:
-        """Index configuration files as entities, one per artifact and per key.
+        """Index configuration files as entities via RepositorySource abstraction.
 
         Both granularities matter. The file-level entity is what a change to the
         artifact anchors to; the key-level entities are what a claim about one
@@ -159,11 +155,11 @@ class RepositoryScanner:
         in, so that removing that one key invalidates that one memory rather than
         everything touching the file.
         """
-        artifacts = discover_config_files(canonical_root, DEFAULT_IGNORED_DIRS)
+        artifacts = repo_source.discover_config_artifacts()
         indexed = 0
 
         for relative_path in artifacts:
-            artifact = read_artifact(canonical_root, relative_path)
+            artifact = repo_source.read_config_artifact(relative_path)
             if artifact is None:
                 continue
 
@@ -276,7 +272,6 @@ class RepositoryScanner:
             incremental = False
 
         repo_source = repository_source or source or get_repository_source(project)
-        canonical_root = os.path.realpath(project.local_path)
 
         if not repo_source.is_accessible():
             return ScanResponse(
@@ -520,12 +515,12 @@ class RepositoryScanner:
         # signature change should reach memory through one change-impact pipeline
         # rather than two that drift apart (section 14).
         config_entities = await self._index_config_artifacts(
-            session, project, canonical_root, created_entities_by_qualified
+            session, project, repo_source, created_entities_by_qualified
         )
         total_entities_extracted += config_entities
 
-        # Record Snapshot
-        head_commit = get_git_head_commit(canonical_root)
+        # Record Snapshot via RepositorySource abstraction
+        head_commit = repo_source.get_head_commit()
         if head_commit:
             project.last_indexed_commit = head_commit
 

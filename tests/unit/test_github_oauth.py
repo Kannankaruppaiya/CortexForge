@@ -149,6 +149,7 @@ async def test_callback_state_validation_and_replay_prevention(test_session):
         test_session.add(expired_tx)
         await test_session.commit()
 
+        client.cookies.set("cortex_oauth_state", "expired_state_12345")
         exp_resp = await client.get(
             "/api/v1/auth/github/callback?code=mock_code&state=expired_state_12345"
         )
@@ -170,7 +171,16 @@ async def test_callback_state_validation_and_replay_prevention(test_session):
         test_session.add(valid_tx)
         await test_session.commit()
 
-        # First use succeeds
+        # Adversarial check: missing cortex_oauth_state cookie MUST be rejected (RFC 9700 Login-CSRF)
+        no_cookie_client = AsyncClient(transport=transport, base_url="http://test")
+        no_cookie_resp = await no_cookie_client.get(
+            f"/api/v1/auth/github/callback?code=mock_github_user_998877&state={valid_state}&format=json"
+        )
+        assert no_cookie_resp.status_code == 400
+        assert "cookie mismatch" in no_cookie_resp.json()["detail"].lower()
+
+        # First use succeeds with cookie present
+        client.cookies.set("cortex_oauth_state", valid_state)
         first_resp = await client.get(
             f"/api/v1/auth/github/callback?code=mock_github_user_998877&state={valid_state}&format=json"
         )
@@ -426,6 +436,7 @@ async def test_live_token_exchange_and_email_fallback(test_session):
         patch("httpx.AsyncClient.get", new=custom_get),
     ):
         async with AsyncClient(transport=transport, base_url="http://test") as client:
+            client.cookies.set("cortex_oauth_state", state)
             resp = await client.get(
                 f"/api/v1/auth/github/callback?code=valid_github_auth_code&state={state}&format=json"
             )
@@ -513,6 +524,7 @@ async def test_failed_token_exchange_and_user_profile_error(test_session):
     transport = ASGITransport(app=app)
     with patch("httpx.AsyncClient.post", new=mock_failed_post):
         async with AsyncClient(transport=transport, base_url="http://test") as client:
+            client.cookies.set("cortex_oauth_state", state)
             resp = await client.get(
                 f"/api/v1/auth/github/callback?code=invalid_auth_code&state={state}&format=json"
             )

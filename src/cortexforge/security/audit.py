@@ -39,10 +39,7 @@ class AuditService:
             trace_id=trace_id,
         )
         session.add(log_entry)
-        try:
-            await session.flush()
-        except Exception as exc:
-            logger.warning("Failed to flush audit log entry: %s", exc)
+        await session.flush()
         return log_entry
 
     @classmethod

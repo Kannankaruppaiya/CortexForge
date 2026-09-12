@@ -20,8 +20,10 @@ services:
       CORTEX_TELEMETRY: disabled
       REDIS_URL: redis://redis:6379/0
       PYTHONUNBUFFERED: "1"
+      CORTEX_MANAGED_ROOT: /var/lib/cortexforge/workspaces
     volumes:
       - cortex_data:/root/.cortexforge
+      - cortex_workspaces:/var/lib/cortexforge/workspaces
       - .:/workspace:ro
     depends_on:
       postgres:
@@ -48,8 +50,10 @@ services:
       CORTEX_TELEMETRY: disabled
       REDIS_URL: redis://redis:6379/0
       PYTHONUNBUFFERED: "1"
+      CORTEX_MANAGED_ROOT: /var/lib/cortexforge/workspaces
     volumes:
       - cortex_data:/root/.cortexforge
+      - cortex_workspaces:/var/lib/cortexforge/workspaces
       - .:/workspace:ro
     depends_on:
       postgres:
@@ -98,5 +102,6 @@ networks:
 
 volumes:
   cortex_data:
+  cortex_workspaces:
   postgres_data:
   redis_data:

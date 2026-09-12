@@ -543,3 +543,276 @@ async def test_metrics_endpoint_requires_auth():
         with patch("cortexforge.security.auth.is_production_environment", return_value=True):
             res = await client.get("/metrics")
             assert res.status_code == 401
+
+
+# ==============================================================================
+# 14. P0: Encryption Key Startup & Plaintext Rejection Invariants
+# ==============================================================================
+def test_encryption_key_fails_in_managed_environments_when_missing():
+    """Verify missing encryption key raises RuntimeError in prod/staging environments."""
+    from cortexforge.security.crypto import _get_encryption_key
+
+    with (
+        patch.dict(os.environ, {"CORTEX_ENV": "production"}, clear=False),
+        patch.dict(
+            os.environ,
+            {
+                "CORTEX_GITHUB_TOKEN_ENCRYPTION_KEY": "",
+                "CORTEX_ENCRYPTION_KEY": "",
+                "SECRET_KEY": "",
+            },
+        ),
+        pytest.raises(RuntimeError, match="Missing CORTEX_GITHUB_TOKEN_ENCRYPTION_KEY"),
+    ):
+        _get_encryption_key()
+
+    with (
+        patch.dict(os.environ, {"CORTEX_ENV": "staging"}, clear=False),
+        patch.dict(
+            os.environ,
+            {
+                "CORTEX_GITHUB_TOKEN_ENCRYPTION_KEY": "",
+                "CORTEX_ENCRYPTION_KEY": "",
+                "SECRET_KEY": "",
+            },
+        ),
+        pytest.raises(RuntimeError, match="Missing CORTEX_GITHUB_TOKEN_ENCRYPTION_KEY"),
+    ):
+        _get_encryption_key()
+
+
+def test_decrypt_token_rejects_plaintext_in_managed_environments():
+    """Verify legacy plaintext tokens are rejected in managed environments."""
+    with (
+        patch.dict(os.environ, {"CORTEX_ENV": "production"}, clear=False),
+        pytest.raises(ValueError, match="Plaintext tokens are strictly forbidden"),
+    ):
+        decrypt_token("ghp_plaintext_token_example")
+
+
+# ==============================================================================
+# 15. P1: GitHub Webhook Fail-Closed in Managed Environments
+# ==============================================================================
+@pytest.mark.asyncio
+async def test_github_webhook_fails_closed_in_managed_envs_without_secret():
+    """Verify verify_github_signature fails closed with 500 when secret missing in staging/prod."""
+    from fastapi import HTTPException
+
+    from cortexforge.apps.api.routes.github import verify_github_signature
+
+    for env_name in ["production", "prod", "staging"]:
+        with (
+            patch.dict(os.environ, {"CORTEX_ENV": env_name, "GITHUB_WEBHOOK_SECRET": ""}),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            verify_github_signature(b"{}", "sha256=abcdef")
+        assert exc_info.value.status_code == 500
+        assert "unconfigured in managed environment" in exc_info.value.detail or "GITHUB_WEBHOOK_SECRET is not configured" in exc_info.value.detail
+
+
+# ==============================================================================
+# 16. P1: Audit Logging Transaction Durability & Atomicity
+# ==============================================================================
+@pytest.mark.asyncio
+async def test_audit_logging_flush_failure_raises(test_session):
+    """Verify AuditService.record raises error when database flush fails."""
+    from cortexforge.security.audit import AuditService
+
+    with (
+        patch.object(test_session, "flush", side_effect=RuntimeError("DB flush failed")),
+        pytest.raises(RuntimeError, match="DB flush failed"),
+    ):
+        await AuditService.record(
+            db_session=test_session,
+            action="test.action",
+            target_type="project",
+            user_id="user_123",
+        )
+
+
+# ==============================================================================
+# 17. P1: Atomic Rate Limiter with Fail-Closed Behavior
+# ==============================================================================
+def test_sliding_window_rate_limiter_lua_atomic_script():
+    """Verify rate limiter uses atomic SLIDING_WINDOW_LUA script for Redis operations."""
+    from unittest.mock import MagicMock
+
+    from cortexforge.security.rate_limiter import (
+        SLIDING_WINDOW_LUA,
+        SlidingWindowRateLimiter,
+    )
+
+    assert "ZREMRANGEBYSCORE" in SLIDING_WINDOW_LUA
+    assert "ZCARD" in SLIDING_WINDOW_LUA
+    assert "ZADD" in SLIDING_WINDOW_LUA
+
+    limiter = SlidingWindowRateLimiter()
+    # In managed environment, Redis failure on auth endpoint must fail closed (return False)
+    with patch.dict(os.environ, {"CORTEX_ENV": "production"}):
+        limiter._redis_client = MagicMock()
+        limiter._redis_client.eval.side_effect = Exception("Redis down")
+        allowed = limiter.check_and_record("auth:login", max_requests=5, window_seconds=60, is_security_sensitive=True)
+        assert allowed is False
+
+
+# ==============================================================================
+# 18. P1: Granular Job Authorization (JOB_READ & JOB_CANCEL)
+# ==============================================================================
+@pytest.mark.asyncio
+async def test_job_cancellation_authorization(test_session):
+    """Verify job cancellation is restricted to job creator, project admin/owner, or system admin."""
+    from cortexforge.apps.api.routes.jobs import cancel_job
+    from cortexforge.core.models import Job
+
+    # Create project and job created by user_alice
+    pid = f"proj_job_{uuid.uuid4().hex[:8]}"
+    project = Project(
+        id=pid, name="Job Auth Project", owner_user_id="user_owner", local_path="/tmp/test_job"
+    )
+    test_session.add(project)
+
+    job = Job(
+        id=f"job_{uuid.uuid4().hex[:8]}",
+        project_id=pid,
+        user_id="user_alice",
+        job_type="SCAN",
+        status="PENDING",
+        idempotency_key="unique_key_1",
+    )
+    test_session.add(job)
+    await test_session.commit()
+
+    # 1. Non-creator MEMBER (bob) without JOB_CANCEL cannot cancel alice's job -> 403
+    bob_principal = Principal(
+        principal_id="user_bob",
+        user_id="user_bob",
+        allowed_project_ids={pid},
+        project_roles={pid: "MEMBER"},
+    )
+    with pytest.raises(Exception) as exc_info:
+        await cancel_job(job.id, principal=bob_principal)
+    assert "403" in str(exc_info.value) or getattr(exc_info.value, "status_code", None) == 403
+
+    # 2. Creator (alice) CAN cancel their own job
+    alice_principal = Principal(
+        principal_id="user_alice",
+        user_id="user_alice",
+        allowed_project_ids={pid},
+        project_roles={pid: "MEMBER"},
+    )
+    res_alice = await cancel_job(job.id, principal=alice_principal)
+    assert res_alice["status"] == "CANCELLED"
+
+    # Reset job to PENDING
+    job.status = "PENDING"
+    await test_session.commit()
+
+    # 3. Project ADMIN (charlie) CAN cancel job
+    admin_principal = Principal(
+        principal_id="user_charlie",
+        user_id="user_charlie",
+        allowed_project_ids={pid},
+        project_roles={pid: "ADMIN"},
+    )
+    res_admin = await cancel_job(job.id, principal=admin_principal)
+    assert res_admin["status"] == "CANCELLED"
+
+
+# ==============================================================================
+# 19. P1: MCP Scope Intersection and Resource Binding
+# ==============================================================================
+@pytest.mark.asyncio
+async def test_mcp_scope_intersection_and_resource_binding(test_session):
+    """Verify MCP authorize grants only client_scopes ∩ requested_scopes and binds resource URL."""
+    from mcp.server.auth.provider import AuthorizationParams, AuthorizeError
+    from pydantic import AnyUrl
+    from starlette.requests import Request
+
+    from cortexforge.security.mcp_auth import (
+        CortexForgeOAuthProvider,
+        current_mcp_request,
+    )
+
+    provider = CortexForgeOAuthProvider(resource_server_url="http://localhost:8000/mcp")
+
+    # Create active test user
+    user = User(
+        id=f"user_{uuid.uuid4().hex[:8]}",
+        email="mcp_test@example.com",
+        display_name="mcptest",
+        status="ACTIVE",
+    )
+    test_session.add(user)
+    await test_session.commit()
+
+    # Setup client that has only ["project:read", "context:read"]
+    client_info = OAuthClientInformationFull(
+        client_id="limited_mcp_client",
+        client_name="Limited Client",
+        redirect_uris=[AnyUrl("https://example.com/cb")],
+        scope="project:read context:read",
+    )
+    await provider.register_client(client_info)
+
+    # Mock authenticated user session
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "headers": [(b"cookie", f"cortex_session={user.id}".encode())],
+    }
+    req = Request(scope)
+    with patch("cortexforge.security.mcp_auth.resolve_principal_from_token", return_value=Principal(principal_id=user.id, user_id=user.id)):
+        reset_tok = current_mcp_request.set(req)
+        try:
+            # Client attempts to request scan:trigger (not in client scopes) -> AuthorizeError invalid_scope
+            params_invalid = AuthorizationParams(
+                redirect_uri=AnyUrl("https://example.com/cb"),
+                redirect_uri_provided_explicitly=True,
+                code_challenge="challenge_xyz",
+                state="state123",
+                scopes=["scan:trigger"],
+            )
+            with pytest.raises(AuthorizeError) as exc_info:
+                await provider.authorize(client_info, params_invalid)
+            assert exc_info.value.error == "invalid_scope"
+
+            # Client requests ["project:read", "context:read"] -> allowed and granted
+            params_valid = AuthorizationParams(
+                redirect_uri=AnyUrl("https://example.com/cb"),
+                redirect_uri_provided_explicitly=True,
+                code_challenge="challenge_xyz",
+                state="state123",
+                scopes=["project:read"],
+            )
+            redir = await provider.authorize(client_info, params_valid)
+            assert "code=" in redir
+
+        finally:
+            current_mcp_request.reset(reset_tok)
+
+
+# ==============================================================================
+# 20. P2: Doctor Migration Diagnostics Strictness
+# ==============================================================================
+def test_doctor_migration_mode_distinction():
+    """Verify cortex doctor distinguishes Managed Alembic mode vs Development mode."""
+    import json
+
+    from click.testing import CliRunner
+
+    from cortexforge.apps.cli.main import cli
+
+    runner = CliRunner()
+    # 1. In dev mode without alembic, migrations report WARN and Development schema mode
+    res_dev = runner.invoke(cli, ["doctor", "--json"], env={"CORTEX_ENV": "development"})
+    report_dev = json.loads(res_dev.output, strict=False)
+    mig_dev = next(r for r in report_dev if r["subsystem"] == "Migrations")
+    assert mig_dev["status"] == "WARN"
+    assert "Development schema mode" in mig_dev["details"]
+
+    # 2. In production mode without alembic, migrations report FAIL
+    res_prod = runner.invoke(cli, ["doctor", "--json"], env={"CORTEX_ENV": "production"})
+    report_prod = json.loads(res_prod.output, strict=False)
+    mig_prod = next(r for r in report_prod if r["subsystem"] == "Migrations")
+    assert mig_prod["status"] == "FAIL"
+    assert "REQUIRED in production/staging" in mig_prod["details"]

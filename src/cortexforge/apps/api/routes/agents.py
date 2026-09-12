@@ -94,8 +94,6 @@ async def create_agent(
         created_at=datetime.now(UTC),
     )
     session.add(cred)
-    await session.commit()
-    await session.refresh(agent)
 
     await AuditService.record(
         db_session=session,
@@ -106,6 +104,9 @@ async def create_agent(
         actor_type="USER",
         details={"name": agent.name, "type": agent.type, "key_id": key_id},
     )
+
+    await session.commit()
+    await session.refresh(agent)
 
     return AgentCreatedResponse(
         agent=AgentRead.model_validate(agent),
@@ -152,9 +153,6 @@ async def delete_agent(
             status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found."
         )
 
-    await session.delete(agent)
-    await session.commit()
-
     await AuditService.record(
         db_session=session,
         action="AGENT_DELETE",
@@ -163,6 +161,9 @@ async def delete_agent(
         user_id=principal.user_id,
         actor_type="USER",
     )
+
+    await session.delete(agent)
+    await session.commit()
 
 
 @router.get("/{agent_id}/permissions", response_model=list[AgentPermissionRead])
@@ -257,9 +258,6 @@ async def grant_agent_permission(
         )
         session.add(perm)
 
-    await session.commit()
-    await session.refresh(perm)
-
     await AuditService.record(
         db_session=session,
         action="AGENT_PERMISSION_GRANT",
@@ -270,6 +268,9 @@ async def grant_agent_permission(
         project_id=payload.project_id,
         details={"agent_id": agent_id, "scopes": payload.scopes},
     )
+
+    await session.commit()
+    await session.refresh(perm)
 
     return AgentPermissionRead.model_validate(perm)
 
@@ -305,7 +306,6 @@ async def revoke_agent_permission(
     perm = res.scalars().first()
     if perm:
         perm.revoked_at = datetime.now(UTC)
-        await session.commit()
 
         await AuditService.record(
             db_session=session,
@@ -317,6 +317,8 @@ async def revoke_agent_permission(
             project_id=project_id,
             details={"agent_id": agent_id},
         )
+
+        await session.commit()
 
 
 @router.get("/{agent_id}/credentials", response_model=list[AgentCredentialRead])
@@ -384,8 +386,6 @@ async def create_agent_credential(
         expires_at=expires_at,
     )
     session.add(cred)
-    await session.commit()
-    await session.refresh(cred)
 
     await AuditService.record(
         db_session=session,
@@ -396,6 +396,9 @@ async def create_agent_credential(
         actor_type="USER",
         details={"agent_id": agent_id, "key_id": key_id},
     )
+
+    await session.commit()
+    await session.refresh(cred)
 
     read_obj = AgentCredentialRead.model_validate(cred)
     return AgentCredentialSecretResponse(
@@ -435,7 +438,6 @@ async def revoke_agent_credential(
             status_code=status.HTTP_404_NOT_FOUND, detail="Credential not found."
         )
     cred.revoked_at = datetime.now(UTC)
-    await session.commit()
 
     await AuditService.record(
         db_session=session,
@@ -446,3 +448,5 @@ async def revoke_agent_credential(
         actor_type="USER",
         details={"agent_id": agent_id, "key_id": key_id},
     )
+
+    await session.commit()

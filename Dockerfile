@@ -5,21 +5,25 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
-# Install build dependencies, git, and Node.js for dashboard build
+# Install uv for deterministic dependency resolution from uv.lock
+COPY --from=ghcr.io/astral-sh/uv:0.6.5 /uv /bin/uv
+
+# Install build dependencies, git, and Node.js 24 for dashboard build
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     git \
     curl \
-    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install Python dependencies
-COPY pyproject.toml .
-RUN pip install --upgrade pip \
-    && pip install -e ".[all]"
+# Install locked Python dependencies from uv.lock for 100% reproducible builds
+COPY pyproject.toml uv.lock ./
+RUN uv export --frozen --no-dev --output-file requirements.txt \
+    && pip install --upgrade pip \
+    && pip install -r requirements.txt
 
 # Build Frontend Dashboard
 COPY apps/web/package.json apps/web/package-lock.json ./apps/web/
@@ -36,7 +40,8 @@ ENV PYTHONUNBUFFERED=1 \
     CORTEX_HOST=0.0.0.0 \
     CORTEX_PORT=8000 \
     CORTEX_ENV=production \
-    CORTEX_WORKSPACE_ROOT=/workspace
+    CORTEX_WORKSPACE_ROOT=/workspace \
+    CORTEX_MANAGED_ROOT=/var/lib/cortexforge/workspaces
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
@@ -48,8 +53,8 @@ WORKDIR /app
 # Create non-root user and persistent workspace directory (§17)
 RUN groupadd -g 1001 cortexforge \
     && useradd -u 1001 -g cortexforge -m -s /bin/bash cortexforge \
-    && mkdir -p /app /workspace \
-    && chown -R cortexforge:cortexforge /app /workspace
+    && mkdir -p /app /workspace /var/lib/cortexforge/workspaces \
+    && chown -R cortexforge:cortexforge /app /workspace /var/lib/cortexforge/workspaces
 
 # Copy python virtual environment/installed packages from builder
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages

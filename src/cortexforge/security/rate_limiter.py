@@ -11,6 +11,26 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+SLIDING_WINDOW_LUA = """
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local max_req = tonumber(ARGV[3])
+local member = ARGV[4]
+
+local cutoff = now - window
+redis.call('ZREMRANGEBYSCORE', key, '-inf', cutoff)
+local count = redis.call('ZCARD', key)
+if count < max_req then
+    redis.call('ZADD', key, now, member)
+    redis.call('EXPIRE', key, math.ceil(window) + 10)
+    return 1
+else
+    return 0
+end
+"""
+
+
 class SlidingWindowRateLimiter:
     """Rate limiter supporting both distributed Redis-backed sliding window and thread-safe in-memory fallback."""
 
@@ -41,30 +61,37 @@ class SlidingWindowRateLimiter:
                 self._redis_client = None
 
     def _redis_check_and_record(
-        self, key: str, max_requests: int, window_seconds: float
+        self,
+        key: str,
+        max_requests: int,
+        window_seconds: float,
+        is_security_sensitive: bool = False,
     ) -> bool:
-        """Atomic sliding window check and record in Redis using Sorted Set."""
+        """Atomic sliding window check and record in Redis using an atomic Lua script."""
         try:
             rkey = f"cortex:ratelimit:{key}"
             now = time.time()
-            cutoff = now - window_seconds
-            pipe = self._redis_client.pipeline()
-            pipe.zremrangebyscore(rkey, 0, cutoff)
-            pipe.zcard(rkey)
-            pipe.expire(rkey, int(window_seconds) + 10)
-            results = pipe.execute()
-            count = results[1]
-            if count >= max_requests:
-                return False
-            # Record current hit
             member = f"{now}:{uuid.uuid4().hex[:6]}"
-            pipe2 = self._redis_client.pipeline()
-            pipe2.zadd(rkey, {member: now})
-            pipe2.expire(rkey, int(window_seconds) + 10)
-            pipe2.execute()
-            return True
+            result = self._redis_client.eval(
+                SLIDING_WINDOW_LUA,
+                1,
+                rkey,
+                str(now),
+                str(window_seconds),
+                str(max_requests),
+                member,
+            )
+            return bool(result == 1)
         except Exception as exc:
-            logger.warning("Redis rate limiter error (%s), falling back to in-memory.", exc)
+            logger.warning("Redis rate limiter error (%s)", exc)
+            from cortexforge.core.db import is_managed_environment
+
+            if is_managed_environment() and is_security_sensitive:
+                logger.error(
+                    "Failing closed for rate limit on '%s' due to Redis error in managed environment.",
+                    key,
+                )
+                return False
             return self._memory_check_and_record(key, max_requests, window_seconds)
 
     def _memory_check_and_record(
@@ -83,11 +110,29 @@ class SlidingWindowRateLimiter:
             return True
 
     def check_and_record(
-        self, key: str, max_requests: int, window_seconds: float
+        self,
+        key: str,
+        max_requests: int,
+        window_seconds: float,
+        is_security_sensitive: bool = False,
     ) -> bool:
         """Atomically check and record hit if allowed. Returns True if allowed, False if limit exceeded."""
         if self._redis_client is not None:
-            return self._redis_check_and_record(key, max_requests, window_seconds)
+            return self._redis_check_and_record(
+                key, max_requests, window_seconds, is_security_sensitive
+            )
+        from cortexforge.core.db import is_managed_environment
+
+        if (
+            is_managed_environment()
+            and is_security_sensitive
+            and not os.environ.get("PYTEST_CURRENT_TEST")
+        ):
+            logger.error(
+                "Failing closed for rate limit on '%s' due to missing Redis in managed environment.",
+                key,
+            )
+            return False
         return self._memory_check_and_record(key, max_requests, window_seconds)
 
     def check(
@@ -99,7 +144,16 @@ class SlidingWindowRateLimiter:
     ) -> bool:
         """Scoped check-and-record helper."""
         full_key = f"{category}:{key}"
-        return self.check_and_record(full_key, max_requests, window_seconds)
+        is_sensitive = category.lower() in {
+            "auth",
+            "login",
+            "password",
+            "otp",
+            "pwd_reset",
+        }
+        return self.check_and_record(
+            full_key, max_requests, window_seconds, is_security_sensitive=is_sensitive
+        )
 
     def record_hit(self, key: str) -> None:
         """Record an attempt under key."""
