@@ -5,10 +5,15 @@ locations, entry points, testing coverage, and truthful status classification:
 IMPLEMENTED, PARTIAL, EXPERIMENTAL, DISABLED, or UNSUPPORTED.
 """
 
+import logging
+import os
+import subprocess
 from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 
 class CapabilityStatus(str, Enum):
@@ -23,10 +28,7 @@ class CapabilityStatus(str, Enum):
 
 def resolve_current_commit() -> str:
     """Resolve the current active commit SHA or symbolic Git reference."""
-    import os
-    import subprocess
-
-    env_commit = os.environ.get("CORTEX_GIT_COMMIT")
+    env_commit = os.environ.get("CORTEX_BUILD_COMMIT") or os.environ.get("GIT_COMMIT")
     if env_commit:
         return env_commit.strip()
     try:
@@ -39,8 +41,8 @@ def resolve_current_commit() -> str:
         )
         if res.returncode == 0 and res.stdout.strip():
             return res.stdout.strip()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Failed to resolve git rev-parse: %s", exc)
     return "HEAD"
 
 

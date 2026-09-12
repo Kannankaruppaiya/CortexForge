@@ -841,7 +841,10 @@ async def github_callback(
         gh_name = f"Developer {gh_login}"
         gh_email = f"{gh_login}@users.noreply.github.com"
         gh_avatar = f"https://avatars.githubusercontent.com/u/{gh_user_id}"
+        access_token = f"gho_mock_{gh_user_id}"
+        token_scope = "read:user,user:email,repo"
     else:
+
         # Live exchange
         async with httpx.AsyncClient(timeout=15.0) as client:
             token_resp = await client.post(
@@ -871,11 +874,13 @@ async def github_callback(
                     detail=f"GitHub token exchange failed: {err_desc}",
                 )
             access_token = token_data.get("access_token")
+            token_scope = token_data.get("scope", "")
             if not access_token:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="No access token returned by GitHub.",
                 )
+
 
             # Fetch GitHub user profile
             user_resp = await client.get(
@@ -1010,19 +1015,26 @@ async def github_callback(
     )
     ext_res = await session.execute(ext_stmt)
     ext_record = ext_res.scalars().first()
+    ext_metadata = {
+        "login": gh_login,
+        "access_token": access_token,
+        "scope": token_scope,
+        "connected_at": now.isoformat(),
+    }
     if not ext_record:
         ext_record = ExternalIdentity(
             user_id=user.id,
             provider="github",
             provider_subject=gh_user_id,
             provider_email=gh_email,
-            metadata_json={"login": gh_login},
+            metadata_json=ext_metadata,
             created_at=now,
         )
         session.add(ext_record)
     else:
         ext_record.provider_email = gh_email
-        ext_record.metadata_json = {"login": gh_login}
+        ext_record.metadata_json = ext_metadata
+
 
     # Create server-side CortexForge session (separate from GitHub token)
     raw_token = generate_session_token()

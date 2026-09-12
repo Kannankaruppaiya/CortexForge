@@ -131,28 +131,48 @@ async def handle_github_webhook(
             "delivery_id": delivery_id,
         }
 
-    # Match repository to project
+    # Match repository to project strictly by immutable github_repository_id or exact URL
     repo_info = payload.get("repository", {})
-    repo_url = repo_info.get("clone_url") or repo_info.get("html_url")
+    repo_id = repo_info.get("id")
+    repo_id_str = str(repo_id) if repo_id is not None else None
+    clone_url = repo_info.get("clone_url")
+    html_url = repo_info.get("html_url")
+    ssh_url = repo_info.get("ssh_url")
     repo_name = repo_info.get("name")
 
-    # Locate project in DB
-    stmt = select(Project).where(
-        (Project.repository_url == repo_url) | (Project.name == repo_name)
-    )
-    res = await session.execute(stmt)
-    project = res.scalars().first()
+    project = None
+    # 1. Primary match: exact immutable github_repository_id
+    if repo_id_str:
+        stmt = select(Project).where(Project.github_repository_id == repo_id_str)
+        res = await session.execute(stmt)
+        project = res.scalars().first()
+
+    # 2. Secondary match: exact repository URL match (never loose project name match)
+    if not project:
+        urls_to_match = [u.strip() for u in (clone_url, html_url, ssh_url) if u and u.strip()]
+        if urls_to_match:
+            stmt = select(Project).where(
+                (Project.repository_url.in_(urls_to_match))
+                | (Project.clone_url.in_(urls_to_match))
+            )
+            res = await session.execute(stmt)
+            project = res.scalars().first()
+
+    # Bind immutable github_repository_id if matched via URL but ID not yet recorded
+    if project and not project.github_repository_id and repo_id_str:
+        project.github_repository_id = repo_id_str
 
     if not project:
         result = {
             "status": "ignored",
-            "message": f"No registered CortexForge project matches repository '{repo_name}'",
+            "message": f"No registered CortexForge project matches repository '{repo_name}' (ID: {repo_id_str})",
         }
         await _record_delivery(
             session, delivery_id, x_github_event, None, payload_hash, result
         )
         await session.commit()
         return result
+
 
     modified_files = []
     head_commit = None
@@ -182,6 +202,7 @@ async def handle_github_webhook(
             "status": "processed",
             "event": x_github_event,
             "project": project.name,
+            "project_id": project.id,
             "commit": head_commit,
             "files_modified": len(modified_files),
             "memories_flagged_stale": len(impact_report.memories_flagged_stale),
@@ -194,8 +215,11 @@ async def handle_github_webhook(
         result = {
             "status": "processed",
             "event": x_github_event,
+            "project": project.name,
+            "project_id": project.id,
             "message": "No file changes detected.",
         }
+
 
     await _record_delivery(
         session, delivery_id, x_github_event, project.id, payload_hash, result
@@ -278,15 +302,18 @@ async def get_user_github_repositories(
         )
 
     gh_login = user.github_login
-    if not gh_login:
-        ext_stmt = select(ExternalIdentity).where(
-            ExternalIdentity.user_id == user.id,
-            ExternalIdentity.provider == "github",
-        )
-        ext_res = await session.execute(ext_stmt)
-        ext = ext_res.scalars().first()
-        if ext and ext.metadata_json:
+    user_gh_token = None
+
+    ext_stmt = select(ExternalIdentity).where(
+        ExternalIdentity.user_id == user.id,
+        ExternalIdentity.provider == "github",
+    )
+    ext_res = await session.execute(ext_stmt)
+    ext = ext_res.scalars().first()
+    if ext and ext.metadata_json and isinstance(ext.metadata_json, dict):
+        if not gh_login:
             gh_login = ext.metadata_json.get("login")
+        user_gh_token = ext.metadata_json.get("access_token")
 
     if not gh_login:
         return {
@@ -296,24 +323,29 @@ async def get_user_github_repositories(
             "message": "GitHub account not connected. Connect GitHub to import repositories.",
         }
 
-    gh_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GITHUB_ACCESS_TOKEN")
+    # Per-user GitHub authorization: user must have authorized repository access.
+    # We do NOT leak a server-wide global GITHUB_TOKEN to access user repos.
+    if not user_gh_token:
+        return {
+            "connected": True,
+            "login": gh_login,
+            "repositories": [],
+            "requires_repo_access": True,
+            "message": "GitHub account is connected for login, but repository access is not authorized. Please connect your GitHub account with repository permissions.",
+        }
+
     headers = {
         "Accept": "application/vnd.github+json",
         "User-Agent": "CortexForge-App",
+        "Authorization": f"Bearer {user_gh_token}",
     }
-    if gh_token:
-        headers["Authorization"] = f"Bearer {gh_token}"
 
     repos: list[dict[str, Any]] = []
     error_msg: str | None = None
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            if gh_token:
-                api_url = "https://api.github.com/user/repos?sort=updated&per_page=100"
-            else:
-                api_url = f"https://api.github.com/users/{gh_login}/repos?sort=updated&per_page=100"
-
+            api_url = "https://api.github.com/user/repos?sort=updated&per_page=100"
             resp = await client.get(api_url, headers=headers)
             if resp.status_code == 200:
                 raw_data = resp.json()
@@ -357,10 +389,12 @@ async def get_github_repository_branches(
     session: AsyncSession = Depends(get_db_session),
     principal: Principal = Depends(get_current_principal),
 ) -> dict[str, Any]:
-    """Retrieve branches for a specified GitHub repository (§10)."""
+    """Retrieve branches for a specified GitHub repository using user's scoped authorization (§10)."""
     import re
 
     import httpx
+
+    from cortexforge.core.models import ExternalIdentity
 
     if not principal.user_id:
         raise HTTPException(
@@ -378,13 +412,27 @@ async def get_github_repository_branches(
             detail="Invalid repository owner or repository name.",
         )
 
-    gh_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GITHUB_ACCESS_TOKEN")
+    ext_stmt = select(ExternalIdentity).where(
+        ExternalIdentity.user_id == principal.user_id,
+        ExternalIdentity.provider == "github",
+    )
+    ext_res = await session.execute(ext_stmt)
+    ext = ext_res.scalars().first()
+    gh_token = None
+    if ext and ext.metadata_json and isinstance(ext.metadata_json, dict):
+        gh_token = ext.metadata_json.get("access_token")
+
+    if not gh_token:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Repository branch access requires authorized user GitHub connection. Please connect your GitHub account with repository permissions.",
+        )
+
     headers = {
         "Accept": "application/vnd.github+json",
         "User-Agent": "CortexForge-App",
+        "Authorization": f"Bearer {gh_token}",
     }
-    if gh_token:
-        headers["Authorization"] = f"Bearer {gh_token}"
 
     branches: list[str] = []
     default_branch = "main"
@@ -418,3 +466,4 @@ async def get_github_repository_branches(
         "branches": branches,
         "default_branch": default_branch,
     }
+

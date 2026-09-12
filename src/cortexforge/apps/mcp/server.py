@@ -21,7 +21,6 @@ from cortexforge.cognition.epistemics import ClaimStatus
 from cortexforge.core.db import init_db, session_scope
 from cortexforge.core.models import (
     Agent,
-    AgentCredential,
     AgentProjectPermission,
     AgentTask,
     Claim,
@@ -33,9 +32,6 @@ from cortexforge.core.models import (
     Project,
     ProjectMembership,
     User,
-)
-from cortexforge.core.models import (
-    Session as UserSession,
 )
 from cortexforge.core.schemas import MemoryCreate, MemoryEvidenceCreate
 from cortexforge.graph.service import GraphService
@@ -49,14 +45,24 @@ from cortexforge.observability.audit import AuditAction, record_audit
 from cortexforge.retrieval.composer import ContextComposer
 from cortexforge.retrieval.engine import HybridRetrievalEngine
 from cortexforge.security.approval import ApprovalService
-from cortexforge.security.auth import validate_local_registration_path
-from cortexforge.security.crypto import hash_token
+from cortexforge.security.auth import (
+    Principal,
+    resolve_principal_from_token,
+    validate_local_registration_path,
+)
 from cortexforge.security.policy import (
     Permission,
-    ProjectRole,
-    check_project_permission,
-    evaluate_agent_permission,
 )
+
+DEFAULT_AGENT_ONBOARD_SCOPES = [
+    "project:read",
+    "context:read",
+    "code:read",
+    "memory:read",
+    "memory:write",
+    "graph:read",
+    "scan:trigger",
+]
 from cortexforge.verification.engine import ClaimVerificationEngine
 
 mcp_server = MCPServer(
@@ -124,56 +130,19 @@ async def _resolve_project(
     if not project:
         return None
 
-    # Enforce Project Authorization in MCP (§12, §25)
+    # Enforce Project Authorization in MCP using canonical Principal
     caller_ctx = _CURRENT_MCP_CALLER.get() or {}
     caller_token = (
         caller_ctx.get("token")
         or os.environ.get("CORTEX_MCP_TOKEN")
         or os.environ.get("CORTEX_AGENT_KEY")
     )
-    caller_user_id = None
-    caller_agent_id = None
 
+    principal: Principal | None = None
     if caller_token:
-        t_hash = hash_token(caller_token)
-        now = datetime.now(UTC)
-        # Check AgentCredential first
-        cred_res = await session.execute(
-            select(AgentCredential).where(
-                AgentCredential.key_hash == t_hash,
-                AgentCredential.revoked_at.is_(None),
-                (AgentCredential.expires_at.is_(None))
-                | (AgentCredential.expires_at > now),
-            )
-        )
-        cred = cred_res.scalars().first()
-        if cred:
-            caller_agent_id = cred.agent_id
-        else:
-            # Check if caller is an AI Agent with legacy api_key_hash
-            agent_res = await session.execute(
-                select(Agent).where(
-                    Agent.api_key_hash == t_hash, Agent.status == "ACTIVE"
-                )
-            )
-            agent = agent_res.scalars().first()
-            if agent:
-                caller_agent_id = agent.id
-            else:
-                # Check if caller is an authenticated User Session
-                sess_res = await session.execute(
-                    select(UserSession).where(
-                        UserSession.session_token_hash == t_hash,
-                        UserSession.revoked_at.is_(None),
-                        UserSession.expires_at > now,
-                    )
-                )
-                usess = sess_res.scalars().first()
-                if usess:
-                    caller_user_id = usess.user_id
-
-        # If token was provided but failed verification, reject immediately
-        if not caller_agent_id and not caller_user_id:
+        principal = await resolve_principal_from_token(session, caller_token)
+        if not principal:
+            # Token provided but failed verification -> Fail Closed (§28)
             return None
     else:
         # In non-production only, allow ambient caller ID if explicitly configured
@@ -183,59 +152,74 @@ async def _resolve_project(
         caller_agent_id = caller_ctx.get("agent_id") or os.environ.get(
             "CORTEX_CALLER_AGENT_ID"
         )
-
-    # In production, require authenticated principal (fail-closed)
-    if not caller_agent_id and not caller_user_id:
-        if os.environ.get("CORTEX_ENV") == "production":
+        is_prod = os.environ.get("CORTEX_ENV") == "production"
+        if is_prod and not caller_agent_id and not caller_user_id:
             return None
-        if os.environ.get("CORTEX_ENV") != "development" and not os.environ.get(
-            "PYTEST_CURRENT_TEST"
-        ):
-            return None
-
-    # If an Agent caller is identified, it must have explicit permission for this project
-    if caller_agent_id:
-        now = datetime.now(UTC)
-        perm_res = await session.execute(
-            select(AgentProjectPermission).where(
-                AgentProjectPermission.agent_id == caller_agent_id,
-                AgentProjectPermission.project_id == project.id,
-                AgentProjectPermission.revoked_at.is_(None),
-                (AgentProjectPermission.expires_at.is_(None))
-                | (AgentProjectPermission.expires_at > now),
-            )
-        )
-        perm = perm_res.scalars().first()
-        if not perm:
-            return None
-        if required_permission is not None:
-            if not evaluate_agent_permission(perm.scopes, required_permission):
+        if caller_agent_id:
+            agent = await session.get(Agent, caller_agent_id)
+            if not agent or agent.status != "ACTIVE":
                 return None
-
-    # If a User caller is identified, check admin role or ownership/membership
-    if caller_user_id:
-        user = await session.get(User, caller_user_id)
-        is_admin = bool(getattr(user, "is_admin", False))
-        is_owner = project.owner_user_id == caller_user_id
-        if not is_admin and not is_owner:
-            mem_res = await session.execute(
-                select(ProjectMembership).where(
-                    ProjectMembership.project_id == project.id,
-                    ProjectMembership.user_id == caller_user_id,
+            now = datetime.now(UTC)
+            perm_res = await session.execute(
+                select(AgentProjectPermission).where(
+                    AgentProjectPermission.agent_id == agent.id,
+                    AgentProjectPermission.revoked_at.is_(None),
+                    (AgentProjectPermission.expires_at.is_(None))
+                    | (AgentProjectPermission.expires_at > now),
                 )
             )
-            mem = mem_res.scalars().first()
-            if not mem:
+            perms = perm_res.scalars().all()
+            allowed = {p.project_id for p in perms}
+            scopes_map = {p.project_id: p.scopes for p in perms}
+            principal = Principal(
+                principal_id=agent.id,
+                actor_type="AGENT",
+                agent_id=agent.id,
+                user_id=agent.owner_user_id,
+                role="agent",
+                allowed_project_ids=allowed,
+                agent_scopes=scopes_map,
+            )
+        elif caller_user_id:
+            user = await session.get(User, caller_user_id)
+            if not user or user.status != "ACTIVE":
                 return None
-            role = mem.role
-        else:
-            role = ProjectRole.OWNER.value if is_owner else ProjectRole.ADMIN.value
+            is_admin = bool(getattr(user, "is_admin", False))
+            proj_res = await session.execute(
+                select(Project.id).where(Project.owner_user_id == user.id)
+            )
+            owned_ids = set(proj_res.scalars().all())
+            mem_res = await session.execute(
+                select(ProjectMembership.project_id).where(
+                    ProjectMembership.user_id == user.id
+                )
+            )
+            owned_ids.update(mem_res.scalars().all())
+            principal = Principal(
+                principal_id=user.id,
+                actor_type="USER",
+                user_id=user.id,
+                email=user.email,
+                role="admin" if is_admin else "user",
+                allowed_project_ids=owned_ids,
+                is_admin=is_admin,
+            )
 
-        if required_permission is not None and not is_admin:
-            if not check_project_permission(
-                role, required_permission, is_admin=is_admin, is_owner=is_owner
-            ):
-                return None
+
+    if not principal and (
+        os.environ.get("CORTEX_ENV") == "production"
+        or (
+            os.environ.get("CORTEX_ENV") != "development"
+            and not os.environ.get("PYTEST_CURRENT_TEST")
+        )
+    ):
+        return None
+
+    if principal:
+        if not principal.can_access_project(project.id):
+            return None
+        if required_permission is not None and not principal.has_permission(project.id, required_permission):
+            return None
 
     return project
 
@@ -345,43 +329,10 @@ async def resolve_project(
             or os.environ.get("CORTEX_MCP_TOKEN")
             or os.environ.get("CORTEX_AGENT_KEY")
         )
-        caller_user_id = None
-        caller_agent_id = None
 
+        principal: Principal | None = None
         if caller_token:
-            t_hash = hash_token(caller_token)
-            now = datetime.now(UTC)
-            cred_res = await session.execute(
-                select(AgentCredential).where(
-                    AgentCredential.key_hash == t_hash,
-                    AgentCredential.revoked_at.is_(None),
-                    (AgentCredential.expires_at.is_(None))
-                    | (AgentCredential.expires_at > now),
-                )
-            )
-            cred = cred_res.scalars().first()
-            if cred:
-                caller_agent_id = cred.agent_id
-            else:
-                agent_res = await session.execute(
-                    select(Agent).where(
-                        Agent.api_key_hash == t_hash, Agent.status == "ACTIVE"
-                    )
-                )
-                agent = agent_res.scalars().first()
-                if agent:
-                    caller_agent_id = agent.id
-                else:
-                    sess_res = await session.execute(
-                        select(UserSession).where(
-                            UserSession.session_token_hash == t_hash,
-                            UserSession.revoked_at.is_(None),
-                            UserSession.expires_at > now,
-                        )
-                    )
-                    usess = sess_res.scalars().first()
-                    if usess:
-                        caller_user_id = usess.user_id
+            principal = await resolve_principal_from_token(session, caller_token)
         else:
             caller_user_id = caller_ctx.get("user_id") or os.environ.get(
                 "CORTEX_CALLER_USER_ID"
@@ -389,21 +340,54 @@ async def resolve_project(
             caller_agent_id = caller_ctx.get("agent_id") or os.environ.get(
                 "CORTEX_CALLER_AGENT_ID"
             )
+            if caller_agent_id:
+                agent = await session.get(Agent, caller_agent_id)
+                if agent and agent.status == "ACTIVE":
+                    principal = Principal(
+                        principal_id=agent.id,
+                        actor_type="AGENT",
+                        agent_id=agent.id,
+                        user_id=agent.owner_user_id,
+                        role="agent",
+                    )
+            elif caller_user_id:
+                user = await session.get(User, caller_user_id)
+                if user:
+                    principal = Principal(
+                        principal_id=user.id,
+                        actor_type="USER",
+                        user_id=user.id,
+                        email=user.email,
+                        role="admin" if getattr(user, "is_admin", False) else "user",
+                        is_admin=bool(getattr(user, "is_admin", False)),
+                    )
 
-        if not caller_agent_id and not caller_user_id:
-            if os.environ.get("CORTEX_ENV") == "production":
-                return "Error: Authentication required to onboard a new project in production."
-            caller_user_id = "00000000-0000-0000-0000-000000000001"
+        # Fail closed: No unauthenticated onboarding in ANY environment (§28, Zero-Trust)
+        if not principal:
+            return "Error: Authentication required to onboard a new project. Provide a valid agent token or session."
 
-        # Derive owner_user_id authoritatively
-        if caller_agent_id:
-            agent = await session.get(Agent, caller_agent_id)
-            if agent and agent.owner_user_id:
-                owner_user_id = agent.owner_user_id
-            else:
-                owner_user_id = caller_user_id or "00000000-0000-0000-0000-000000000001"
-        else:
-            owner_user_id = caller_user_id
+        # Derive owner_user_id authoritatively from authenticated principal (no bootstrap UUID!)
+        owner_user_id = principal.user_id
+        if not owner_user_id:
+            return "Error: Could not derive authoritative project owner from authenticated principal."
+
+        # Hosted boundary check for local filesystem paths
+        is_hosted = (
+            os.environ.get("CORTEX_HOSTED", "").strip().lower() in ("1", "true", "yes")
+            or os.environ.get("CORTEX_ENV") == "production"
+        )
+        is_local_path = (
+            project_id_or_path.startswith((".", "/", "\\"))
+            or (len(project_id_or_path) >= 2 and project_id_or_path[1] == ":")
+        )
+        if is_hosted and is_local_path:
+            bridge_url = os.environ.get("CORTEX_BRIDGE_URL")
+            if not bridge_url:
+                return (
+                    f"Error: Hosted CortexForge cannot access local path '{project_id_or_path}' "
+                    "without an active Local Bridge connection. Connect CortexForge Local Bridge "
+                    "or register via GitHub repository identity."
+                )
 
         # Validate local path
         try:
@@ -424,13 +408,13 @@ async def resolve_project(
         session.add(new_project)
         await session.flush()
 
-        # Link agent permission if caller is an agent
-        if caller_agent_id:
+        # Link agent permission with bounded least-privilege scopes (NEVER wildcard '*')
+        if principal.actor_type == "AGENT" and principal.agent_id:
             perm = AgentProjectPermission(
                 id=str(uuid.uuid4()),
-                agent_id=caller_agent_id,
+                agent_id=principal.agent_id,
                 project_id=proj_id,
-                scopes=["*"],
+                scopes=DEFAULT_AGENT_ONBOARD_SCOPES,
             )
             session.add(perm)
 
@@ -439,9 +423,13 @@ async def resolve_project(
             action=AuditAction.PROJECT_CONFIGURED,
             resource_type="project",
             resource_id=proj_id,
-            actor=caller_agent_id or owner_user_id,
+            actor=principal.principal_id,
             project_id=proj_id,
-            after={"auto_onboard": True, "local_path": canonical},
+            after={
+                "auto_onboard": True,
+                "local_path": canonical,
+                "scopes": DEFAULT_AGENT_ONBOARD_SCOPES if principal.actor_type == "AGENT" else ["owner"],
+            },
         )
 
         # Initial indexing scan via RepositorySource
@@ -451,6 +439,11 @@ async def resolve_project(
         )
         await session.commit()
 
+        granted_scopes_desc = (
+            f"scoped access ({', '.join(DEFAULT_AGENT_ONBOARD_SCOPES)})"
+            if principal.actor_type == "AGENT"
+            else "owner access"
+        )
         return (
             f"# Project Onboarded: {new_project.name}\n"
             f"- **Project ID**: `{new_project.id}`\n"
@@ -458,7 +451,7 @@ async def resolve_project(
             f"- **Owner User**: `{owner_user_id}`\n"
             f"- **Initial Indexing**: {scan_res.files_scanned} files scanned, "
             f"{scan_res.entities_extracted} entities indexed\n"
-            f"- **Agent Permission**: Granted full access to linking agent\n"
+            f"- **Agent Permission**: Granted {granted_scopes_desc}\n"
             f"- **Status**: CortexForge memory and code intelligence active."
         )
 

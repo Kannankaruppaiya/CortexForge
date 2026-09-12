@@ -59,12 +59,28 @@ evaluation_runner = EvaluationRunner(
 )
 
 
+def _is_hosted_mode() -> bool:
+    return (
+        os.environ.get("CORTEX_HOSTED", "").lower() in ("1", "true", "yes")
+        or os.environ.get("CORTEX_ENV", "").lower() in ("production", "prod", "staging")
+        or os.environ.get("ENVIRONMENT", "").lower() in ("production", "prod", "staging")
+    )
+
+
 @router.post("/validate-local", response_model=LocalRepoValidationResponse)
 async def validate_local_project_path(
     payload: LocalRepoValidationRequest,
     principal: Principal = Depends(get_current_principal),
 ) -> LocalRepoValidationResponse:
     """Validate a candidate local repository path across the host filesystem."""
+    if _is_hosted_mode() and not os.environ.get("CORTEX_BRIDGE_URL"):
+        return LocalRepoValidationResponse(
+            valid=False,
+            is_git=False,
+            path=payload.path,
+            error="Local repository paths cannot be validated directly on hosted server. Connect your workspace using CortexForge Local Bridge.",
+        )
+
     try:
         canonical = validate_local_registration_path(payload.path)
     except HTTPException as exc:
@@ -84,6 +100,12 @@ async def browse_workspace_directories(
     principal: Principal = Depends(get_current_principal),
 ) -> DirectoryBrowseResponse:
     """List subdirectories across the host filesystem for interactive local repository selection."""
+    if _is_hosted_mode() and not os.environ.get("CORTEX_BRIDGE_URL"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Direct filesystem browsing is disabled in hosted environment. Please connect via CortexForge Local Bridge or import a GitHub repository.",
+        )
+
     import string
     from pathlib import Path
 
@@ -193,9 +215,16 @@ async def open_os_directory_picker(
     principal: Principal = Depends(get_current_principal),
 ) -> dict:
     """Attempt to open native OS directory picker dialog on the host machine."""
+    if _is_hosted_mode():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="OS directory picker is disabled in hosted environment. Connect via CortexForge Local Bridge or import a GitHub repository.",
+        )
+
     import asyncio
 
     gui_error: str | None = None
+
 
     def _pick():
         nonlocal gui_error
@@ -276,6 +305,11 @@ async def create_project(
     src_type = payload.source_type.upper()
 
     if src_type == "LOCAL":
+        if _is_hosted_mode() and not os.environ.get("CORTEX_BRIDGE_URL"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Local filesystem repository registration is not supported on hosted CortexForge without an active Local Bridge. Connect via Local Bridge or register as a GitHub project.",
+            )
         if not payload.local_path:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -283,6 +317,7 @@ async def create_project(
             )
         # Securely validate local registration path
         canonical_path = validate_local_registration_path(payload.local_path)
+
 
         existing_stmt = select(Project).where(Project.local_path == canonical_path)
         existing_res = await session.execute(existing_stmt)

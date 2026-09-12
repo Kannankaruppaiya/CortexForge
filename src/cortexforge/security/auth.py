@@ -6,6 +6,7 @@ NO TENANT / NO ORGANIZATION layer.
 """
 
 import os
+import secrets
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -121,6 +122,134 @@ def get_session_token_from_request(request: Request) -> str | None:
     return None
 
 
+async def resolve_principal_from_token(
+    db_session: AsyncSession, token: str
+) -> Principal | None:
+    """Resolve an incoming bearer token, agent key, or session token to a canonical Principal.
+
+    Checks in order:
+    1. AgentCredential (modern hashed agent token)
+    2. Agent.api_key_hash (legacy agent API key)
+    3. User Session (modern hashed session token)
+
+    Enforces expiry and revocation checks. Returns None if invalid or expired.
+    """
+    if not token or not token.strip():
+        return None
+
+    clean_token = token.strip()
+    if clean_token.lower().startswith("bearer "):
+        clean_token = clean_token[7:].strip()
+    if not clean_token:
+        return None
+
+    key_h = hash_token(clean_token)
+    now = datetime.now(UTC)
+
+    # 1. Agent key check: modern AgentCredential
+    cred_res = await db_session.execute(
+        select(AgentCredential).where(
+            AgentCredential.key_hash == key_h,
+            AgentCredential.revoked_at.is_(None),
+            (AgentCredential.expires_at.is_(None)) | (AgentCredential.expires_at > now),
+        )
+    )
+    cred = cred_res.scalars().first()
+    if cred:
+        agent = await db_session.get(Agent, cred.agent_id)
+        if agent and agent.status == "ACTIVE":
+            cred.last_used_at = now
+            perm_res = await db_session.execute(
+                select(AgentProjectPermission).where(
+                    AgentProjectPermission.agent_id == agent.id,
+                    AgentProjectPermission.revoked_at.is_(None),
+                    (AgentProjectPermission.expires_at.is_(None))
+                    | (AgentProjectPermission.expires_at > now),
+                )
+            )
+            perms = perm_res.scalars().all()
+            allowed = {p.project_id for p in perms}
+            scopes_map = {p.project_id: p.scopes for p in perms}
+            return Principal(
+                principal_id=agent.id,
+                actor_type="AGENT",
+                agent_id=agent.id,
+                user_id=agent.owner_user_id,
+                role="agent",
+                allowed_project_ids=allowed,
+                agent_scopes=scopes_map,
+                is_admin=False,
+            )
+
+    # 2. Legacy Agent.api_key_hash
+    res = await db_session.execute(
+        select(Agent).where(Agent.api_key_hash == key_h, Agent.status == "ACTIVE")
+    )
+    agent = res.scalars().first()
+    if agent:
+        perm_res = await db_session.execute(
+            select(AgentProjectPermission).where(
+                AgentProjectPermission.agent_id == agent.id,
+                AgentProjectPermission.revoked_at.is_(None),
+                (AgentProjectPermission.expires_at.is_(None))
+                | (AgentProjectPermission.expires_at > now),
+            )
+        )
+        perms = perm_res.scalars().all()
+        allowed = {p.project_id for p in perms}
+        scopes_map = {p.project_id: p.scopes for p in perms}
+        return Principal(
+            principal_id=agent.id,
+            actor_type="AGENT",
+            agent_id=agent.id,
+            user_id=agent.owner_user_id,
+            role="agent",
+            allowed_project_ids=allowed,
+            agent_scopes=scopes_map,
+            is_admin=False,
+        )
+
+    # 3. User session check
+    res = await db_session.execute(
+        select(Session).where(
+            Session.session_token_hash == key_h,
+            Session.revoked_at.is_(None),
+            Session.expires_at > now,
+        )
+    )
+    sess = res.scalars().first()
+    if sess:
+        user = await db_session.get(User, sess.user_id)
+        if user and user.status == "ACTIVE":
+            proj_res = await db_session.execute(
+                select(Project.id).where(Project.owner_user_id == user.id)
+            )
+            owned_ids = set(proj_res.scalars().all())
+            mem_res = await db_session.execute(
+                select(ProjectMembership).where(ProjectMembership.user_id == user.id)
+            )
+            memberships = mem_res.scalars().all()
+
+            proj_roles = {pid: "OWNER" for pid in owned_ids}
+            for m in memberships:
+                proj_roles[m.project_id] = m.role
+                owned_ids.add(m.project_id)
+
+            is_admin_user = bool(getattr(user, "is_admin", False))
+            return Principal(
+                principal_id=user.id,
+                actor_type="USER",
+                user_id=user.id,
+                email=user.email,
+                role="admin" if is_admin_user else "user",
+                allowed_project_ids=owned_ids,
+                project_roles=proj_roles,
+                is_admin=is_admin_user,
+            )
+
+    return None
+
+
 async def get_current_principal(
     session_cookie: Annotated[str | None, Cookie(alias="cortex_session")] = None,
     alt_session_cookie: Annotated[
@@ -128,7 +257,10 @@ async def get_current_principal(
     ] = None,
     api_key: str | None = Security(api_key_header),
     bearer: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
+    authorization: str | None = Header(None),
     user_header: Annotated[str | None, Header(alias="X-Principal-ID")] = None,
+    cortex_user_header: str | None = Header(None, alias="X-Cortex-User"),
+    cortex_actor_header: str | None = Header(None, alias="X-Cortex-Actor"),
     allowed_projects_header: Annotated[
         str | None, Header(alias="X-Allowed-Projects")
     ] = None,
@@ -136,18 +268,22 @@ async def get_current_principal(
     """Resolve and authenticate caller identity, returning Principal.
 
     Resolution precedence:
-    1. HttpOnly Session Cookie or Bearer session token -> User principal.
-    2. Agent API key (prefixed with `cortex_agent_`) -> AI Agent principal.
-    3. Master Admin API Key -> Admin principal.
+    1. Master Admin API Key -> Admin principal.
+    2. HttpOnly Session Cookie or Bearer session token -> User principal.
+    3. Agent API key (hashed) -> AI Agent principal.
     4. Development/Test fallback when auth is disabled or in local test environment.
     """
     token = None
     if bearer and bearer.credentials:
         token = bearer.credentials.strip()
+    elif authorization and authorization.startswith("Bearer "):
+        token = authorization[7:].strip()
     elif session_cookie or alt_session_cookie:
         token = (session_cookie or alt_session_cookie).strip()
     elif api_key:
         token = api_key.strip()
+    elif authorization:
+        token = authorization.strip()
 
     expected_admin_key = get_configured_api_key()
     is_prod = is_production_environment()
@@ -161,12 +297,13 @@ async def get_current_principal(
 
     # In production-like environments or when strict auth is enabled,
     # client identity headers MUST NOT be accepted for privilege or identity selection (§28).
+    eff_user_header = user_header or cortex_user_header
     if is_prod or strict_auth:
-        user_header = None
+        eff_user_header = None
         allowed_projects_header = None
 
     # 1. Master Admin API key
-    if token and expected_admin_key and token == expected_admin_key:
+    if token and expected_admin_key and secrets.compare_digest(token, expected_admin_key):
         return Principal(
             principal_id="admin:master",
             actor_type="SYSTEM",
@@ -178,131 +315,23 @@ async def get_current_principal(
     # 2. Authenticated Session / Agent / Database lookup
     if token:
         async with session_scope() as db_session:
-            # 2a. Agent key check
-            if token.startswith("cortex_agent_"):
-                key_h = hash_token(token)
-                now = datetime.now(UTC)
-                # Check AgentCredential first
-                cred_res = await db_session.execute(
-                    select(AgentCredential).where(
-                        AgentCredential.key_hash == key_h,
-                        AgentCredential.revoked_at.is_(None),
-                        (AgentCredential.expires_at.is_(None))
-                        | (AgentCredential.expires_at > now),
-                    )
-                )
-                cred = cred_res.scalars().first()
-                if cred:
-                    agent = await db_session.get(Agent, cred.agent_id)
-                    if agent and agent.status == "ACTIVE":
-                        cred.last_used_at = now
-                        perm_res = await db_session.execute(
-                            select(AgentProjectPermission).where(
-                                AgentProjectPermission.agent_id == agent.id,
-                                AgentProjectPermission.revoked_at.is_(None),
-                                (AgentProjectPermission.expires_at.is_(None))
-                                | (AgentProjectPermission.expires_at > now),
-                            )
-                        )
-                        perms = perm_res.scalars().all()
-                        allowed = {p.project_id for p in perms}
-                        scopes_map = {p.project_id: p.scopes for p in perms}
-                        return Principal(
-                            principal_id=agent.id,
-                            actor_type="AGENT",
-                            agent_id=agent.id,
-                            user_id=agent.owner_user_id,
-                            role="agent",
-                            allowed_project_ids=allowed,
-                            agent_scopes=scopes_map,
-                            is_admin=False,
-                        )
-                # Fallback to legacy Agent.api_key_hash
-                res = await db_session.execute(
-                    select(Agent).where(
-                        Agent.api_key_hash == key_h, Agent.status == "ACTIVE"
-                    )
-                )
-                agent = res.scalars().first()
-                if agent:
-                    perm_res = await db_session.execute(
-                        select(AgentProjectPermission).where(
-                            AgentProjectPermission.agent_id == agent.id,
-                            AgentProjectPermission.revoked_at.is_(None),
-                            (AgentProjectPermission.expires_at.is_(None))
-                            | (AgentProjectPermission.expires_at > now),
-                        )
-                    )
-                    perms = perm_res.scalars().all()
-                    allowed = {p.project_id for p in perms}
-                    scopes_map = {p.project_id: p.scopes for p in perms}
-                    return Principal(
-                        principal_id=agent.id,
-                        actor_type="AGENT",
-                        agent_id=agent.id,
-                        user_id=agent.owner_user_id,
-                        role="agent",
-                        allowed_project_ids=allowed,
-                        agent_scopes=scopes_map,
-                        is_admin=False,
-                    )
-
-            # 2b. User session check
-            token_h = hash_token(token)
-            now = datetime.now(UTC)
-            res = await db_session.execute(
-                select(Session).where(
-                    Session.session_token_hash == token_h,
-                    Session.revoked_at.is_(None),
-                    Session.expires_at > now,
-                )
-            )
-            sess = res.scalars().first()
-            if sess:
-                user = await db_session.get(User, sess.user_id)
-                if user and user.status == "ACTIVE":
-                    # Load owned projects
-                    proj_res = await db_session.execute(
-                        select(Project.id).where(Project.owner_user_id == user.id)
-                    )
-                    owned_ids = set(proj_res.scalars().all())
-                    # Load membership projects and roles
-                    mem_res = await db_session.execute(
-                        select(ProjectMembership).where(
-                            ProjectMembership.user_id == user.id
-                        )
-                    )
-                    memberships = mem_res.scalars().all()
-
-                    proj_roles = {pid: "OWNER" for pid in owned_ids}
-                    for m in memberships:
-                        proj_roles[m.project_id] = m.role
-                        owned_ids.add(m.project_id)
-
-                    is_admin_user = bool(getattr(user, "is_admin", False))
-                    return Principal(
-                        principal_id=user.id,
-                        actor_type="USER",
-                        user_id=user.id,
-                        email=user.email,
-                        role="admin" if is_admin_user else "user",
-                        allowed_project_ids=owned_ids,
-                        project_roles=proj_roles,
-                        is_admin=is_admin_user,
-                    )
-
+            principal = await resolve_principal_from_token(db_session, token)
+            if principal:
+                return principal
             # A credential token was explicitly supplied but failed validation -> Fail Closed (§28)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid, expired, or revoked authentication credentials.",
                 headers={"WWW-Authenticate": "Bearer"},
             )
+
     if strict_auth or is_prod:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing or invalid authentication credentials.",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
 
     # 4. Development/Test mode fallback (strictly restricted to non-production environments)
     if is_prod:
@@ -317,18 +346,18 @@ async def get_current_principal(
         allowed = {p.strip() for p in allowed_projects_header.split(",") if p.strip()}
 
     is_adm = (
-        (user_header != "restricted_user")
+        (eff_user_header != "restricted_user")
         and not bool(allowed)
-        and (user_header != "00000000-0000-0000-0000-000000000001")
+        and (eff_user_header != "00000000-0000-0000-0000-000000000001")
     )
     default_uid = (
-        user_header
-        if user_header and user_header != "restricted_user"
+        eff_user_header
+        if eff_user_header and eff_user_header != "restricted_user"
         else "00000000-0000-0000-0000-000000000001"
     )
 
     return Principal(
-        principal_id=user_header or default_uid,
+        principal_id=eff_user_header or default_uid,
         actor_type="USER",
         user_id=default_uid,
         email="developer@cortexforge.local",

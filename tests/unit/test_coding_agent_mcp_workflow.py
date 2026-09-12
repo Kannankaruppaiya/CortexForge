@@ -27,11 +27,12 @@ Tests all 24 required capabilities:
 24. Permission enforcement per MCP operation.
 """
 
+import json
 import os
 import tempfile
 import uuid
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import select
@@ -233,12 +234,25 @@ async def test_03_new_project_onboarding():
         assert "Initial Indexing" in res
         assert "files scanned" in res
 
-        # Verify project exists in database with authoritative owner
+        # Verify project exists in database with authoritative owner and bounded scopes
         async with session_scope() as session:
             stmt = select(Project).where(Project.local_path == os.path.realpath(tmpdir))
             created = (await session.execute(stmt)).scalars().first()
             assert created is not None
             assert created.owner_user_id == user.id  # Derived from agent.owner_user_id
+
+            # Verify auto-onboarded agent was granted bounded scopes, NOT wildcard *
+            perm_stmt = select(AgentProjectPermission).where(
+                AgentProjectPermission.agent_id == agent.id,
+                AgentProjectPermission.project_id == created.id,
+            )
+            perm = (await session.execute(perm_stmt)).scalars().first()
+            assert perm is not None
+            assert "*" not in perm.scopes
+            assert "project:read" in perm.scopes
+            assert "memory:read" in perm.scopes
+            assert "memory:write" in perm.scopes
+
 
 
 # ==================== 4. Agent-to-Project Authorization ====================
@@ -274,8 +288,8 @@ async def test_04_agent_to_project_authorization():
 async def test_05_unauthorized_agent_rejection():
     """5. Agent without permission for Project B is rejected with Access Denied."""
     async with session_scope() as session:
-        user_a, agent_a, token_a = await _create_test_user_and_agent(session, "user_a")
-        user_b, agent_b, token_b = await _create_test_user_and_agent(session, "user_b")
+        _user_a, _agent_a, token_a = await _create_test_user_and_agent(session, "user_a")
+        user_b, agent_b, _token_b = await _create_test_user_and_agent(session, "user_b")
 
         proj_b = await _create_test_project(session, user_b.id, ".", name="ProjectB")
 
@@ -303,8 +317,8 @@ async def test_05_unauthorized_agent_rejection():
 async def test_06_agent_identity_spoofing_rejection():
     """6. Client cannot supply a foreign agent_id in context while authenticating with its own token."""
     async with session_scope() as session:
-        user_a, agent_a, token_a = await _create_test_user_and_agent(session, "user_a")
-        user_b, agent_b, token_b = await _create_test_user_and_agent(session, "user_b")
+        user_a, agent_a, _token_a = await _create_test_user_and_agent(session, "user_a")
+        _user_b, _agent_b, token_b = await _create_test_user_and_agent(session, "user_b")
 
         proj_a = await _create_test_project(session, user_a.id, ".", name="ProjectA")
         perm_a = AgentProjectPermission(
@@ -330,11 +344,11 @@ async def test_06_agent_identity_spoofing_rejection():
 async def test_07_user_and_project_isolation():
     """7. Isolation guarantees memories in Project A cannot be read or modified by Project B agent."""
     async with session_scope() as session:
-        user_a, agent_a, token_a = await _create_test_user_and_agent(session, "user_a")
-        user_b, agent_b, token_b = await _create_test_user_and_agent(session, "user_b")
+        user_a, _agent_a, _token_a = await _create_test_user_and_agent(session, "user_a")
+        user_b, _agent_b, token_b = await _create_test_user_and_agent(session, "user_b")
 
         proj_a = await _create_test_project(session, user_a.id, ".", name="ProjectA")
-        proj_b = await _create_test_project(session, user_b.id, ".", name="ProjectB")
+        await _create_test_project(session, user_b.id, ".", name="ProjectB")
 
         mem_a = Memory(
             id=str(uuid.uuid4()),
@@ -624,18 +638,91 @@ async def test_14_incremental_repository_indexing():
 
 @pytest.mark.asyncio
 async def test_15_github_source_adapter():
-    """15. GitHubRepositorySource interacts via immutable repo identity without duplicating codebase."""
-    gh_source = GitHubRepositorySource(
-        github_repository_id="gh_987654321",
-        owner="test-org",
-        repo="test-repo",
-        access_token="ghp_test_token",
-        default_branch="main",
-    )
-    assert gh_source.source_type == "GITHUB"
-    assert gh_source.github_repository_id == "gh_987654321"
-    assert gh_source.is_accessible() is True
-    assert gh_source.get_current_branch() == "main"
+    """15. GitHubRepositorySource interacts via genuine remote API without local mirror."""
+    import httpx
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        url_str = str(request.url)
+        if url_str.endswith("/repos/test-org/test-repo"):
+            return httpx.Response(200, json={"id": 987654321, "default_branch": "main"})
+        if "/commits/main" in url_str:
+            return httpx.Response(200, json={"sha": "abc1234567890abcdef1234567890abcdef1234"})
+        if "/git/trees/" in url_str:
+            return httpx.Response(
+                200,
+                json={
+                    "sha": "abc1234567890abcdef1234567890abcdef1234",
+                    "tree": [
+                        {"path": "src/main.py", "type": "blob", "size": 100},
+                        {"path": "tests/test_main.py", "type": "blob", "size": 50},
+                        {"path": "node_modules/pkg.js", "type": "blob", "size": 200},
+                        {"path": ".git/config", "type": "blob", "size": 10},
+                    ],
+                },
+            )
+        if "/contents/src/main.py" in url_str:
+            return httpx.Response(200, content=b"print('hello remote github')\n")
+        if "/compare/" in url_str:
+            return httpx.Response(
+                200,
+                json={
+                    "status": "ahead",
+                    "behind_by": 0,
+                    "files": [
+                        {"filename": "src/main.py", "status": "modified"},
+                        {"filename": "src/new.py", "status": "added"},
+                    ],
+                },
+            )
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    _RealClient = httpx.Client
+    with patch(
+        "cortexforge.code_intelligence.source_adapter.httpx.Client",
+        side_effect=lambda *a, **kw: _RealClient(transport=httpx.MockTransport(mock_handler)),
+    ):
+
+
+        gh_source = GitHubRepositorySource(
+            github_repository_id="gh_987654321",
+            owner="test-org",
+            repo="test-repo",
+            access_token="ghp_test_token",
+            default_branch="main",
+        )
+        assert gh_source.source_type == "GITHUB"
+        assert gh_source.github_repository_id == "gh_987654321"
+        assert gh_source.is_accessible() is True
+        assert gh_source.get_current_branch() == "main"
+
+        # 1. Remote HEAD commit
+        head_sha = gh_source.get_head_commit()
+        assert head_sha == "abc1234567890abcdef1234567890abcdef1234"
+
+        # 2. Remote tree file discovery with filtering of ignored dirs/exts
+        files = gh_source.discover_files()
+        assert "src/main.py" in files
+        assert "tests/test_main.py" in files
+        assert "node_modules/pkg.js" not in files
+        assert ".git/config" not in files
+
+        # 3. Remote file content retrieval
+        content = gh_source.read_text("src/main.py")
+        assert "hello remote github" in content
+
+        # 4. Remote commit comparison
+        diff = gh_source.get_modified_files("base_sha", "target_sha")
+        assert len(diff) == 2
+        assert diff[0].file_path == "src/main.py"
+        assert diff[0].status == "M"
+        assert diff[1].file_path == "src/new.py"
+        assert diff[1].status == "A"
+
+
+        # 5. Remote ancestry verification
+        assert gh_source.is_ancestor("base_sha", "target_sha") is True
+        assert gh_source.is_ancestor("same_sha", "same_sha") is True
+
 
 
 # ==================== 16. Local Bridge Source Adapter ====================
@@ -751,7 +838,7 @@ async def test_20_audit_actor_correctness():
     """20. Project onboarding and mutations record the authenticated principal as audit actor."""
     with tempfile.TemporaryDirectory() as tmpdir:
         async with session_scope() as session:
-            user, agent, token = await _create_test_user_and_agent(session)
+            _user, agent, token = await _create_test_user_and_agent(session)
 
         set_mcp_caller(token=token)
 
@@ -830,7 +917,7 @@ async def test_22_historical_temporal_knowledge_correctness():
 async def test_23_github_immutable_repository_identity():
     """23. GitHub project tracks immutable github_repository_id, independent of volatile repo URLs."""
     async with session_scope() as session:
-        user, agent, token = await _create_test_user_and_agent(session)
+        user, _agent, _token = await _create_test_user_and_agent(session)
         gh_proj = Project(
             id=str(uuid.uuid4()),
             name="ImmutableRepo",
@@ -882,3 +969,228 @@ async def test_24_permission_enforcement_per_mcp_operation():
     # 2. Denied: trigger scan (requires project:scan)
     scan_res = await trigger_project_scan(project_id_or_path=proj.id)
     assert "Error: Project could not be resolved or access denied" in scan_res
+
+
+# ==================== 25. GitHub Webhook Strict Repository ID Binding ====================
+
+
+@pytest.mark.asyncio
+async def test_25_github_webhook_strict_repository_id_binding():
+    """25. GitHub webhook resolves project strictly by immutable github_repository_id, preventing name collisions."""
+    from fastapi import Request
+
+    from cortexforge.apps.api.routes.github import handle_github_webhook
+
+    async with session_scope() as session:
+        user, _agent, _token = await _create_test_user_and_agent(session)
+
+        # Project A and Project B share the exact same repo name 'backend', but different immutable IDs
+        proj_a = Project(
+            id=str(uuid.uuid4()),
+            name="backend",
+            local_path=f"/dummy/path_a_{uuid.uuid4().hex}",
+            owner_user_id=user.id,
+            source_type="GITHUB",
+            github_repository_id="11111",
+            repository_url="https://github.com/org-a/backend.git",
+        )
+        proj_b = Project(
+            id=str(uuid.uuid4()),
+            name="backend",
+            local_path=f"/dummy/path_b_{uuid.uuid4().hex}",
+            owner_user_id=user.id,
+            source_type="GITHUB",
+            github_repository_id="22222",
+            repository_url="https://github.com/org-b/backend.git",
+        )
+
+        session.add(proj_a)
+        session.add(proj_b)
+        await session.commit()
+
+        # Webhook delivers event for repo 22222
+        payload_data = {
+            "repository": {
+                "id": 22222,
+                "name": "backend",
+                "clone_url": "https://github.com/org-b/backend.git",
+            },
+            "after": "commit_sha_222",
+            "commits": [],
+            "sender": {"login": "dev_user"},
+        }
+        raw_body = json.dumps(payload_data).encode("utf-8")
+
+        mock_req = MagicMock(spec=Request)
+        mock_req.body = AsyncMock(return_value=raw_body)
+        mock_req.json = AsyncMock(return_value=payload_data)
+        mock_req.headers = {"content-length": str(len(raw_body))}
+
+        with patch("cortexforge.apps.api.routes.github.verify_github_signature", return_value=True):
+            res = await handle_github_webhook(
+                request=mock_req,
+                x_github_event="push",
+                x_hub_signature_256="sha256=mock",
+                x_github_delivery=f"deliv_{uuid.uuid4().hex}",
+                session=session,
+            )
+
+            # Resolved Project must be Project B
+            assert res["status"] == "processed"
+            assert res["project"] == "backend"
+            assert res["project_id"] == proj_b.id
+
+
+        # Now test an unmatched repository ID with the same name 'backend'
+        payload_unmatched = {
+            "repository": {
+                "id": 99999,
+                "name": "backend",
+                "clone_url": "https://github.com/unrelated/backend.git",
+            },
+            "after": "commit_sha_999",
+            "commits": [],
+            "sender": {"login": "dev_user"},
+        }
+        raw_unmatched = json.dumps(payload_unmatched).encode("utf-8")
+        mock_req_unmatched = MagicMock(spec=Request)
+        mock_req_unmatched.body = AsyncMock(return_value=raw_unmatched)
+        mock_req_unmatched.json = AsyncMock(return_value=payload_unmatched)
+        mock_req_unmatched.headers = {"content-length": str(len(raw_unmatched))}
+
+        with patch("cortexforge.apps.api.routes.github.verify_github_signature", return_value=True):
+            res_unmatched = await handle_github_webhook(
+                request=mock_req_unmatched,
+                x_github_event="push",
+                x_hub_signature_256="sha256=mock",
+                x_github_delivery=f"deliv_{uuid.uuid4().hex}",
+                session=session,
+            )
+            # Must be ignored despite identical name 'backend'
+            assert res_unmatched["status"] == "ignored"
+            assert "99999" in res_unmatched["message"]
+
+
+# ==================== 26. Per-User GitHub Token Scoping ====================
+
+
+@pytest.mark.asyncio
+async def test_26_per_user_github_token_scoping():
+    """26. User without authorized repo token cannot access repos/branches (no global GITHUB_TOKEN fallback)."""
+    import httpx
+    from fastapi import HTTPException
+
+    from cortexforge.apps.api.routes.github import (
+        get_github_repository_branches,
+        get_user_github_repositories,
+    )
+    from cortexforge.core.models import ExternalIdentity
+    from cortexforge.security.auth import Principal
+
+    async with session_scope() as session:
+        user, _agent, _token = await _create_test_user_and_agent(session)
+        user.github_login = "testuser"
+        await session.commit()
+
+        principal = Principal(
+            principal_id=user.id,
+            actor_type="USER",
+            user_id=user.id,
+            role="user",
+        )
+
+        # Set a server-wide GITHUB_TOKEN in env
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "global_leak_token"}):
+            # 1. User without token in ExternalIdentity does NOT get repos via global token
+            res = await get_user_github_repositories(session=session, principal=principal)
+            assert res["connected"] is True
+            assert res["requires_repo_access"] is True
+            assert res["repositories"] == []
+
+            # 2. User cannot query branches without user-scoped token
+            with pytest.raises(HTTPException) as exc_info:
+                await get_github_repository_branches(
+                    owner="testuser", repo="myrepo", session=session, principal=principal
+                )
+            assert exc_info.value.status_code == 403
+
+            # 3. Add ExternalIdentity with user's scoped access token
+            ext = ExternalIdentity(
+                user_id=user.id,
+                provider="github",
+                provider_subject="12345",
+                metadata_json={"login": "testuser", "access_token": "user_scoped_token_123"},
+            )
+            session.add(ext)
+            await session.commit()
+
+            # Mock httpx to verify user's scoped token is used in Authorization header
+            def branch_mock(request: httpx.Request) -> httpx.Response:
+                auth_hdr = request.headers.get("authorization", "")
+                assert auth_hdr == "Bearer user_scoped_token_123"
+                assert "global_leak_token" not in auth_hdr
+                if request.url.path.endswith("/branches"):
+                    return httpx.Response(200, json=[{"name": "main"}, {"name": "feature-x"}])
+                return httpx.Response(200, json={"default_branch": "main"})
+
+            mock_client = httpx.AsyncClient(transport=httpx.MockTransport(branch_mock))
+            with patch("httpx.AsyncClient", return_value=mock_client):
+                branches_res = await get_github_repository_branches(
+                    owner="testuser", repo="myrepo", session=session, principal=principal
+                )
+                assert "main" in branches_res["branches"]
+                assert "feature-x" in branches_res["branches"]
+
+
+# ==================== 27. Hosted Mode Filesystem Boundary ====================
+
+
+@pytest.mark.asyncio
+async def test_27_hosted_mode_filesystem_boundary():
+    """27. Hosted environment rejects direct host filesystem operations unless mediated via Local Bridge."""
+    from fastapi import HTTPException
+
+    from cortexforge.apps.api.routes.projects import (
+        browse_workspace_directories,
+        create_project,
+        open_os_directory_picker,
+        validate_local_project_path,
+    )
+    from cortexforge.core.schemas import LocalRepoValidationRequest, ProjectCreate
+    from cortexforge.security.auth import Principal
+
+    principal = Principal(
+        principal_id="user_hosted",
+        actor_type="USER",
+        user_id="user_hosted",
+        role="user",
+    )
+
+    with patch.dict(os.environ, {"CORTEX_HOSTED": "1", "CORTEX_BRIDGE_URL": ""}):
+        # 1. Directory picker rejected
+        with pytest.raises(HTTPException) as exc_picker:
+            await open_os_directory_picker(principal=principal)
+        assert exc_picker.value.status_code == 403
+
+        # 2. Filesystem browsing rejected
+        with pytest.raises(HTTPException) as exc_browse:
+            await browse_workspace_directories(principal=principal)
+        assert exc_browse.value.status_code == 403
+
+        # 3. Path validation rejected
+        val_res = await validate_local_project_path(
+            payload=LocalRepoValidationRequest(path="."), principal=principal
+        )
+        assert val_res.valid is False
+        assert "Local Bridge" in (val_res.error or "")
+
+        # 4. Local project creation rejected
+        async with session_scope() as session:
+            with pytest.raises(HTTPException) as exc_create:
+                await create_project(
+                    payload=ProjectCreate(name="HostedLocal", source_type="LOCAL", local_path="."),
+                    session=session,
+                    principal=principal,
+                )
+            assert exc_create.value.status_code == 403
+
