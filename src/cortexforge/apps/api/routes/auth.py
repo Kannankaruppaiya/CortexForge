@@ -12,6 +12,7 @@ Strictly NO Google / Microsoft / Apple social logins.
 
 import base64
 import hashlib
+import logging
 import os
 import re
 import secrets

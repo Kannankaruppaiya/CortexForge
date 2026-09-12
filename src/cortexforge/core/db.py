@@ -1,5 +1,6 @@
 """Database engine and session configuration for CortexForge."""
 
+import logging
 import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -14,6 +15,8 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from cortexforge.core.models import Base
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_DB_URL = "sqlite+aiosqlite:///cortexforge.db"
 DATABASE_URL = (
@@ -65,8 +68,8 @@ def create_cortex_engine(
                 cursor.execute("PRAGMA journal_mode=WAL;")
                 cursor.execute("PRAGMA busy_timeout=30000;")
                 cursor.execute("PRAGMA synchronous=NORMAL;")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to set SQLite pragmas: %s", exc)
             finally:
                 cursor.close()
 

@@ -16,6 +16,14 @@ from cortexforge.core.schemas import (
 class GraphService:
     """Relational graph query and architecture synthesis service."""
 
+    # Entity types that represent physical container nodes rather than inner code/config entities.
+    # In CortexForge's graph model, "file" entities represent the physical file container itself
+    # (already summarized via file_count) rather than a code component within that file.
+    NON_DISPLAYABLE_ENTITY_TYPES: frozenset[str] = frozenset({"file"})
+
+    # Maximum number of top-level components exposed per module summary to maintain balanced payloads.
+    MAX_TOP_LEVEL_COMPONENTS: int = 25
+
     async def get_project_architecture(
         self, session: AsyncSession, project_id: str, depth: int = 2
     ) -> ArchitectureResponse | None:
@@ -70,8 +78,14 @@ class GraphService:
             mod_files = {e.file_path for e in mod_entities}
             top_components: list[ComponentSummary] = []
 
-            for e in mod_entities:
-                if e.entity_type in ("class", "function", "interface", "model"):
+            # Sort entities deterministically by (file_path, start_line, name)
+            sorted_entities = sorted(
+                mod_entities,
+                key=lambda e: (e.file_path or "", e.start_line or 0, e.name or ""),
+            )
+
+            for e in sorted_entities:
+                if e.entity_type not in self.NON_DISPLAYABLE_ENTITY_TYPES:
                     comp = ComponentSummary(
                         name=e.name,
                         qualified_name=e.qualified_name,
@@ -79,8 +93,8 @@ class GraphService:
                         file_path=e.file_path,
                         line_range=[e.start_line, e.end_line],
                         signature=e.signature,
-                        dependencies=list(set(outgoing.get(e.qualified_name, [])))[:10],
-                        dependents=list(set(incoming.get(e.qualified_name, [])))[:10],
+                        dependencies=sorted(set(outgoing.get(e.qualified_name, [])))[:10],
+                        dependents=sorted(set(incoming.get(e.qualified_name, [])))[:10],
                     )
                     top_components.append(comp)
 
@@ -91,6 +105,7 @@ class GraphService:
                         or "route" in lower_name
                         or "controller" in lower_name
                         or "service" in lower_name
+                        or e.entity_type == "api"
                     ):
                         primary_apis.append(comp)
                     elif (
@@ -105,7 +120,7 @@ class GraphService:
                     module_path=mod_name,
                     file_count=len(mod_files),
                     entity_count=len(mod_entities),
-                    top_level_components=top_components[:15],
+                    top_level_components=top_components[: self.MAX_TOP_LEVEL_COMPONENTS],
                 )
             )
 

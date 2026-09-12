@@ -525,9 +525,10 @@ def test_p3_3_capabilities_commit_resolution():
 
 def test_p3_4_deterministic_embeddings_refused_in_production():
     """P3-4: Deterministic hash embeddings must raise RuntimeError in production."""
-    with patch.dict(os.environ, {"CORTEX_ENV": "production"}, clear=False):
-        # Temporarily mock PYTEST_CURRENT_TEST to None to test production guard
-        with patch.dict(os.environ, {"PYTEST_CURRENT_TEST": ""}):
-            with pytest.raises(RuntimeError) as exc:
-                get_embedding_provider("local")
-            assert "must not be used in production or staging" in str(exc.value)
+    with (
+        patch.dict(os.environ, {"CORTEX_ENV": "production"}, clear=False),
+        patch.dict(os.environ, {"PYTEST_CURRENT_TEST": ""}),
+    ):
+        with pytest.raises(RuntimeError) as exc:
+            get_embedding_provider("local")
+        assert "must not be used in production or staging" in str(exc.value)
