@@ -31,6 +31,8 @@ dependencies = [
     "mcp>=2.2.0,<3.0.0",
     "tiktoken>=0.14.0",
     "redis>=5.0.0",
+    "argon2-cffi>=23.1.0",
+    "cryptography>=42.0.0",
 ]
 
 [project.optional-dependencies]
